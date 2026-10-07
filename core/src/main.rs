@@ -2555,6 +2555,17 @@ mod tests {
         parent.join(format!("caskrun-test-{}", Uuid::new_v4()))
     }
 
+    /// Discard a test home a refused action may never have created, so a passing
+    /// suite leaves nothing behind. A real removal failure still fails the test.
+    fn remove_test_home(home: PathBuf) {
+        match fs::remove_dir_all(&home) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("Could not remove {}: {error}", home.display()),
+        }
+        assert!(!home.exists());
+    }
+
     #[test]
     fn bottles_are_isolated_and_round_trip() {
         let home = test_home();
@@ -4445,6 +4456,7 @@ mod tests {
         // A refused manifest leaves no bottle behind. A refused version is
         // rejected before any bottle storage is created at all.
         assert!(list(&refused_home).unwrap_or_default().is_empty());
+        remove_test_home(refused_home);
         fs::remove_dir_all(home).unwrap();
         fs::remove_dir_all(restored_home).unwrap();
         fs::remove_dir_all(backup).unwrap();
@@ -4546,6 +4558,7 @@ mod tests {
         let fake_crossover = home.join("CrossOver.app/Data");
         assert!(create(&fake_crossover, "Never create").is_err());
         assert!(!fake_crossover.exists());
+        remove_test_home(other);
         fs::remove_dir_all(home).unwrap();
         fs::remove_dir_all(backup).unwrap();
     }
