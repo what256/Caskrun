@@ -8,7 +8,10 @@ use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::Path;
 use uuid::Uuid;
 
-use crate::{O_NOFOLLOW_ANY, bottle_dir, is_independent_runtime, list_launchers, same_snapshot};
+use crate::{
+    O_NOFOLLOW_ANY, bottle_dir, is_independent_runtime, list_launchers, native_app_identity,
+    same_snapshot,
+};
 
 const RT_ICON: u32 = 3;
 const RT_GROUP_ICON: u32 = 14;
@@ -17,6 +20,141 @@ const MAX_DIRECTORY_ENTRIES: usize = 512;
 const MAX_GROUP_ENTRIES: usize = 64;
 const MAX_ICON_RESOURCE: usize = 8 * 1024 * 1024;
 const MAX_ICO: usize = 16 * 1024 * 1024;
+
+/// Bounded metadata from a program already opened by the native identity
+/// preparer. No code is executed and no host-file cache is read here.
+pub(crate) struct ExecutableArtwork {
+    pub(crate) display_name: Option<String>,
+    pub(crate) generic_installer: bool,
+    pub(crate) ico: Option<Vec<u8>>,
+}
+
+pub(crate) fn executable_artwork(file: &File, length: u64) -> ExecutableArtwork {
+    let Ok(mut reader) = PeIconReader::new(file, length) else {
+        return ExecutableArtwork {
+            display_name: None,
+            generic_installer: false,
+            ico: None,
+        };
+    };
+    let names = reader
+        .leaf(16, None)
+        .ok()
+        .flatten()
+        .and_then(|bytes| version_names(&bytes))
+        .unwrap_or([None, None]);
+    let generic_installer = names[0].as_deref().is_some_and(generic_installer_name);
+    let display_name = preferred_version_name(names);
+    let ico = reader.first_icon().ok().flatten();
+    ExecutableArtwork {
+        display_name,
+        generic_installer,
+        ico,
+    }
+}
+
+// Parse VERSIONINFO's bounded, aligned tree. Reading arbitrary UTF-16 strings
+// from a program could mistake unrelated resource data for its display name.
+fn version_names(bytes: &[u8]) -> Option<[Option<String>; 2]> {
+    fn align4(value: usize) -> Option<usize> {
+        value.checked_add(3).map(|v| v & !3)
+    }
+    fn visit(
+        bytes: &[u8],
+        offset: usize,
+        limit: usize,
+        depth: usize,
+        budget: &mut usize,
+        names: &mut [Option<String>; 2],
+    ) -> Option<usize> {
+        if depth > 8 || *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        let length = u16_le(bytes, offset).ok()? as usize;
+        let value_length = u16_le(bytes, offset.checked_add(2)?).ok()? as usize;
+        let kind = u16_le(bytes, offset.checked_add(4)?).ok()?;
+        let end = offset.checked_add(length)?;
+        if length < 8 || end > limit || end > bytes.len() {
+            return None;
+        }
+        let mut cursor = offset.checked_add(6)?;
+        let mut key = Vec::new();
+        loop {
+            if cursor.checked_add(2)? > end || key.len() > 128 {
+                return None;
+            }
+            let character = u16_le(bytes, cursor).ok()?;
+            cursor += 2;
+            if character == 0 {
+                break;
+            }
+            key.push(character);
+        }
+        let key = String::from_utf16(&key).ok()?;
+        let value_start = align4(cursor)?;
+        let value_bytes = value_length.checked_mul(if kind == 1 { 2 } else { 1 })?;
+        let value_end = value_start.checked_add(value_bytes)?;
+        if value_end > end {
+            return None;
+        }
+        let name_index = match key.as_str() {
+            "FileDescription" => Some(0),
+            "ProductName" => Some(1),
+            _ => None,
+        };
+        if let Some(index) = name_index.filter(|_| kind == 1 && value_length <= 256) {
+            let characters: Vec<u16> = bytes[value_start..value_end]
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .take_while(|character| *character != 0)
+                .collect();
+            names[index] = String::from_utf16(&characters)
+                .ok()
+                .filter(|name| !name.trim().is_empty() && !name.chars().any(char::is_control));
+        }
+        cursor = align4(value_end)?;
+        while cursor.checked_add(8)? <= end {
+            let child_end = visit(bytes, cursor, end, depth + 1, budget, names)?;
+            let next = align4(child_end)?;
+            if next <= cursor {
+                return None;
+            }
+            cursor = next;
+        }
+        Some(end)
+    }
+    if bytes.len() > 256 * 1024 {
+        return None;
+    }
+    let mut names = [None, None];
+    visit(bytes, 0, bytes.len(), 0, &mut 512, &mut names)?;
+    Some(names)
+}
+
+fn generic_installer_name(name: &str) -> bool {
+    let normalized: String = name
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != '/')
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "setupuninstall" | "setup" | "installer"
+    )
+}
+
+fn preferred_version_name(mut names: [Option<String>; 2]) -> Option<String> {
+    names[0]
+        .take()
+        .filter(|name| !generic_installer_name(name))
+        .or_else(|| names[1].take().filter(|name| !generic_installer_name(name)))
+}
+
+#[cfg(test)]
+fn version_display_name(bytes: &[u8]) -> Option<String> {
+    preferred_version_name(version_names(bytes)?)
+}
 
 #[derive(Serialize)]
 pub(crate) struct IconResult {
@@ -33,6 +171,12 @@ pub(crate) fn app_icon(
         .into_iter()
         .find(|item| item.id == launcher_id)
         .ok_or("Launcher not found in this bottle")?;
+    if let Some(path) = native_app_identity::cached_icon(home, bottle_id, Path::new(&launcher.path))
+    {
+        return Ok(IconResult {
+            path: Some(path.display().to_string()),
+        });
+    }
     extract_for_launcher(&bottle, launcher_id, Path::new(&launcher.path))
 }
 
@@ -41,6 +185,13 @@ pub(crate) fn bottle_icon(home: &Path, bottle_id: &str) -> Result<IconResult, St
     // A bottle may contain a removed app or an EXE without icon resources.
     // Prefer the first installed program that can provide its own artwork.
     for launcher in list_launchers(home, bottle_id)?.into_iter().take(64) {
+        if let Some(path) =
+            native_app_identity::cached_icon(home, bottle_id, Path::new(&launcher.path))
+        {
+            return Ok(IconResult {
+                path: Some(path.display().to_string()),
+            });
+        }
         let icon = extract_for_launcher(&bottle, &launcher.id, Path::new(&launcher.path))?;
         if icon.path.is_some() {
             return Ok(icon);
@@ -384,8 +535,166 @@ fn u32_le(data: &[u8], offset: usize) -> Result<u32, String> {
 }
 
 #[cfg(test)]
+pub(crate) fn fixture_pe_with_version(description: &str, product: &str) -> Vec<u8> {
+    tests::pe_with_version(description, product)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_pe_with_icon() -> Vec<u8> {
+    let mut bytes = tests::pe_with_icon();
+    bytes[0x84..0x86].copy_from_slice(&0x014c_u16.to_le_bytes());
+    bytes
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn version_node(key: &str, value: &[u16], children: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 6];
+        bytes[2..4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+        bytes[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        for unit in key.encode_utf16().chain(std::iter::once(0)) {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        while bytes.len() % 4 != 0 {
+            bytes.push(0);
+        }
+        for unit in value {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        for child in children {
+            while bytes.len() % 4 != 0 {
+                bytes.push(0);
+            }
+            bytes.extend_from_slice(child);
+        }
+        let size = bytes.len() as u16;
+        bytes[..2].copy_from_slice(&size.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn version_names_prefer_file_description_and_reject_invalid_text() {
+        let text = |value: &str| {
+            value
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>()
+        };
+        let product = version_node("ProductName", &text("Game product"), &[]);
+        let description = version_node("FileDescription", &text("Game window"), &[]);
+        let root = version_node("VS_VERSION_INFO", &[], &[product.clone(), description]);
+        assert_eq!(version_display_name(&root).as_deref(), Some("Game window"));
+        for value in [vec![0xd800, 0], text("Bad\nname"), vec![b'A' as u16; 257]] {
+            let bad = version_node("FileDescription", &value, &[]);
+            let root = version_node("VS_VERSION_INFO", &[], &[product.clone(), bad]);
+            assert_eq!(version_display_name(&root).as_deref(), Some("Game product"));
+        }
+        let mut invalid_key = version_node("A", &[], &[]);
+        invalid_key[6..8].copy_from_slice(&0xd800_u16.to_le_bytes());
+        assert!(version_display_name(&invalid_key).is_none());
+    }
+
+    #[test]
+    fn generic_setup_description_uses_specific_product_or_filename_fallback() {
+        let text = |value: &str| {
+            value
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>()
+        };
+        for description in [
+            "Setup/Uninstall",
+            "Setup / Uninstall",
+            "setup uninstall",
+            "SETUP",
+            "Installer",
+        ] {
+            let root = version_node(
+                "VS_VERSION_INFO",
+                &[],
+                &[
+                    version_node("FileDescription", &text(description), &[]),
+                    version_node("ProductName", &text("Original Example Game"), &[]),
+                ],
+            );
+            assert_eq!(
+                version_display_name(&root).as_deref(),
+                Some("Original Example Game")
+            );
+            let root = version_node(
+                "VS_VERSION_INFO",
+                &[],
+                &[
+                    version_node("FileDescription", &text(description), &[]),
+                    version_node("ProductName", &text("Setup / Uninstall"), &[]),
+                ],
+            );
+            assert!(version_display_name(&root).is_none());
+        }
+    }
+
+    pub(super) fn pe_with_version(description: &str, product: &str) -> Vec<u8> {
+        let text = |value: &str| {
+            value
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>()
+        };
+        let root = version_node(
+            "VS_VERSION_INFO",
+            &[],
+            &[
+                version_node("FileDescription", &text(description), &[]),
+                version_node("ProductName", &text(product), &[]),
+            ],
+        );
+        let resource_size = 0x80 + root.len();
+        let mut pe = vec![0u8; 0x200 + resource_size];
+        pe[..2].copy_from_slice(b"MZ");
+        put_u32(&mut pe, 60, 0x80);
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        put_u16(&mut pe, 0x84, 0x14c);
+        put_u16(&mut pe, 0x86, 1);
+        put_u16(&mut pe, 0x94, 0xe0);
+        put_u16(&mut pe, 0x98, 0x10b);
+        put_u32(&mut pe, 0x98 + 112, 0x1000);
+        put_u32(&mut pe, 0x98 + 116, resource_size as u32);
+        let section = 0x80 + 24 + 0xe0;
+        put_u32(&mut pe, section + 12, 0x1000);
+        put_u32(&mut pe, section + 16, resource_size as u32);
+        put_u32(&mut pe, section + 20, 0x200);
+        for (offset, id, next) in [(0, 16, 0x20), (0x20, 1, 0x40)] {
+            put_u16(&mut pe, 0x200 + offset + 14, 1);
+            put_u32(&mut pe, 0x200 + offset + 16, id);
+            put_u32(&mut pe, 0x200 + offset + 20, 0x8000_0000 | next);
+        }
+        put_u16(&mut pe, 0x240 + 14, 1);
+        put_u32(&mut pe, 0x240 + 16, 1033);
+        put_u32(&mut pe, 0x240 + 20, 0x60);
+        put_u32(&mut pe, 0x260, 0x1080);
+        put_u32(&mut pe, 0x264, root.len() as u32);
+        pe[0x280..].copy_from_slice(&root);
+        pe
+    }
+
+    #[test]
+    fn version_tree_limits_reject_deep_and_truncated_metadata() {
+        let mut nested = version_node("FileDescription", &[b'G' as u16, 0], &[]);
+        for _ in 0..10 {
+            nested = version_node("Container", &[], &[nested]);
+        }
+        assert!(version_display_name(&nested).is_none());
+        let valid = version_node("FileDescription", &[b'G' as u16, 0], &[]);
+        for end in 0..valid.len() {
+            assert!(version_display_name(&valid[..end]).is_none());
+        }
+        let mut invalid_size = valid;
+        invalid_size[2..4].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(version_display_name(&invalid_size).is_none());
+        assert!(version_display_name(&vec![0; 256 * 1024 + 1]).is_none());
+    }
 
     fn test_path(label: &str) -> std::path::PathBuf {
         let build = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -407,7 +716,7 @@ mod tests {
     // Minimal PE32 image with an RT_GROUP_ICON pointing to one RT_ICON. The
     // payload is deliberately tiny; the test checks container extraction,
     // while the live Steam smoke covers macOS image decoding.
-    fn pe_with_icon() -> Vec<u8> {
+    pub(super) fn pe_with_icon() -> Vec<u8> {
         let mut pe = vec![0u8; 0x400];
         pe[..2].copy_from_slice(b"MZ");
         put_u32(&mut pe, 60, 0x80);

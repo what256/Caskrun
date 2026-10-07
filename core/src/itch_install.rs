@@ -21,7 +21,10 @@ const REDIRECT_TIMEOUT: Duration = Duration::from_secs(35);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(12 * 60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const LAUNCHER_APPEAR_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-pub(super) const ITCH_LAUNCH_ARGS: [&str; 3] = ["--prefer-launch", "--appname", "itch"];
+// itch-setup is a stable proxy: its own flags precede `--`, and everything
+// after it belongs to the current itch app, not to the setup/update helper.
+// https://github.com/itchio/itch-setup#launching-the-app
+pub(super) const ITCH_LAUNCH_ARGS: [&str; 4] = ["--prefer-launch", "--appname", "itch", "--"];
 
 #[derive(Serialize)]
 pub(super) struct ItchCatalogInstallResult {
@@ -702,10 +705,18 @@ case "$1" in
     fi
     exit {exit_code};;
   *"/AppData/Local/itch/itch-setup.exe")
-    test "$#" -eq 4 || exit 94
+    test "$#" -ge 5 || exit 94
     test "$2" = --prefer-launch || exit 95
     test "$3" = --appname || exit 96
     test "$4" = itch || exit 97
+    test "$5" = -- || exit 98
+    shift 5
+    echo bootstrap-argument-separator
+    index=0
+    for argument in "$@"; do
+      printf 'app-arg%s=%s\n' "$index" "$argument"
+      index=$((index + 1))
+    done
     echo launched-itch; exit 0;;
   *) exit 93;;
 esac
@@ -822,7 +833,58 @@ esac
             CatalogStage::Installed
         );
         assert!(Path::new(&installed.install_log_path).is_file());
+        let initial_output = completed_launch_output(&installed.launch);
+        assert!(
+            initial_output.contains("bootstrap-argument-separator\n"),
+            "{initial_output}"
+        );
+        assert!(!initial_output.contains("app-arg"), "{initial_output}");
+
+        let saved = vec!["--profile".to_owned(), "two words".to_owned()];
+        set_launcher_arguments(&home, &installed.bottle.id, &installed.launcher.id, &saved)
+            .unwrap();
+        let temporary = vec![
+            "--disable-gpu".to_owned(),
+            "itch://install?game_id=123&launch".to_owned(),
+        ];
+        let reopened = run_launcher_with_wine(
+            &home,
+            &installed.bottle.id,
+            &installed.launcher.id,
+            &wine,
+            &temporary,
+        )
+        .unwrap();
+        let output = completed_launch_output(&reopened);
+        assert_eq!(
+            output.matches("bootstrap-argument-separator\n").count(),
+            1,
+            "{output}"
+        );
+        for (index, argument) in saved.iter().chain(&temporary).enumerate() {
+            assert_eq!(
+                output
+                    .matches(&format!("app-arg{index}={argument}\n"))
+                    .count(),
+                1,
+                "{output}"
+            );
+        }
+        assert!(!output.contains("app-arg4="), "{output}");
         fs::remove_dir_all(home).unwrap();
+    }
+
+    fn completed_launch_output(launch: &LaunchResult) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = String::new();
+        while Instant::now() < deadline {
+            output = fs::read_to_string(&launch.log_path).unwrap();
+            if output.contains("launched-itch\n") {
+                return output;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("itch bootstrap did not finish with its checked arguments: {output}");
     }
 
     #[test]

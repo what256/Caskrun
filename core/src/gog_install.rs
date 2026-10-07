@@ -16,7 +16,13 @@ const MANIFEST_URL: &str =
 const DOWNLOAD_PAGE: &str = "https://www.gog.com/galaxy";
 const CONTENT_SYSTEM_PREFIX: &str =
     "https://content-system.gog.com/open_link/download?path=/open/galaxy/client/";
-const CDN_PREFIX: &str = "https://gog-cdn-fastly.gog.com/open/galaxy/client/";
+// Both destinations are reviewed exact HTTPS hosts and installer paths. GOG's
+// content-system endpoint redirected to gcdn.co on 2026-10-07. Retain the
+// separately reviewed Fastly destination as well.
+const CDN_PREFIXES: [&str; 2] = [
+    "https://gog-cdn-fastly.gog.com/open/galaxy/client/",
+    "https://gog-cdn.gcdn.co/open/galaxy/client/",
+];
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_HEADER_BYTES: u64 = 64 * 1024;
 const MIN_INSTALLER_BYTES: u64 = 1024 * 1024;
@@ -103,11 +109,16 @@ fn checked_content_url(url: &str) -> Result<&str, String> {
     checked_installer_name(path)
 }
 
-pub(super) fn checked_gog_installer_url(url: &str) -> Result<(), String> {
-    let path = url
-        .strip_prefix(CDN_PREFIX)
+fn checked_cdn_version(url: &str) -> Result<&str, String> {
+    let path = CDN_PREFIXES
+        .iter()
+        .find_map(|prefix| url.strip_prefix(prefix))
         .ok_or("GOG installer redirected to an unreviewed host or path")?;
-    checked_installer_name(path)?;
+    checked_installer_name(path)
+}
+
+pub(super) fn checked_gog_installer_url(url: &str) -> Result<(), String> {
+    checked_cdn_version(url)?;
     Ok(())
 }
 
@@ -360,12 +371,7 @@ fn download_gog_installer(home: &Path) -> Result<DownloadedInstaller, String> {
             FETCH_TIMEOUT,
         )?;
         let download_url = redirect_location(&read_bounded(&mut headers, MAX_HEADER_BYTES)?)?;
-        checked_gog_installer_url(&download_url)?;
-        let destination_version = checked_installer_name(
-            download_url
-                .strip_prefix(CDN_PREFIX)
-                .ok_or("Invalid GOG CDN URL")?,
-        )?;
+        let destination_version = checked_cdn_version(&download_url)?;
         if destination_version != installer.version {
             return Err("GOG installer redirect changed its version".into());
         }
@@ -779,6 +785,42 @@ esac
         assert!(parse_manifest(deprecated.as_bytes()).is_err());
         let wrong_size = manifest.replace("342291968", "9");
         assert!(parse_manifest(wrong_size.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn accepts_current_publisher_cdn_without_broadening_host_or_path_rules() {
+        let current = "https://gog-cdn.gcdn.co/open/galaxy/client/setup_galaxy_2.1.10.56.exe";
+        let versioned =
+            "https://gog-cdn.gcdn.co/open/galaxy/client/2.1.10.56/setup_galaxy_2.1.10.56.exe";
+        assert!(checked_gog_installer_url(current).is_ok());
+        assert!(checked_gog_installer_url(versioned).is_ok());
+        assert_eq!(checked_cdn_version(current).unwrap(), "2.1.10.56");
+        assert_eq!(checked_cdn_version(versioned).unwrap(), "2.1.10.56");
+        for wrong in [
+            "http://gog-cdn.gcdn.co/open/galaxy/client/setup_galaxy_2.1.10.56.exe",
+            "https://gog-cdn.gcdn.co.evil.test/open/galaxy/client/setup_galaxy_2.1.10.56.exe",
+            "https://gog-cdn.gcdn.co@evil.test/open/galaxy/client/setup_galaxy_2.1.10.56.exe",
+            concat!(
+                "https://",
+                "user@",
+                "gog-cdn.gcdn.co/open/galaxy/client/setup_galaxy_2.1.10.56.exe"
+            ),
+            "https://gog-cdn.gcdn.co:443/open/galaxy/client/setup_galaxy_2.1.10.56.exe",
+            "https://other.gcdn.co/open/galaxy/client/setup_galaxy_2.1.10.56.exe",
+            "https://gog-cdn.gcdn.co/other/setup_galaxy_2.1.10.56.exe",
+            "https://gog-cdn.gcdn.co/open/galaxy/client/2.1.10.57/setup_galaxy_2.1.10.56.exe",
+            "https://gog-cdn.gcdn.co/open/galaxy/client/setup_galaxy_2.1.10.56.exe?next=evil",
+            "https://gog-cdn.gcdn.co/open/galaxy/client/setup_galaxy_2.1.10.56.exe#fragment",
+            "https://gog-cdn.gcdn.co/open/galaxy/client/../setup_galaxy_2.1.10.56.exe",
+            "https://gog-cdn.gcdn.co/open/galaxy/client/%2e%2e/setup_galaxy_2.1.10.56.exe",
+        ] {
+            assert!(
+                checked_gog_installer_url(wrong).is_err(),
+                "accepted {wrong}"
+            );
+        }
+        let headers = format!("HTTP/2 302\r\nLocation: {current}\r\n\r\n");
+        assert_eq!(redirect_location(headers.as_bytes()).unwrap(), current);
     }
 
     #[test]

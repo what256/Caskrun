@@ -145,6 +145,17 @@ fn simulate_reboot_with_wine(
     bottle_control::assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
     let mut command = Command::new(wineboot);
     bottle_xdg::for_bottle(&dir)?.apply(&mut command);
+    native_app_identity::configure_launch(
+        &mut command,
+        home,
+        id,
+        wine,
+        &wine
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("Wine runtime has no package directory")?
+            .join("runtime/lib/wine/x86_64-windows/wineboot.exe"),
+    )?;
     // In pinned Wine 11.0, --restart alone does not end the current session.
     // --end-session requests a clean close; --kill ends remaining processes
     // only after that succeeds. Normal startup then runs inside this prefix.

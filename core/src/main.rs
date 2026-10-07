@@ -9,6 +9,8 @@ mod epic_install;
 mod gog_install;
 mod installed_apps;
 mod itch_install;
+mod native_app_identity;
+mod prefix_processes;
 mod publisher_install;
 mod rockstar_install;
 mod runtime_identity;
@@ -1153,6 +1155,7 @@ fn duplicate_bottle_with_runtime(
                 "launchers.json",
                 ".caskrun.lock",
                 "active-processes.json",
+                "native-apps",
             ],
         )?;
         bottle_xdg::for_bottle(&destination)?;
@@ -1234,6 +1237,7 @@ fn export_bottle_with_runtime(
                 "prefix-record.json",
                 ".caskrun.lock",
                 "active-processes.json",
+                "native-apps",
             ],
         )?;
         save_json(&output.join("manifest.json"), &manifest)?;
@@ -1278,6 +1282,7 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
         "prefix-record.json",
         ".caskrun.lock",
         "active-processes.json",
+        "native-apps",
     ] {
         if fs::symlink_metadata(payload.join(reserved)).is_ok() {
             return Err(format!(
@@ -1938,6 +1943,17 @@ fn ensure_prefix_with_wine_timeout(
     let errors = log.try_clone().map_err(|e| e.to_string())?;
     let mut command = Command::new(wineboot);
     xdg.apply(&mut command);
+    native_app_identity::configure_launch(
+        &mut command,
+        home,
+        id,
+        wine,
+        &wine
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("Wine runtime has no package directory")?
+            .join("runtime/lib/wine/x86_64-windows/wineboot.exe"),
+    )?;
     cancellation::check()?;
     let mut child = command
         .arg("--init")
@@ -2218,6 +2234,7 @@ fn start_launch_with_wine_checked(
     if flags.quiet_msi {
         cmd.arg("/qn");
     }
+    native_app_identity::configure_launch(&mut cmd, home, id, wine, &installer)?;
     cmd.args(arguments)
         .env("WINEPREFIX", dir.join("prefix"))
         .current_dir(
@@ -2250,7 +2267,7 @@ fn run() -> Result<(), String> {
     if args.first().is_some_and(|command| {
         matches!(
             command.as_str(),
-            "launch-wait" | "install-catalog" | "retry-catalog"
+            "launch-wait" | "install-catalog" | "retry-catalog" | "quit-all-bottles"
         )
     }) {
         cancellation::activate_from_stdin();
@@ -2258,6 +2275,15 @@ fn run() -> Result<(), String> {
     cancellation::check()?;
     let home = data_home()?;
     ensure_independent_storage(&home)?;
+    // Internal native-loader callback. This returns a plain path over a
+    // bounded pipe, and never launches an app or takes its parent's lock.
+    if let [command, id, image] = args.as_slice()
+        && command == "prepare-native-app"
+    {
+        let loader = native_app_identity::prepare(&home, id, Path::new(image))?;
+        println!("{}", loader.display());
+        return Ok(());
+    }
     let json = match args.as_slice() {
         [command] if command == "status" => serde_json::to_value(Status {
             wine_path: wine_path().map(|p| p.display().to_string()),
@@ -2877,6 +2903,48 @@ mod tests {
         assert!(
             launcher_arguments(false, false, &vec!["saved".to_owned(); 64], &user_arguments)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn itch_app_options_follow_bootstrap_separator_without_changing_manual_apps() {
+        let saved = vec!["--profile".to_owned(), "two words".to_owned()];
+        let temporary = parse_run_app_arguments(&[
+            "--".to_owned(),
+            "--disable-gpu".to_owned(),
+            "itch://install?game_id=123&launch".to_owned(),
+        ])
+        .unwrap();
+        let itch_arguments = launcher_arguments(false, true, &saved, &temporary).unwrap();
+        assert_eq!(
+            itch_arguments,
+            vec![
+                "--prefer-launch",
+                "--appname",
+                "itch",
+                "--",
+                "--profile",
+                "two words",
+                "--disable-gpu",
+                "itch://install?game_id=123&launch",
+            ]
+        );
+        assert_eq!(
+            itch_arguments
+                .iter()
+                .filter(|argument| *argument == "--")
+                .count(),
+            1
+        );
+        assert_eq!(
+            launcher_arguments(false, false, &saved, &temporary).unwrap(),
+            saved.iter().chain(&temporary).cloned().collect::<Vec<_>>()
+        );
+        // A separator supplied as an app argument is literal data after the
+        // proxy's separator; it must not be removed or treated as helper flags.
+        assert_eq!(
+            launcher_arguments(false, true, &[], &["--".to_owned(), "value".to_owned()]).unwrap(),
+            vec!["--prefer-launch", "--appname", "itch", "--", "--", "value"]
         );
     }
 
@@ -3923,6 +3991,10 @@ mod tests {
             },
         )
         .unwrap();
+        let cache = source.join("native-apps/Example.app/Contents/MacOS");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("WindowsApp"), b"generated native loader").unwrap();
+        symlink("/", source.join("native-apps/untrusted-host-link")).unwrap();
         let external = home.join("external.exe");
         fs::write(&external, b"external program").unwrap();
         add_launcher(&home, &original.id, "Installed", &installed).unwrap();
@@ -3933,6 +4005,7 @@ mod tests {
                 .unwrap();
         assert_ne!(duplicate.id, original.id);
         let duplicate_dir = bottle_dir(&home, &duplicate.id).unwrap();
+        assert!(!duplicate_dir.join("native-apps").exists());
         assert_eq!(
             fs::read(duplicate_dir.join("prefix/drive_c/Game/game.exe")).unwrap(),
             b"installed program"
@@ -3982,6 +4055,20 @@ mod tests {
         assert!(backup.join("manifest.json").is_file());
         assert!(!backup.join("payload/prefix-record.json").exists());
         assert!(!backup.join("payload/bottle.json").exists());
+        assert!(!backup.join("payload/native-apps").exists());
+        assert_eq!(
+            fs::read(cache.join("WindowsApp")).unwrap(),
+            b"generated native loader"
+        );
+        // Imported archives cannot inject host executable cache either.
+        fs::create_dir(backup.join("payload/native-apps")).unwrap();
+        assert!(
+            import_bottle(&home, &backup, None)
+                .err()
+                .unwrap()
+                .contains("reserved metadata: native-apps")
+        );
+        fs::remove_dir(backup.join("payload/native-apps")).unwrap();
         let restored_home = test_home();
         let restored = import_bottle(&restored_home, &backup, Some("Restored game")).unwrap();
         assert_eq!(restored.external_launchers, 1);

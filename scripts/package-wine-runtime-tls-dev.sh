@@ -19,6 +19,11 @@ case "${CASKRUN_TLS_VARIANT:-tls}" in
     wine_build="$repo/.build/wine-steam-11.0-cef-dock-dev/build"
     default_package=steam-wine-runtime-dev
     ;;
+  native-apps)
+    stage="$repo/.build/wine-native-apps-11.0-dev/stage"
+    wine_build="$repo/.build/wine-native-apps-11.0-dev/build"
+    default_package=native-apps-wine-runtime-dev
+    ;;
   *)
     printf 'Unknown TLS Wine variant.\n' >&2
     exit 64
@@ -85,7 +90,7 @@ verify_sha256 fe9ff51cb1f2abb5e65a6b8c10a92da0ab5ab6eaf26e7fc2b675c45f1fb519b5 \
 verify_sha256 ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e \
   "$repo/.build/tls-probe/sources/gnutls-3.8.13.tar.xz"
 
-if [ "${CASKRUN_TLS_VARIANT:-tls}" = steam ]; then
+if [ "${CASKRUN_TLS_VARIANT:-tls}" != tls ]; then
   source_meta="$stage/caskrun-source"
   for input in "$stage/lib/wine/x86_64-unix/Steam" \
     "$source_meta/wine-11.0.tar.xz" \
@@ -114,10 +119,21 @@ if [ "${CASKRUN_TLS_VARIANT:-tls}" = steam ]; then
   /usr/bin/codesign --verify --strict "$stage/lib/wine/x86_64-unix/Steam"
 fi
 
+if [ "${CASKRUN_TLS_VARIANT:-tls}" = native-apps ]; then
+  verify_sha256 f860b3a32a34d807319827c8a03298b1c24a705fa7075dc3a32cca7567c2d0ab \
+    "$source_meta/patches/wine-11.0-native-app-identity.patch"
+  verify_sha256 cbb1781ded5b61bf7d3c7a87315aa54bce151879a073132216d043a9124eb7d5 \
+    "$source_meta/patches/native_app_info.plist.in"
+  verify_sha256 ee6957ce414da832719b31ec7eb66378477094af9004fa2a2f3bfc8f82fa03d0 \
+    "$source_meta/patches/native_icon.swift"
+  /usr/bin/codesign --verify --strict "$stage/lib/wine/x86_64-unix/WindowsApp"
+  [ -f "$repo/assets/caskrun-icon.png" ] || exit 66
+fi
+
 mkdir -p "$tmp/bin" "$tmp/lib" "$tmp/licenses"
 trap 'if [ -d "$tmp" ]; then mv "$tmp" "$tmp.incomplete"; fi' EXIT HUP INT TERM
 /bin/cp -cR "$stage" "$tmp/runtime"
-if [ "${CASKRUN_TLS_VARIANT:-tls}" = steam ]; then
+if [ "${CASKRUN_TLS_VARIANT:-tls}" != tls ]; then
   /bin/mv "$tmp/runtime/caskrun-source" "$tmp/source"
 fi
 /bin/cp -cR "$stable/licenses/." "$tmp/licenses/"
@@ -134,6 +150,24 @@ chmod 755 "$tmp/bin/_dispatch"
 ln -s _dispatch "$tmp/bin/wine"
 ln -s _dispatch "$tmp/bin/wineboot"
 ln -s _dispatch "$tmp/bin/wineserver"
+if [ "${CASKRUN_TLS_VARIANT:-tls}" = native-apps ]; then
+  /usr/bin/swiftc -O -target arm64-apple-macos13 \
+    "$tmp/source/patches/native_icon.swift" -o "$tmp/bin/native-icon"
+  /usr/bin/codesign --force --sign - "$tmp/bin/native-icon"
+  /usr/bin/codesign --verify --strict "$tmp/bin/native-icon"
+  [ "$(/usr/bin/lipo -archs "$tmp/bin/native-icon")" = arm64 ] || exit 65
+  /bin/cp "$repo/assets/caskrun-icon.png" "$tmp/native-default-icon.png"
+  mkdir "$tmp/.native-icon-fallback"
+  chmod 700 "$tmp/.native-icon-fallback"
+  "$tmp/bin/native-icon" --input "$tmp/native-default-icon.png" \
+    --output "$tmp/.native-icon-fallback/app.icns" --png-output "$tmp/.native-icon-fallback/app.png"
+  mv "$tmp/.native-icon-fallback/app.icns" "$tmp/native-default-icon.icns"
+  mv "$tmp/.native-icon-fallback/app.png" "$tmp/native-default-rendered.png"
+  rmdir "$tmp/.native-icon-fallback"
+  printf 'caskrun-native-app-identity-v1\n' > "$tmp/native-app-identity.txt"
+  /bin/cp "$repo/LICENSE" "$tmp/licenses/Caskrun-MIT.txt"
+fi
+
 
 # The build tree is local and the package is a development artifact, so ad-hoc
 # sign its Unix Mach-O copies after staging. PE files are left untouched.
@@ -151,7 +185,7 @@ find "$tmp/runtime/bin" "$tmp/runtime/lib/wine/x86_64-unix" -type f -print | whi
   esac
 done
 /usr/bin/codesign --verify --strict "$tmp/lib/libfreetype.6.dylib" "$tmp/lib/libgnutls.30.dylib"
-if [ "${CASKRUN_TLS_VARIANT:-tls}" = steam ]; then
+if [ "${CASKRUN_TLS_VARIANT:-tls}" != tls ]; then
   /usr/bin/codesign --verify --strict "$tmp/runtime/lib/wine/x86_64-unix/Steam"
 fi
 
@@ -171,7 +205,7 @@ find "$tmp/runtime/bin" "$tmp/runtime/lib/wine/x86_64-unix" "$tmp/lib" -type f -
   esac
 done
 
-if [ "${CASKRUN_TLS_VARIANT:-tls}" = steam ]; then
+if [ "${CASKRUN_TLS_VARIANT:-tls}" != tls ]; then
   /bin/cp "$tmp/source/licenses/Wine-LICENSE.txt" "$tmp/licenses/Wine-LICENSE.txt"
   /bin/cp "$tmp/source/licenses/Wine-LGPL-2.1.txt" "$tmp/licenses/Wine-LGPL-2.1.txt"
 else
@@ -202,7 +236,7 @@ FreeType, Wine Mono, and Wine Gecko inputs copied from the existing independent
 development package; see docs/LOCAL_WINE_RUNTIME.md and its SOURCES.txt.
 All dependencies were built or downloaded independently of CrossOver.
 EOF
-if [ "${CASKRUN_TLS_VARIANT:-tls}" = steam ]; then
+if [ "${CASKRUN_TLS_VARIANT:-tls}" != tls ]; then
   cat >> "$tmp/SOURCES.txt" <<'EOF'
 
 Caskrun's reviewed Wine 11.0 Steam patches, signed native Steam loader alias,
@@ -222,6 +256,28 @@ EOF
     printf 'Relocated Steam Wine package did not report wine-11.0: %s\n' "$version" >&2
     exit 65
   fi
+fi
+
+if [ "${CASKRUN_TLS_VARIANT:-tls}" = native-apps ]; then
+  /usr/bin/codesign --verify --strict "$tmp/runtime/lib/wine/x86_64-unix/WindowsApp"
+  cat >> "$tmp/SOURCES.txt" <<'EOF'
+
+Caskrun original per-EXE macOS identity extension: source/patches/wine-11.0-native-app-identity.patch
+SHA-256: f860b3a32a34d807319827c8a03298b1c24a705fa7075dc3a32cca7567c2d0ab
+Neutral native loader plist: source/patches/native_app_info.plist.in
+SHA-256: cbb1781ded5b61bf7d3c7a87315aa54bce151879a073132216d043a9124eb7d5
+Original ARM64 icon renderer: source/patches/native_icon.swift (compiled as bin/native-icon)
+SHA-256: ee6957ce414da832719b31ec7eb66378477094af9004fa2a2f3bfc8f82fa03d0
+Fallback artwork: original Caskrun assets/caskrun-icon.png; Caskrun MIT license.
+Generated macOS bundles and vendor artwork stay in the user's regenerable bottle cache.
+They are excluded from portable exports and never bundled with this runtime source.
+EOF
+  /usr/bin/otool -L "$tmp/bin/native-icon" | /usr/bin/awk 'NR > 1 { print $1 }' | while IFS= read -r dependency; do
+    case "$dependency" in
+      /usr/lib/*|/System/Library/*|@rpath/*|@loader_path/*|@executable_path/*) ;;
+      *) printf 'External native icon utility dependency.\n' >&2; exit 65 ;;
+    esac
+  done
 fi
 
 mv "$tmp" "$target"

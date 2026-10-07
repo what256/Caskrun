@@ -321,12 +321,52 @@ fn epic_launcher_in_prefix(prefix: &Path) -> Option<PathBuf> {
     let real_prefix = prefix.canonicalize().ok()?;
     CANDIDATES.iter().find_map(|candidate| {
         let path = prefix.join("drive_c").join(candidate);
-        if !path_is_real_file(&path) {
+        let before = fs::symlink_metadata(&path).ok()?;
+        if !before.file_type().is_file() {
+            return None;
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW_ANY)
+            .open(&path)
+            .ok()?;
+        if !same_snapshot(&before, &file.metadata().ok()?) {
             return None;
         }
         let real = path.canonicalize().ok()?;
-        real.starts_with(&real_prefix).then_some(real)
+        if !real.starts_with(&real_prefix) || !supported_launcher_pe(&mut file, before.len()) {
+            return None;
+        }
+        if !same_snapshot(&before, &file.metadata().ok()?)
+            || !same_snapshot(&before, &fs::symlink_metadata(&path).ok()?)
+        {
+            return None;
+        }
+        Some(real)
     })
+}
+
+// A filename and successful setup exit cannot establish that an executable
+// was fully written. Use the same bounded x86/x64 PE check as other recipes.
+fn supported_launcher_pe(file: &mut File, length: u64) -> bool {
+    if length < 70 || file.seek(SeekFrom::Start(0)).is_err() {
+        return false;
+    }
+    let mut dos = [0_u8; 64];
+    if file.read_exact(&mut dos).is_err() || &dos[..2] != b"MZ" {
+        return false;
+    }
+    let offset = u32::from_le_bytes(dos[0x3c..0x40].try_into().unwrap()) as u64;
+    if offset < 64
+        || offset > length.saturating_sub(6)
+        || file.seek(SeekFrom::Start(offset)).is_err()
+    {
+        return false;
+    }
+    let mut pe = [0_u8; 6];
+    file.read_exact(&mut pe).is_ok()
+        && &pe[..4] == b"PE\0\0"
+        && matches!(u16::from_le_bytes([pe[4], pe[5]]), 0x014c | 0x8664)
 }
 
 fn wait_for_epic_launcher(prefix: &Path) -> Result<Option<PathBuf>, String> {
@@ -592,7 +632,7 @@ mod tests {
     fn fake_wine(home: &Path, installer_exit: i32) -> PathBuf {
         let wine = home.join("wine");
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\n  msiexec)\n    test \"$2\" = /i || exit 91\n    test \"$3\" != /qn || exit 92\n    echo installing >> \"$WINEPREFIX/installer-invocations.txt\"\n    if test {installer_exit} -eq 0; then\n      mkdir -p \"$WINEPREFIX/drive_c/Program Files (x86)/Epic Games/Launcher/Portal/Binaries/Win64\"\n      touch \"$WINEPREFIX/drive_c/Program Files (x86)/Epic Games/Launcher/Portal/Binaries/Win64/EpicGamesLauncher.exe\"\n    fi\n    exit {installer_exit};;\n  *EpicGamesLauncher.exe) echo launched-Epic; exit 0;;\n  *) exit 93;;\nesac\n"
+            "#!/bin/sh\ncase \"$1\" in\n  msiexec)\n    test \"$2\" = /i || exit 91\n    test \"$3\" != /qn || exit 92\n    echo installing >> \"$WINEPREFIX/installer-invocations.txt\"\n    if test {installer_exit} -eq 0; then\n      mkdir -p \"$WINEPREFIX/drive_c/Program Files (x86)/Epic Games/Launcher/Portal/Binaries/Win64\"\n      launcher=\"$WINEPREFIX/drive_c/Program Files (x86)/Epic Games/Launcher/Portal/Binaries/Win64/EpicGamesLauncher.exe\"\n      printf 'MZ' > \"$launcher\"\n      dd if=/dev/zero bs=1 count=58 2>/dev/null >> \"$launcher\"\n      printf '\\100\\000\\000\\000PE\\000\\000\\144\\206' >> \"$launcher\"\n    fi\n    exit {installer_exit};;\n  *EpicGamesLauncher.exe) echo launched-Epic; exit 0;;\n  *) exit 93;;\nesac\n"
         );
         fs::write(&wine, script).unwrap();
         let boot = home.join("wineboot");
@@ -658,6 +698,125 @@ mod tests {
             inspect_msi_and_sha256(&mut File::open(&path).unwrap())
                 .unwrap_err()
                 .contains("sector")
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    fn launcher_pe(machine: u16) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 70];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&64_u32.to_le_bytes());
+        bytes[64..68].copy_from_slice(b"PE\0\0");
+        bytes[68..70].copy_from_slice(&machine.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn installed_launcher_requires_a_supported_complete_pe() {
+        let home = test_home();
+        let prefix = home.join("prefix");
+        let path = prefix.join("drive_c/Program Files (x86)/Epic Games/Launcher/Portal/Binaries/Win64/EpicGamesLauncher.exe");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for machine in [0x014c, 0x8664] {
+            fs::write(&path, launcher_pe(machine)).unwrap();
+            assert_eq!(epic_launcher_in_prefix(&prefix), Some(path.clone()));
+        }
+        let mut bad_mz = launcher_pe(0x8664);
+        bad_mz[..2].fill(0);
+        let mut bad_pe = launcher_pe(0x8664);
+        bad_pe[64..68].fill(0);
+        let mut early_header = launcher_pe(0x8664);
+        early_header[0x3c..0x40].copy_from_slice(&63_u32.to_le_bytes());
+        let mut truncated_header = launcher_pe(0x8664);
+        truncated_header.pop();
+        let mut outside_header = launcher_pe(0x8664);
+        outside_header[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
+        for invalid in [
+            Vec::new(),
+            b"MZ".to_vec(),
+            bad_mz,
+            bad_pe,
+            early_header,
+            truncated_header,
+            outside_header,
+            launcher_pe(0xaa64),
+        ] {
+            fs::write(&path, invalid).unwrap();
+            assert!(epic_launcher_in_prefix(&prefix).is_none());
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn installed_launcher_rejects_links_and_skips_corrupt_candidates() {
+        let home = test_home();
+        let prefix = home.join("prefix");
+        let first = prefix.join("drive_c/Program Files (x86)/Epic Games/Launcher/Portal/Binaries/Win64/EpicGamesLauncher.exe");
+        let fallback = prefix.join(
+            "drive_c/Program Files/Epic Games/Launcher/Portal/Binaries/Win64/EpicGamesLauncher.exe",
+        );
+        fs::create_dir_all(first.parent().unwrap()).unwrap();
+        fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+        fs::write(&first, b"unfinished").unwrap();
+        fs::write(&fallback, launcher_pe(0x8664)).unwrap();
+        assert_eq!(epic_launcher_in_prefix(&prefix), Some(fallback.clone()));
+        fs::remove_file(&fallback).unwrap();
+        symlink(&first, &fallback).unwrap();
+        fs::write(&first, launcher_pe(0x8664)).unwrap();
+        fs::remove_file(&first).unwrap();
+        let external = home.join("external.exe");
+        fs::write(&external, launcher_pe(0x8664)).unwrap();
+        symlink(&external, &first).unwrap();
+        assert!(epic_launcher_in_prefix(&prefix).is_none());
+        fs::remove_file(&first).unwrap();
+        fs::remove_file(&fallback).unwrap();
+        let external_dir = home.join("external");
+        fs::create_dir_all(&external_dir).unwrap();
+        fs::write(
+            external_dir.join("EpicGamesLauncher.exe"),
+            launcher_pe(0x8664),
+        )
+        .unwrap();
+        fs::remove_dir(first.parent().unwrap()).unwrap();
+        symlink(&external_dir, first.parent().unwrap()).unwrap();
+        assert!(epic_launcher_in_prefix(&prefix).is_none());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn retry_does_not_register_a_corrupt_previously_completed_launcher() {
+        let home = test_home();
+        fs::create_dir_all(&home).unwrap();
+        let wine = fake_wine(&home, 37);
+        let path = home.join("EpicInstaller.msi");
+        let sha256 = fake_msi(&path);
+        assert!(install_epic_from_download(
+            &home, &wine, DownloadedInstaller {
+                path, sha256,
+                download_url: "https://epicgames-download1.akamaized.net/Builds/UnrealEngineLauncher/Installers/Windows/EpicInstaller-20.1.4.msi".into(),
+            },
+        ).is_err());
+        let bottle = list(&home).unwrap().pop().unwrap();
+        let mut attempt = catalog_attempt(&home, &bottle.id).unwrap().unwrap();
+        attempt.set_stage(CatalogStage::InstallerComplete);
+        save_catalog_attempt(&home, &attempt).unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let launcher = dir.join("prefix/drive_c/Program Files (x86)/Epic Games/Launcher/Portal/Binaries/Win64/EpicGamesLauncher.exe");
+        fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        fs::write(&launcher, b"unfinished").unwrap();
+        let before_logs = list_logs(&home, &bottle.id).unwrap().len();
+        let error = retry_catalog_with_wine(&home, &bottle.id, &wine)
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("previously installed launcher is missing"),
+            "{error}"
+        );
+        assert!(list_launchers(&home, &bottle.id).unwrap().is_empty());
+        assert_eq!(list_logs(&home, &bottle.id).unwrap().len(), before_logs);
+        assert_eq!(
+            catalog_attempt(&home, &bottle.id).unwrap().unwrap().stage,
+            CatalogStage::Failed
         );
         fs::remove_dir_all(home).unwrap();
     }

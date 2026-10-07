@@ -2,6 +2,8 @@
 //!
 //! Wine's wineserver selects its target by WINEPREFIX. Never send signals to
 //! recorded PIDs here: an old PID can belong to an unrelated macOS process.
+//! Native clients that outlive their server use the shared audit-token and
+//! current code/prefix ownership proof before receiving a signal.
 
 use super::*;
 use std::io::Write;
@@ -35,8 +37,30 @@ pub(super) fn quit_windows_apps_with_wine(
     timeout: Duration,
 ) -> Result<QuitResult, String> {
     let _lock = lock_bottle(home, id)?;
+    quit_windows_apps_locked(home, id, wine, timeout, true)
+}
+
+/// Shutdown also handles a recorded, initialized prefix whose registry was
+/// removed while an app remained open. The caller must hold this bottle's lock.
+/// All selected-runtime and current prefix identity checks still apply.
+pub(super) fn quit_recorded_windows_apps_locked(
+    home: &Path,
+    id: &str,
+    wine: &Path,
+    timeout: Duration,
+) -> Result<QuitResult, String> {
+    quit_windows_apps_locked(home, id, wine, timeout, false)
+}
+
+fn quit_windows_apps_locked(
+    home: &Path,
+    id: &str,
+    wine: &Path,
+    timeout: Duration,
+    require_registry: bool,
+) -> Result<QuitResult, String> {
     let (dir, prefix, wineserver, prefix_guard, prefix_snapshot) =
-        checked_control_paths(home, id, wine)?;
+        checked_recorded_control_paths(home, id, wine, require_registry)?;
     let tracked_before = live_processes(&dir)?.len();
     let (mut log, log_path) = new_control_log(&dir)?;
     writeln!(
@@ -60,7 +84,8 @@ pub(super) fn quit_windows_apps_with_wine(
     }
     // Wine returns status 1 when -k finds no running server. A failed kill
     // can also return 1, so only a subsequent successful -w can establish
-    // that the bottle is idle. Do not claim a force-quit on that path.
+    // that the server is idle. A nonzero status alone cannot establish that
+    // apps stopped; the native-owner fallback below has its own proof.
     writeln!(
         log,
         "Caskrun: wineserver -k exited with status {:?}; checking whether the server is idle.",
@@ -72,7 +97,6 @@ pub(super) fn quit_windows_apps_with_wine(
     // path still names the same directory before asking Wine to wait for it.
     assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
     let (wait_status, wait_timed_out) = run_wineserver(&wineserver, &prefix, "-w", &log, timeout)?;
-    drop(prefix_guard);
     if wait_timed_out || !wait_status.success() {
         return Err(format!(
             "Wine received the quit request, but this bottle's server did not stop within the limit. Check {}",
@@ -81,19 +105,39 @@ pub(super) fn quit_windows_apps_with_wine(
     }
     writeln!(log, "Caskrun: this bottle's wineserver stopped.")
         .map_err(|e| format!("Could not write bottle-control log: {e}"))?;
+    assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
+    let record = recorded_runtime_for_prefix(&dir, Some(wine))?
+        .ok_or("This bottle has no recorded Wine runtime")?;
+    if !runtime_record_matches(&record, wine)? {
+        return Err("This bottle's selected Windows engine changed during shutdown".into());
+    }
+    // A successful server wait alone does not prove that native clients have
+    // exited. Recheck the same selected server before the independently proven
+    // native-owner fallback, retaining the bottle lock and cancellation claim.
+    refuse_live_wine_server(&dir, timeout, Some(wine))?;
+    assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
+    let native_stopped = prefix_processes::stop_verified_native_owners(
+        &dir,
+        &prefix,
+        &prefix_guard,
+        &prefix_snapshot,
+        wine,
+        timeout,
+    )?;
+    prefix_processes::wait_until_idle(&dir, timeout)?;
+    assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
     let tracked_after = live_processes(&dir)?.len();
-    let message = if !kill_status.success() {
-        "No active Wine server remained in this bottle.".to_string()
-    } else if tracked_after == 0 {
-        "Wine's server stopped for this bottle.".to_string()
+    if tracked_after > 0 {
+        return Err("This bottle still has tracked processes after shutdown. Caskrun did not signal saved process IDs.".into());
+    }
+    let message = if !kill_status.success() && native_stopped == 0 {
+        "No active Wine server or Windows apps remained in this bottle.".to_string()
     } else {
-        format!(
-            "Wine's server stopped, but {tracked_after} tracked macOS process(es) still appear active."
-        )
+        "All Windows apps in this bottle stopped.".to_string()
     };
     Ok(QuitResult {
         bottle_id: id.to_string(),
-        forced: kill_status.success(),
+        forced: kill_status.success() || native_stopped > 0,
         server_stopped: true,
         tracked_before,
         tracked_after,
@@ -146,12 +190,25 @@ pub(super) fn checked_control_paths(
     id: &str,
     wine: &Path,
 ) -> Result<(PathBuf, PathBuf, PathBuf, File, fs::Metadata), String> {
+    checked_recorded_control_paths(home, id, wine, true)
+}
+
+fn checked_recorded_control_paths(
+    home: &Path,
+    id: &str,
+    wine: &Path,
+    require_registry: bool,
+) -> Result<(PathBuf, PathBuf, PathBuf, File, fs::Metadata), String> {
     if !wine.is_absolute() || !is_usable_wine(wine) {
         return Err("Selected Wine runtime is unavailable or not independent".into());
     }
     let dir = bottle_dir(home, id)?;
     let prefix = dir.join("prefix");
-    require_initialized_prefix(&dir, &prefix)?;
+    if require_registry {
+        require_initialized_prefix(&dir, &prefix)?;
+    } else {
+        require_recorded_prefix(&dir, &prefix)?;
+    }
     let (guard, snapshot) = open_stable_directory(&prefix)?;
     let record = recorded_runtime_for_prefix(&dir, Some(wine))?
         .ok_or("This bottle has no recorded Wine runtime")?;
@@ -171,10 +228,15 @@ pub(super) fn checked_control_paths(
 }
 
 fn require_initialized_prefix(dir: &Path, prefix: &Path) -> Result<(), String> {
-    let _ = open_stable_directory(prefix)?;
+    require_recorded_prefix(dir, prefix)?;
     if !path_is_real_file(&prefix.join("system.reg")) {
         return Err("Initialize this bottle before using its Windows controls".into());
     }
+    Ok(())
+}
+
+fn require_recorded_prefix(dir: &Path, prefix: &Path) -> Result<(), String> {
+    let _ = open_stable_directory(prefix)?;
     if !path_is_real_file(&dir.join("prefix-record.json")) {
         return Err(
             "Open this bottle with its independent Wine engine before using Windows controls"
@@ -306,6 +368,207 @@ mod tests {
             fs::set_permissions(executable, permissions).unwrap();
         }
         wine
+    }
+
+    struct OwnedTestChild(Child);
+
+    impl Drop for OwnedTestChild {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    fn file_holder(path: &Path) -> OwnedTestChild {
+        use std::io::BufRead;
+        let mut child = OwnedTestChild(
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "exec 3<\"$1\"; printf 'ready\\n'; read line; exit 0",
+                    "fixture",
+                ])
+                .arg(path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut ready = String::new();
+        std::io::BufReader::new(child.0.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "ready\n");
+        child
+    }
+
+    #[test]
+    fn quit_stops_verified_native_clients_after_their_server_is_idle() {
+        for hold in [false, true] {
+            prefix_processes::with_native_shutdown_fixture(hold, |home, dir, wine, child| {
+                let id = dir.file_name().unwrap().to_str().unwrap();
+                save_json(
+                    &dir.join("bottle.json"),
+                    &Bottle {
+                        id: id.into(),
+                        name: "Original native quit fixture".into(),
+                        created_at: 1,
+                    },
+                )
+                .unwrap();
+                save_json(
+                    &dir.join("prefix-record.json"),
+                    &PrefixRecord {
+                        wine_path: wine.canonicalize().unwrap().display().to_string(),
+                        runtime_identity: None,
+                        runtime_fingerprint: None,
+                    },
+                )
+                .unwrap();
+                fs::write(dir.join("prefix/system.reg"), b"original fixture registry").unwrap();
+                let server = wine.parent().unwrap().join("wineserver");
+                fs::write(
+                    &server,
+                    b"#!/bin/sh\ncase \"$1\" in\n-k) exit 1;;\n-w) exit 0;;\n*) exit 64;;\nesac\n",
+                )
+                .unwrap();
+                fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+                let result =
+                    quit_windows_apps_with_wine(home, id, wine, MOCK_PROCESS_TIMEOUT).unwrap();
+                assert!(result.forced && result.server_stopped);
+                assert_eq!(result.tracked_before, 0);
+                assert_eq!(result.tracked_after, 0);
+                assert_eq!(
+                    child.wait().unwrap().signal(),
+                    Some(if hold { 9 } else { 15 })
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn quit_refuses_uncertain_owner_and_preserves_another_bottle() {
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let first = create(&home, "Uncertain owner").unwrap();
+        let second = create(&home, "Other bottle").unwrap();
+        ensure_prefix_with_wine(&home, &first.id, &wine).unwrap();
+        ensure_prefix_with_wine(&home, &second.id, &wine).unwrap();
+        let first_dir = bottle_dir(&home, &first.id).unwrap();
+        let second_prefix = bottle_dir(&home, &second.id).unwrap().join("prefix");
+        let log = real_subdirectory(&first_dir, "logs")
+            .unwrap()
+            .join("owner-fixture.log");
+        fs::write(&log, b"fixture").unwrap();
+        let mut owner = file_holder(&log);
+        let mut other = OwnedTestChild(Command::new("/bin/sleep").arg("30").spawn().unwrap());
+        fs::write(second_prefix.join("mock.pid"), other.0.id().to_string()).unwrap();
+
+        let result =
+            quit_windows_apps_with_wine(&home, &first.id, &wine, Duration::from_millis(500));
+        assert!(result.unwrap_err().contains("still use this bottle"));
+        assert!(owner.0.try_wait().unwrap().is_none());
+        assert!(other.0.try_wait().unwrap().is_none());
+        assert!(!second_prefix.join("quit-request").exists());
+        drop(owner.0.stdin.take());
+        owner.0.wait().unwrap();
+        other.0.kill().unwrap();
+        other.0.wait().unwrap();
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn quit_does_not_claim_success_or_signal_an_uncertain_tracked_pid() {
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let bottle = create(&home, "Uncertain tracking").unwrap();
+        ensure_prefix_with_wine(&home, &bottle.id, &wine).unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let mut child = OwnedTestChild(Command::new("/bin/sleep").arg("30").spawn().unwrap());
+        save_json(&dir.join("active-processes.json"), &vec![child.0.id()]).unwrap();
+        let error = quit_windows_apps_with_wine(&home, &bottle.id, &wine, MOCK_PROCESS_TIMEOUT)
+            .unwrap_err();
+        assert!(error.contains("still has tracked processes"));
+        assert!(child.0.try_wait().unwrap().is_none());
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn quit_keeps_the_prefix_identity_through_the_server_wait() {
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let bottle = create(&home, "Replaced prefix").unwrap();
+        ensure_prefix_with_wine(&home, &bottle.id, &wine).unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        fs::write(
+            wine.parent().unwrap().join("wineserver"),
+            b"#!/bin/sh\ncase \"$1\" in\n-k) exit 1;;\n-w) mv \"$WINEPREFIX\" \"$WINEPREFIX-original\"; mkdir \"$WINEPREFIX\"; touch \"$WINEPREFIX/system.reg\"; exit 0;;\nesac\n",
+        )
+        .unwrap();
+        let error = quit_windows_apps_with_wine(&home, &bottle.id, &wine, MOCK_PROCESS_TIMEOUT)
+            .unwrap_err();
+        assert!(error.contains("prefix changed"));
+        assert!(dir.join("prefix-original").is_dir());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn cancel_before_quit_prevents_the_server_stop_request() {
+        use std::sync::atomic::Ordering;
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let bottle = create(&home, "Canceled quit").unwrap();
+        ensure_prefix_with_wine(&home, &bottle.id, &wine).unwrap();
+        let prefix = bottle_dir(&home, &bottle.id).unwrap().join("prefix");
+        let mut child = OwnedTestChild(Command::new("/bin/sleep").arg("30").spawn().unwrap());
+        fs::write(prefix.join("mock.pid"), child.0.id().to_string()).unwrap();
+        let (request, _guard) = cancellation::test_request();
+        request.store(true, Ordering::Release);
+        let error = quit_windows_apps_with_wine(&home, &bottle.id, &wine, MOCK_PROCESS_TIMEOUT)
+            .unwrap_err();
+        assert!(cancellation::is_error(&error));
+        assert!(!prefix.join("quit-request").exists());
+        assert!(child.0.try_wait().unwrap().is_none());
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn cancel_during_quit_is_deferred_through_final_owner_verification() {
+        use std::sync::atomic::Ordering;
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let bottle = create(&home, "Quit cleanup").unwrap();
+        ensure_prefix_with_wine(&home, &bottle.id, &wine).unwrap();
+        let prefix = bottle_dir(&home, &bottle.id).unwrap().join("prefix");
+        fs::write(
+            wine.parent().unwrap().join("wineserver"),
+            b"#!/bin/sh\ncase \"$1\" in\n-k) touch \"$WINEPREFIX/quit-request\"; while test ! -f \"$WINEPREFIX/continue-quit\"; do sleep 0.02; done; exit 0;;\n-w) exit 0;;\n*) exit 64;;\nesac\n",
+        )
+        .unwrap();
+        let (request, _guard) = cancellation::test_request();
+        let cancel_prefix = prefix.clone();
+        let cancel = std::thread::spawn(move || {
+            let deadline = Instant::now() + MOCK_PROCESS_TIMEOUT;
+            while !cancel_prefix.join("quit-request").exists() {
+                assert!(Instant::now() < deadline, "quit request did not start");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            request.store(true, Ordering::Release);
+            fs::write(cancel_prefix.join("continue-quit"), b"continue").unwrap();
+        });
+        let result = quit_windows_apps_with_wine(&home, &bottle.id, &wine, MOCK_PROCESS_TIMEOUT);
+        cancel.join().unwrap();
+        let result = result.unwrap();
+        assert!(result.forced && result.server_stopped);
+        assert_eq!(result.tracked_after, 0);
+        assert!(cancellation::is_requested());
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

@@ -6,7 +6,17 @@ BUILD_ROOT="${CASKRUN_PACKAGE_OUTPUT_DIR:-$PROJECT_ROOT/.build}"
 APP="$BUILD_ROOT/Caskrun.app"
 # A separate output directory lets us prepare a candidate while an existing
 # Caskrun app is still serving a running Windows process.
-RUNTIME="$PROJECT_ROOT/.build/steam-wine-runtime-dev"
+case "${CASKRUN_PACKAGE_RUNTIME_VARIANT:-steam}" in
+  steam) RUNTIME="$PROJECT_ROOT/.build/steam-wine-runtime-dev" ;;
+  native-apps)
+    NATIVE_RUNTIME_NAME="${CASKRUN_PACKAGE_NATIVE_RUNTIME_NAME:-native-apps-wine-runtime-dev}"
+    case "$NATIVE_RUNTIME_NAME" in
+      ''|.*|*/*) print -u2 "Invalid native runtime package name."; exit 64 ;;
+    esac
+    RUNTIME="$PROJECT_ROOT/.build/$NATIVE_RUNTIME_NAME"
+    ;;
+  *) print -u2 "Unknown independent runtime package variant."; exit 64 ;;
+esac
 LEGACY_STAGE="$BUILD_ROOT/dmg-stage"
 
 is_generated_app() {
@@ -27,6 +37,14 @@ if [[ -L "$RUNTIME" || ! -d "$RUNTIME" ||
   print -u2 "Missing independent Steam-enabled development engine: $RUNTIME"
   print -u2 "Build it with scripts/package-wine-runtime-steam-dev.sh before packaging Caskrun."
   exit 66
+fi
+if [[ "${CASKRUN_PACKAGE_RUNTIME_VARIANT:-steam}" == native-apps ]]; then
+  if [[ ! -x "$RUNTIME/runtime/lib/wine/x86_64-unix/WindowsApp" ||
+        ! -x "$RUNTIME/bin/native-icon" || ! -f "$RUNTIME/native-default-icon.png" ||
+        ! -f "$RUNTIME/native-default-icon.icns" || ! -f "$RUNTIME/native-default-rendered.png" ||
+        "$(cat "$RUNTIME/native-app-identity.txt")" != caskrun-native-app-identity-v1 ]]; then
+    print -u2 "Missing complete per-EXE native app identity package."; exit 66
+  fi
 fi
 if [[ -e "$APP" || -L "$APP" ]] && ! is_generated_app "$APP"; then
   print -u2 "Refusing to replace an unrecognized app: $APP"

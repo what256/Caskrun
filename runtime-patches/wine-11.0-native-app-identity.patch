@@ -1,0 +1,417 @@
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -31,6 +31,8 @@
+ #include <stdio.h>
+ #include <signal.h>
+ #include <spawn.h>
++#include <poll.h>
++#include <time.h>
+ #include <string.h>
+ #include <strings.h>
+ #include <stdlib.h>
+@@ -536,6 +538,184 @@
+     return !strcasecmp( name, "steam.exe" ) || !strcasecmp( name, "steamwebhelper.exe" );
+ }
+ 
++
++/* Original Caskrun opt-in native identity. The launcher supplies a verified
++ * core/runtime and canonical data home. Each Windows child supplies its own
++ * resolved image; a parent's application label is never reused. */
++static BOOL caskrun_native_identity_enabled(void)
++{
++#ifdef __APPLE__
++    const char *core = getenv( "CASKRUN_NATIVE_CORE" );
++    const char *home = getenv( "CASKRUN_NATIVE_DATA" );
++    const char *image = getenv( "CASKRUN_NATIVE_IMAGE" );
++    const char *bottle = getenv( "CASKRUN_NATIVE_BOTTLE" );
++    const char *ntdll = getenv( "CASKRUN_NATIVE_NTDLL" );
++    return core && *core == '/' && home && *home == '/' && image && *image == '/' &&
++           bottle && *bottle && ntdll && *ntdll == '/';
++#else
++    return FALSE;
++#endif
++}
++
++#ifdef __APPLE__
++static BOOL caskrun_native_owned_file( const char *path, BOOL executable )
++{
++    struct stat info;
++    char resolved[PATH_MAX];
++
++    return path && *path == '/' && !lstat( path, &info ) && S_ISREG( info.st_mode ) &&
++           (info.st_uid == geteuid() || info.st_uid == 0) && !(info.st_mode & 0022) &&
++           realpath( path, resolved ) && !strcmp( path, resolved ) &&
++           (!executable || !access( path, X_OK ));
++}
++
++static BOOL caskrun_native_bottle_id( const char *value )
++{
++    unsigned int i;
++
++    if (strlen( value ) != 36) return FALSE;
++    for (i = 0; i < 36; i++)
++    {
++        if (i == 8 || i == 13 || i == 18 || i == 23)
++        {
++            if (value[i] != '-') return FALSE;
++        }
++        else if (!(value[i] >= '0' && value[i] <= '9') &&
++                 !(value[i] >= 'a' && value[i] <= 'f')) return FALSE;
++    }
++    return TRUE;
++}
++
++static LONGLONG caskrun_native_milliseconds(void)
++{
++    struct timespec now;
++    if (clock_gettime( CLOCK_MONOTONIC, &now )) return -1;
++    return (LONGLONG)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++}
++
++/* Resolve the bundle without a shell. The short, bounded helper is required
++ * to be lock-free: the Windows installer may already hold its bottle lock.
++ * Only stdout's single absolute path is accepted; failure leaves a neutral
++ * native loader, rather than blocking or preventing the Windows app. */
++static char *caskrun_native_app_program(void)
++{
++    const char *core = getenv( "CASKRUN_NATIVE_CORE" );
++    const char *home = getenv( "CASKRUN_NATIVE_DATA" );
++    const char *image = getenv( "CASKRUN_NATIVE_IMAGE" );
++    const char *bottle = getenv( "CASKRUN_NATIVE_BOTTLE" );
++    const char *ntdll = getenv( "CASKRUN_NATIVE_NTDLL" );
++    static const char suffix[] = "/Contents/MacOS/WindowsApp";
++    char *args[] = { (char *)core, (char *)"prepare-native-app", (char *)bottle, (char *)image, NULL };
++    char *home_env = NULL, **helper_env = NULL, *expected = NULL, *result = NULL;
++    char output[PATH_MAX + 2], resolved[PATH_MAX];
++    struct stat info;
++    struct pollfd pollfd;
++    posix_spawn_file_actions_t actions;
++    posix_spawnattr_t attr;
++    size_t count, i, used = 0, home_length;
++    LONGLONG deadline, remaining, now;
++    int fd[2], status = 0, error;
++    BOOL eof = FALSE, finished = FALSE;
++    pid_t pid = -1;
++
++    if (!caskrun_native_identity_enabled() || !caskrun_native_bottle_id( bottle ) ||
++        !caskrun_native_owned_file( core, TRUE ) || !caskrun_native_owned_file( ntdll, FALSE ) ||
++        lstat( home, &info ) || !S_ISDIR( info.st_mode ) || info.st_uid != geteuid() ||
++        (info.st_mode & 0022) || !realpath( home, resolved ) || strcmp( home, resolved )) return NULL;
++    expected = build_path( ntdll_dir, "ntdll.so" );
++    error = strcmp( ntdll, expected );
++    free( expected );
++    if (error || (deadline = caskrun_native_milliseconds()) < 0) return NULL;
++    deadline += 2000;
++
++    for (count = 0; environ[count]; count++) ;
++    if (!(helper_env = calloc( count + 2, sizeof(*helper_env) )) ||
++        asprintf( &home_env, "CASKRUN_HOME=%s", home ) < 0) goto done;
++    for (count = i = 0; environ[i]; i++)
++    {
++        if (!strncmp( environ[i], "CASKRUN_HOME=", 13 ) ||
++            !strncmp( environ[i], "WINESERVERSOCKET=", 17 ) ||
++            !strncmp( environ[i], "WINELOADERNOEXEC=", 17 ) ||
++            !strncmp( environ[i], "WINEPRELOADRESERVE=", 19 ) ||
++            !strncmp( environ[i], "CASKRUN_NATIVE_EXEC=", 20 )) continue;
++        helper_env[count++] = environ[i];
++    }
++    helper_env[count++] = home_env;
++    if (pipe( fd )) goto done;
++    if (fcntl( fd[0], F_SETFD, FD_CLOEXEC ) < 0 ||
++        fcntl( fd[0], F_SETFL, O_NONBLOCK ) < 0)
++    {
++        close( fd[1] );
++        goto close_pipe;
++    }
++    posix_spawn_file_actions_init( &actions );
++    posix_spawn_file_actions_adddup2( &actions, fd[1], STDOUT_FILENO );
++    posix_spawn_file_actions_addopen( &actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0 );
++    posix_spawn_file_actions_addopen( &actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0 );
++    posix_spawnattr_init( &attr );
++    /* Only explicit file actions survive. No Wine socket or arbitrary parent
++     * descriptor is inherited by the Rust helper. */
++    posix_spawnattr_setflags( &attr, POSIX_SPAWN_CLOEXEC_DEFAULT );
++    error = posix_spawn( &pid, core, &actions, &attr, args, helper_env );
++    posix_spawnattr_destroy( &attr );
++    posix_spawn_file_actions_destroy( &actions );
++    close( fd[1] );
++    if (error) goto close_pipe;
++
++    while (!finished || !eof)
++    {
++        ssize_t received;
++        pid_t waited;
++
++        if (!eof)
++        {
++            received = read( fd[0], output + used, sizeof(output) - used );
++            if (received > 0)
++            {
++                used += received;
++                if (used == sizeof(output)) break;
++            }
++            else if (!received) eof = TRUE;
++            else if (errno != EAGAIN && errno != EINTR) break;
++        }
++        if (!finished)
++        {
++            waited = waitpid( pid, &status, WNOHANG );
++            if (waited == pid) finished = TRUE;
++            else if (waited < 0 && errno != EINTR) break;
++        }
++        if (finished && eof) break;
++        if ((now = caskrun_native_milliseconds()) < 0) break;
++        remaining = deadline - now;
++        if (remaining <= 0) break;
++        pollfd.fd = eof ? -1 : fd[0];
++        pollfd.events = POLLIN | POLLHUP;
++        poll( &pollfd, 1, min( remaining, 10 ));
++    }
++    if (!finished)
++    {
++        kill( pid, SIGKILL );  /* only the helper process created above */
++        while (waitpid( pid, &status, 0 ) < 0 && errno == EINTR) ;
++    }
++    if (!finished || !eof || !WIFEXITED(status) || WEXITSTATUS(status) || used < 2 ||
++        output[used - 1] != '\n' || memchr( output, 0, used ) ||
++        memchr( output, '\n', used - 1 )) goto close_pipe;
++    output[--used] = 0;
++    home_length = strlen( home );
++    if (used <= home_length + sizeof(suffix) || strncmp( output, home, home_length ) ||
++        output[home_length] != '/' || strcmp( output + used - (sizeof(suffix) - 1), suffix ) ||
++        !caskrun_native_owned_file( output, TRUE )) goto close_pipe;
++    result = strdup( output );
++
++close_pipe:
++    close( fd[0] );
++done:
++    free( home_env );
++    free( helper_env );
++    return result;
++}
++#endif
++
+ /* exec the appropriate wine loader for the specified machine */
+ static NTSTATUS loader_exec( char **argv, WORD machine )
+ {
+@@ -545,8 +725,20 @@
+ 
+     if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv );
+ 
++    unsetenv( "CASKRUN_NATIVE_EXEC" );
+     if (!build_dir && argv[2] && caskrun_steam_dock_program( argv[2] ))
+         argv[1] = build_path( ntdll_dir, "Steam" );
++#ifdef __APPLE__
++    else if (!build_dir && caskrun_native_identity_enabled())
++    {
++        if (!(argv[1] = caskrun_native_app_program()))
++        {
++            fprintf( stderr, "caskrun: could not prepare this program's native identity; using Windows App\n" );
++            argv[1] = build_path( ntdll_dir, "WindowsApp" );
++        }
++        setenv( "CASKRUN_NATIVE_EXEC", "1", 1 );
++    }
++#endif
+     else
+         argv[1] = strdup( wineloader );
+     preloader_exec( argv );
+@@ -2209,7 +2401,8 @@
+     char **new_argv;
+ 
+     /* have to exec if we have a preloader, or an argument, or if we are the initial wrapper */
+-    if (!pre_exec() && !extra_arg && dlsym( RTLD_DEFAULT, "wine_main_preload_info" )) return;
++    if (!pre_exec() && !extra_arg && dlsym( RTLD_DEFAULT, "wine_main_preload_info" ) &&
++        !caskrun_native_identity_enabled()) return;
+ 
+     if (extra_arg)
+     {
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -425,7 +425,8 @@
+  *           spawn_process
+  */
+ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
+-                               int unixdir, char *winedebug, const struct pe_image_info *pe_info )
++                               int unixdir, char *winedebug, const char *unix_name,
++                               const struct pe_image_info *pe_info )
+ {
+     NTSTATUS status = STATUS_SUCCESS;
+     int stdin_fd = -1, stdout_fd = -1;
+@@ -465,6 +466,11 @@
+             }
+             argv = build_argv( &params->CommandLine, 2 );
+ 
++            /* Never let a child inherit its launcher's native identity. The
++             * image resolved by NtCreateUserProcess is authoritative. */
++            unsetenv( "CASKRUN_NATIVE_EXEC" );
++            if (unix_name && *unix_name == '/') setenv( "CASKRUN_NATIVE_IMAGE", unix_name, 1 );
++            else unsetenv( "CASKRUN_NATIVE_IMAGE" );
+             exec_wineloader( argv, socketfd, pe_info );
+             _exit(1);
+         }
+@@ -936,7 +942,7 @@
+ 
+     /* create the child process */
+ 
+-    if ((status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info ))) goto done;
++    if ((status = spawn_process( params, socketfd[0], unixdir, winedebug, unix_name, &pe_info ))) goto done;
+ 
+     close( socketfd[0] );
+     socketfd[0] = -1;
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -113,6 +113,65 @@
+ }
+ 
+ 
++/* A native identity belongs to this Windows image, not its launcher. The
++ * generated .app's Info.plist overrides the loader's neutral embedded plist. */
++static BOOL CaskrunNativeDockEnabled(void)
++{
++    const char *value = getenv("CASKRUN_NATIVE_EXEC");
++    return value && !strcmp(value, "1");
++}
++
++static NSString* CaskrunNativeImageName(void)
++{
++    const char *image = getenv("CASKRUN_NATIVE_IMAGE");
++    NSString *path;
++    if (!image || !(path = [NSString stringWithUTF8String:image])) return nil;
++    return [CaskrunArgumentBasename(path) lowercaseString];
++}
++
++static BOOL CaskrunNativeBackgroundProcess(void)
++{
++    NSString *name = CaskrunNativeImageName();
++    NSArray *arguments = [[NSProcessInfo processInfo] arguments];
++    NSString *role = nil;
++    NSUInteger i;
++
++    if ([name isEqualToString:@"services.exe"] || [name isEqualToString:@"winedevice.exe"] ||
++        [name isEqualToString:@"plugplay.exe"] || [name isEqualToString:@"rpcss.exe"] ||
++        [name isEqualToString:@"ctfmon.exe"]) return YES;
++    /* Electron can use the same executable for its browser and subprocesses.
++     * Only explicit, known Chromium roles suppress a Dock item; the basename
++     * never decides whether an ordinary app or its browser is background.
++     * Match both switch forms, stopping at the positional separator. The last
++     * type switch controls classification, so a browser override stays visible. */
++    for (i = 0; i < [arguments count]; i++)
++    {
++        NSString *argument = arguments[i];
++        if ([argument isEqualToString:@"--"]) break;
++        if ([argument hasPrefix:@"--type="])
++            role = [argument substringFromIndex:7];
++        else if ([argument isEqualToString:@"--type"])
++            role = i + 1 < [arguments count] ? arguments[++i] : @"";
++    }
++    return [role isEqualToString:@"renderer"] || [role isEqualToString:@"gpu-process"] ||
++           [role isEqualToString:@"utility"] || [role isEqualToString:@"zygote"] ||
++           [role isEqualToString:@"crashpad-handler"];
++}
++
++static NSImage* CaskrunNativeIcon(void)
++{
++    NSBundle *bundle = [NSBundle mainBundle];
++    NSString *path = [bundle pathForResource:@"app" ofType:@"icns"];
++    if (!path) path = [bundle pathForResource:@"app" ofType:@"ico"];
++    struct stat info;
++    const char *raw = [path fileSystemRepresentation];
++
++    if (!raw || lstat(raw, &info) || !S_ISREG(info.st_mode) ||
++        info.st_size <= 0 || info.st_size > 16 * 1024 * 1024) return nil;
++    return [[[NSImage alloc] initWithContentsOfFile:path] autorelease];
++}
++
++
+ @implementation WineApplication
+ 
+ @synthesize wineController;
+@@ -275,6 +334,16 @@
+             NSImage *icon = CaskrunSteamIcon();
+             if (icon) self.applicationIcon = icon;
+         }
++        if (CaskrunNativeDockEnabled())
++        {
++            NSImage *icon = CaskrunNativeIcon();
++            if (CaskrunNativeBackgroundProcess())
++            {
++                [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
++                return;
++            }
++            if (icon) self.applicationIcon = icon;
++        }
+         if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
+         {
+             NSMenu* mainMenu;
+@@ -297,8 +366,9 @@
+             mainMenu = [[[NSMenu alloc] init] autorelease];
+ 
+             // Application menu
+-            submenu = [[[NSMenu alloc] initWithTitle:WineLocalizedString(STRING_MENU_WINE)] autorelease];
+             bundleName = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
++            title = CaskrunNativeDockEnabled() && [bundleName length] ? bundleName : WineLocalizedString(STRING_MENU_WINE);
++            submenu = [[[NSMenu alloc] initWithTitle:title] autorelease];
+ 
+             if ([bundleName length])
+                 title = [NSString stringWithFormat:WineLocalizedString(STRING_MENU_ITEM_HIDE_APPNAME), bundleName];
+@@ -324,7 +394,7 @@
+             item = [submenu addItemWithTitle:title action:@selector(terminate:) keyEquivalent:@"q"];
+             [item setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+             item = [[[NSMenuItem alloc] init] autorelease];
+-            [item setTitle:WineLocalizedString(STRING_MENU_WINE)];
++            [item setTitle:CaskrunNativeDockEnabled() && [bundleName length] ? bundleName : WineLocalizedString(STRING_MENU_WINE)];
+             [item setSubmenu:submenu];
+             [mainMenu addItem:item];
+ 
+@@ -1143,6 +1213,11 @@
+         if (CaskrunSteamDockEnabled() && CaskrunIsWindowsProcess(@"steamwebhelper.exe"))
+         {
+             NSImage *icon = CaskrunSteamIcon();
++            if (icon) nsimage = icon;
++        }
++        if (CaskrunNativeDockEnabled())
++        {
++            NSImage *icon = CaskrunNativeIcon();
+             if (icon) nsimage = icon;
+         }
+         self.applicationIcon = nsimage;
+--- a/loader/main.c
++++ b/loader/main.c
+@@ -168,6 +168,27 @@
+ }
+ 
+ 
++/* A generated native app copies the signed generic Wine loader away from
++ * ntdll.so. Caskrun supplies the selected independent runtime's canonical
++ * library path. Do not resolve a relative path or follow a replacement link. */
++static void *caskrun_native_dlopen(void)
++{
++#ifdef __APPLE__
++    const char *path = getenv( "CASKRUN_NATIVE_NTDLL" );
++    const char *enabled = getenv( "CASKRUN_NATIVE_EXEC" );
++    struct stat info;
++    char resolved[PATH_MAX];
++
++    if (!enabled || strcmp( enabled, "1" ) || !path || *path != '/' ||
++        lstat( path, &info ) || !S_ISREG( info.st_mode ) ||
++        (info.st_uid != geteuid() && info.st_uid != 0) || (info.st_mode & 0022) ||
++        !realpath( path, resolved ) || strcmp( path, resolved )) return NULL;
++    return dlopen( path, RTLD_NOW );
++#else
++    return NULL;
++#endif
++}
++
+ /**********************************************************************
+  *           main
+  */
+@@ -177,7 +198,8 @@
+ 
+     init_reserved_areas();
+ 
+-    if ((handle = try_dlopen( get_self_exe() )) ||
++    if ((handle = caskrun_native_dlopen()) ||
++        (handle = try_dlopen( get_self_exe() )) ||
+         (handle = try_dlopen( argv[0] )))
+     {
+         void (*init_func)(int, char **) = dlsym( handle, "__wine_main" );

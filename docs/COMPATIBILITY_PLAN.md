@@ -1,0 +1,70 @@
+# Compatibility implementation plan
+
+_Reviewed 7 October 2026. Caskrun remains a private demo in active development._
+
+The user-directed static reference review covered packaged setup orchestration, graphics configuration, shortcut handling and bottle tools. It identified architectural gaps; it did not execute CrossOver, provide its native GUI source, or establish Caskrun compatibility. No reference code, recipes, assets or runtime binaries were incorporated. The implementation work below uses original Caskrun code, publisher requirements, independently sourced upstream components and our own test results.
+
+## Keep the ordinary flow simple
+
+Discover → Install → publisher sign-in → install a game → Play remains the intended flow. Caskrun chooses its included engine and supported defaults. The Home bottle sidebar retains optional display, graphics, controller, diagnostic and maintenance controls. No global Settings page or Wine picker is needed for ordinary installation.
+
+The public CrossOver guide describes choosing a bottle and dependencies for listed apps and publishing launch icons afterward. This is a useful workflow requirement for our own setup engine. Publisher agreements still require the user's decision. ([Mac user guide](https://support.codeweavers.com/en_US/crossover-mac-user-guide), [Steam setup](https://support.codeweavers.com/en_US/installing-steam-in-crossover))
+
+## First: address observed failures
+
+| Priority | Evidence | Next gate |
+| --- | --- | --- |
+| GOG | Its service fails to bind an additional IPv4 loopback address on macOS. An original service fixture passes basic Windows service lifecycle tests. | Test the original, narrowly scoped UDP compatibility prototype, including address reporting, cross-process traffic, endpoint cleanup and separate-prefix refusal. Then retry the real service and client in a disposable copy. Do not change the host network or infer a usable client from a successful bind. |
+| Ubisoft / Battle.net | Setup completed and saved launchers, but client launches did not produce usable windows. Logs include nested exception or framebuffer messages without enough process attribution. | Identify executable, process, thread, loaded module and exception before selecting a component or graphics workaround. A framebuffer warning alone is not a proven GPU crash. |
+| itch.io | Setup completed; the Electron client is blank. The stable bootstrap is a valid launch target. | Preserve its documented app-argument separator, identify the actual versioned child and compare a scoped diagnostic launch with normal launch. No blanket GPU or sandbox workaround. |
+| Epic | The checked MSI failed with an execute-access fault. A separate original MSI fixture works. | Trace the real installer with a checked local copy and MSI logging; fixture success does not validate Epic. |
+| EA / Rockstar | EA was closed at its agreement; Rockstar setup started but automatic approval blocked window inspection, so its owned test was canceled and cleaned. | Complete unauthenticated installer/client checks, with the user deciding any agreements. |
+
+The [launcher validation record](LAUNCHER_VALIDATION.md) owns current outcomes and cleanup status. Installed, rendering, authentication and gameplay are separate stages.
+
+## Original setup profiles
+
+Caskrun currently checks and runs each publisher installer, retains a retry receipt and registers an expected executable. It lacks a reusable dependency graph and durable component-step state.
+
+Implement versioned profiles with:
+
+- Supported runtime capabilities and Windows architecture/version requirements.
+- Reviewed publisher sources and independently verified component requirements.
+- Ordered prerequisites with bounded checks, installer receipts, verification and restart recovery.
+- Resumable per-step outcomes; cancellation must preserve completed steps and other bottles.
+- Product detection and saved launch commands, followed by separate first-launch validation.
+
+Do not combine historical profile variants, install arbitrary redistributables for every app, or declare success because an EXE exists. Determine each requirement from current publisher/upstream evidence and controlled tests. A future community profile update must retain the same review and provenance checks as bundled profiles.
+
+## Graphics and synchronization
+
+An explicit backend choice should be one mutually exclusive bottle setting. Automatic selection needs original, tested per-app/game profiles with a supported fallback. CrossOver documents a per-game database for Auto, while explicit DXMT, D3DMetal, DXVK or WineD3D choices apply bottle-wide. Its database is not Caskrun's data. ([Advanced settings](https://support.codeweavers.com/en_US/advanced-settings-in-crossover-mac-26))
+
+| Capability | Current Caskrun state | Implementation gate |
+| --- | --- | --- |
+| WineD3D | Current included path; limited Direct3D probe success, no game validation. | Keep exact tested limitations visible in compatibility results. |
+| High resolution | Real 96/192 DPI and Retina controls, idle checks, verification and rollback. | Validate visual quality in Steam and other clients; DPI-aware fixture success is not client validation. |
+| DXMT | No integrated backend. | Next Direct3D experiment: build separately from upstream with its Wine integration. Validate x86/x64 device creation, shaders, readback, visible frames, shutdown/relaunch and a real game. |
+| DXVK / MoltenVK | Vulkan enumeration experiment; no successful Direct3D/game gate. | Resolve required Vulkan features and the failed Direct3D test before exposing a choice. |
+| D3DMetal | No integrated backend. | Separate component terms/source/distribution review and runtime validation. Never extract it from another app bundle. |
+| MSync | Not implemented in current Wine 11. | Coordinated client/server implementation and synchronization correctness/performance tests; an environment toggle alone adds no support. |
+| DLSS / MetalFX | Not implemented. | Supported backend/vendor-extension integration and per-game tests; require the appropriate game setting. |
+| Multimedia | Current Wine build disables GStreamer. | Independently source media components and validate codecs/playback. This gap does not by itself explain current launcher failures. |
+
+DXMT's upstream runtime requirements include exported Wine `winemac` APIs; copying translator DLLs is insufficient. Its upstream repository publishes LGPL-2.1-or-later source and build instructions. Use pinned upstream source with notices and corresponding-source records, separately from the proprietary reference bundle. ([Runtime requirements](https://github.com/3Shain/dxmt/wiki/Device-System-Runtime-Specifications), [build guide](https://github.com/3Shain/dxmt/blob/main/docs/DEVELOPMENT.md), [license](https://github.com/3Shain/dxmt/blob/main/LICENSE))
+
+A future runtime capability manifest must describe the exact packaged engine and tested components. Use it consistently for ordinary launch, child apps, installers, tools and reboot. Backend changes must preserve user-installed DLLs/overrides, require an idle bottle, verify changes and roll back on failure. Keep unavailable controls informational until their engine support passes these gates.
+
+CodeWeavers' source page offers its FOSS components and recommends using component upstreams. It is not the full proprietary application or compatibility database. ([Official source page](https://www.codeweavers.com/crossover/source))
+
+## Bottle and launch-command improvements
+
+Wine Configuration, controllers, Task Manager, registry editor, Internet Settings, command prompt, session restart, quit, duplicate, backup and import already have Caskrun paths. Remaining acceptance and implementation work includes:
+
+1. Use the same verified shutdown guarantees for explicit bottle quit and full Caskrun quit. A stopped Wine server must not hide remaining native client processes.
+2. Preserve a complete shortcut command: executable, validated Windows argument parsing and checked working directory. Current discovery rejects argument-bearing shortcuts rather than launch them incorrectly. Portable backup also rejects absolute host-folder links; an isolated GOG copy exposed this with Wine-created user-folder mappings. Improve portable default-folder handling without following external links or copying host data.
+3. Separate debug-channel controls and log export from ordinary launch options.
+4. Add installed-component inventory/repair, icon rebuilding, integrity-checked compressed backups and runtime/profile updates.
+5. Retain the current explicit warning that Caskrun's session restart closes apps. Verify upstream restart semantics before adding a non-disruptive alternative.
+
+Each change needs appropriate source checks and an isolated live acceptance test. Keep test downloads, bottles and logs ignored, verify zero owners before cleanup, and transfer only non-personal results to project documentation.
