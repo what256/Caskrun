@@ -43,7 +43,7 @@ An explicit backend choice should be one mutually exclusive bottle setting. Auto
 | Capability | Current Caskrun state | Implementation gate |
 | --- | --- | --- |
 | WineD3D | Current included path; limited Direct3D probe success, no game validation. | Keep exact tested limitations visible in compatibility results. |
-| High resolution | Real 96/192 DPI and Retina controls, idle checks, verification and rollback. | Validate visual quality in Steam and other clients; DPI-aware fixture success is not client validation. |
+| High resolution | Real 96/192 DPI and Retina controls, idle checks, verification and rollback. **Validated on Steam:** with the control off its client is drawn at 1x and upscaled; with it on the same window is genuinely drawn at 2x. | Measure other clients and a real game before considering it a default, because the setting applies to a whole bottle and no game has been measured. |
 | DXMT | No integrated backend. | Next Direct3D experiment: build separately from upstream with its Wine integration. Validate x86/x64 device creation, shaders, readback, visible frames, shutdown/relaunch and a real game. |
 | DXVK / MoltenVK | Vulkan enumeration experiment; no successful Direct3D/game gate. | Resolve required Vulkan features and the failed Direct3D test before exposing a choice. |
 | D3DMetal | No integrated backend. | Separate component terms/source/distribution review and runtime validation. Never extract it from another app bundle. |

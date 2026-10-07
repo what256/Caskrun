@@ -134,6 +134,12 @@ class HarnessTests(unittest.TestCase):
     def lsof_fixture(self):
         return mock.patch.object(harness.shutil, "which", return_value=str(self.inspector))
 
+    def test_catalog_matches_the_tracked_entries(self):
+        # A catalog entry the harness does not know cannot be tested at all, and
+        # status collection would reject it as unexpected test storage.
+        entries = json.loads((harness.PROJECT / "catalog/apps.json").read_text())["entries"]
+        self.assertEqual(sorted(harness.CATALOG), sorted(entry["id"] for entry in entries))
+
     def test_setup_never_invokes_core_and_home_isolated(self):
         session = self.session
         self.assertFalse((session.root / "core-calls.json").exists())
@@ -384,7 +390,7 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(harness.HarnessError):
             self.session.record("gog-galaxy", "rendered", "private text")
         with self.assertRaises(harness.HarnessError):
-            self.session.record("steam", "rendered", "none")
+            self.session.record("not-a-catalog-entry", "rendered", "none")
 
 
 if __name__ == "__main__":

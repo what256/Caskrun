@@ -27,8 +27,10 @@ import threading
 import time
 from typing import Callable
 
+# Every automatic entry in the tracked catalog. test_launcher_harness.py asserts
+# this stays in step with catalog/apps.json, so a new entry cannot be untestable.
 CATALOG = (
-    "epic-games-store", "gog-galaxy", "battle-net", "ea-app",
+    "steam", "epic-games-store", "gog-galaxy", "battle-net", "ea-app",
     "ubisoft-connect", "itch-io-app", "rockstar-games-launcher",
 )
 STAGES = {"ready", "running", "failed", "installer_complete", "installed"}
@@ -399,8 +401,11 @@ class Session:
             stage = attempt.get("stage")
             if stage not in STAGES:
                 raise HarnessError("An unknown setup stage exists in test storage")
-            self.summary["launchers"][catalog_id]["setup_stage"] = stage
-            self.summary["launchers"][catalog_id]["saved_launchers"] = len(overview.get("launchers", {}).get(bottle_id, []))
+            # A session set up by an earlier harness has no row for a catalog
+            # entry added since. Start one instead of failing with a key error.
+            row = self.summary.setdefault("launchers", {}).setdefault(catalog_id, {"observed_ui": "untested"})
+            row["setup_stage"] = stage
+            row["saved_launchers"] = len(overview.get("launchers", {}).get(bottle_id, []))
             installer = attempt.get("installer_path", "")
             parts = Path(installer).parts
             if not parts or parts[0] != "installers" or Path(installer).is_absolute() or ".." in parts:

@@ -79,6 +79,31 @@ Initial GOG tests exposed orphaned clients holding test files after Wine reporte
 
 A separate original Caskrun MSI installed its exact test payload successfully. This establishes basic MSI execution for that fixture only. Neither a source check nor a successful test fixture establishes vendor-launcher compatibility.
 
+## Steam: rendering, Dock identity, relaunch and shutdown
+
+_7 October 2026; Apple Silicon, independent Wine 11.0 native-identity engine inside a signed candidate app, isolated `test-launchers.py` session. No account was created or signed in to, and no game was installed._
+
+Steam installed through the ordinary catalog path: setup returned zero, `Steam.exe` was saved, one launcher named "Steam" was registered, and the checked installer receipt matched the downloaded bytes. Measurements below come from two original offscreen tools that read window metadata and captured window pixels; both were removed afterwards.
+
+**Rendering is not black.** Across seven launches in this round, every one produced a visible "Sign in to Steam" window. The fraction of near-black pixels was 0.000 in every capture. The earlier report of intermittently black relaunches was not reproduced with this engine.
+
+**Rendering was blurry, and high-resolution mode fixes it.** Sharpness was measured as the ratio of pixel variation inside each 2x2 block to variation across block boundaries on a 2x capture: content genuinely drawn at 2x varies inside each block, while content drawn at 1x and upscaled is flat inside it. Two native Retina applications scored 0.974 and 1.001 as controls.
+
+| Bottle state | `LogPixels` | `RetinaMode` | Sharpness ratio |
+| --- | --- | --- | --- |
+| Default | 96 | unset | **0.000** (drawn at 1x, upscaled) |
+| High resolution on | 192 | `y` | **0.801 – 0.826** across five sign-in windows |
+
+The window stayed 700x440 points in both states, so the control sharpens rendering without resizing the client. This validates the existing per-bottle High Resolution Mode on a real publisher client for the first time; it is still off by default, and no game has been measured, so defaulting it on is not justified by this evidence.
+
+**One correctly named Dock entry.** While the sign-in window was open, exactly one Caskrun Windows process had the regular activation policy that places an icon in the Dock, and it was named "Steam". The remaining Steam processes, including `Steam.exe` itself and its helpers, were accessory or prohibited, so no background helper appeared in the Dock.
+
+**Focus works.** With Finder brought to the front, activating the Steam application the way its Dock icon does made Steam frontmost and active with its window on screen.
+
+**Shutdown works.** With Steam running, the shared quit path reported `complete: true` with one bottle stopped and no failures. Afterwards no Steam window, no Caskrun Windows application and no process holding a test file remained. Two unrelated CrossOver Wine servers were running before and after and were never signalled.
+
+Authentication, downloads, controllers and gameplay remain untested, as does Direct3D. This round establishes installer, rendering, identity, focus and shutdown behaviour for Steam's unauthenticated client only.
+
 ## Bottle copy and backup with Wine's user folders
 
 _7 October 2026; Apple Silicon, independent Wine 11.0 native-identity runtime. No vendor launcher was installed for this check._
@@ -106,6 +131,6 @@ Caskrun states that imported programs keep their settings and data only when the
 
 ## Source verification
 
-The current serial Rust verification passed 267 unit tests and 2 integration tests; 2 existing tests remain ignored. Parallel runs exposed timing-sensitive failures, so the serial result is not a clean parallel-suite result. The Python harness, publication-privacy and catalog checks passed 46 tests. The native UI typechecked and a signed candidate app built and verified its signature in this round. The adaptive renderer's 23 real original image CLI cases, the packaged-core PE-artwork smoke and the development DMG verification belong to the earlier icon round and were not rerun here. These tests cover source behavior and fixtures, not real store authentication or games.
+The current serial Rust verification passed 267 unit tests and 2 integration tests; 2 existing tests remain ignored. Parallel runs exposed timing-sensitive failures, so the serial result is not a clean parallel-suite result. The Python harness, publication-privacy and catalog checks passed 47 tests; the harness now covers the Steam catalog entry and asserts its own list matches the tracked catalog. The native UI typechecked and a signed candidate app built and verified its signature in this round. The adaptive renderer's 23 real original image CLI cases, the packaged-core PE-artwork smoke and the development DMG verification belong to the earlier icon round and were not rerun here. These tests cover source behavior and fixtures, not real store authentication or games.
 
 See the separate [feature inventory](FEATURES.md) for the demo's limitations.
