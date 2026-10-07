@@ -79,8 +79,18 @@ Initial GOG tests exposed orphaned clients holding test files after Wine reporte
 
 A separate original Caskrun MSI installed its exact test payload successfully. This establishes basic MSI execution for that fixture only. Neither a source check nor a successful test fixture establishes vendor-launcher compatibility.
 
+## Bottle copy and backup with Wine's user folders
+
+_7 October 2026; Apple Silicon, independent Wine 11.0 native-identity runtime. No vendor launcher was installed for this check._
+
+A disposable bottle initialized by the real runtime showed that Wine gives its account absolute links to this macOS account's `Documents`, `Downloads`, `Music`, `Pictures` and `Videos` folders, the last of which points at `Movies`. Caskrun's own private Desktop mapping was already handled. Because the backup copier refused any other absolute link, both **Duplicate bottle** and **Export bottle** failed on every initialized bottle with `Backup contains an absolute symlink at prefix/drive_c/users/<account>/Music`. That was a complete outage of both actions for real bottles, not an edge case.
+
+Copy, export and import now record each of Wine's user-folder mappings as a folder name and recreate it for the account that owns the new bottle. After the change, the same disposable bottle duplicated and exported successfully with five recorded mappings, and the backup contained no reference to the account's home folder. Restoring it into the same account relinked all five, and a Windows `cmd.exe` run wrote through `%USERPROFILE%\Documents` into the real mapped folder. Restoring the same backup into a second account whose home had only `Documents` and `Pictures` relinked those two and kept the other three as real folders inside the bottle; nothing was created in either home folder. `wineboot` accepted the restored layout unchanged. The same create, initialize, duplicate, export and import sequence passed with the signed candidate app's packaged core.
+
+Importing a bottle into a different macOS account still leaves the bottle's original Windows account folder, so `%USERPROFILE%` points at a new, nearly empty account folder that `wineboot` creates. That limitation predates this change and is unresolved. The `.caskrun-bottle` format is now version 2; an older Caskrun refuses it rather than dropping the mappings silently. All owned test sessions were stopped, checked for remaining owners and removed.
+
 ## Source verification
 
-The current serial Rust verification passed 260 unit tests and 2 integration tests; 2 existing tests remain ignored. Parallel runs exposed timing-sensitive failures, so the serial result is not a clean parallel-suite result. The Python harness, publication-privacy and catalog checks passed 46 tests. The adaptive renderer passed 23 real original image CLI cases, and an original packaged-core PE-artwork smoke verified first-list rendering and cache reuse without Windows execution or native launch aliases. The native UI compiled and the development DMG/signatures verified. These tests cover source behavior and fixtures, not real store authentication or games.
+The current serial Rust verification passed 263 unit tests and 2 integration tests; 2 existing tests remain ignored. Parallel runs exposed timing-sensitive failures, so the serial result is not a clean parallel-suite result. The Python harness, publication-privacy and catalog checks passed 46 tests. The native UI typechecked and a signed candidate app built and verified its signature in this round. The adaptive renderer's 23 real original image CLI cases, the packaged-core PE-artwork smoke and the development DMG verification belong to the earlier icon round and were not rerun here. These tests cover source behavior and fixtures, not real store authentication or games.
 
 See the separate [feature inventory](FEATURES.md) for the demo's limitations.

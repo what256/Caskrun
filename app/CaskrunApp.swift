@@ -242,11 +242,14 @@ struct RuntimeProbeResult: Decodable, Sendable {
 struct BottleExportResult: Decodable, Sendable {
     let path: String
     let external_launchers: Int
+    let host_folders: Int
 }
 
 struct BottleImportResult: Decodable, Sendable {
     let bottle: Bottle
     let external_launchers: Int
+    let host_folders: Int
+    let private_host_folders: Int
 }
 
 struct CrossOverImportResult: Decodable, Sendable {
@@ -1269,7 +1272,11 @@ final class CaskrunModel: ObservableObject {
             defer { isManagingBottle = false; bottleOperationLabel = "Updating bottle…" }
             do {
                 let result = try await callAsync(["export", bottle.id, url.path], as: BottleExportResult.self)
-                let note = result.external_launchers == 0 ? "" : " \(result.external_launchers) external saved app path(s) may need to be reselected after restore."
+                var note = result.external_launchers == 0 ? "" : " \(result.external_launchers) external saved app path(s) may need to be reselected after restore."
+                if result.host_folders > 0 {
+                    // The backup names these folders; it never copies their contents.
+                    note += " \(result.host_folders) Windows user folder(s) will be reconnected to your Mac folders on restore."
+                }
                 message = "Saved \(bottle.name) to \(result.path).\(note)"
             } catch { message = error.localizedDescription }
         }
@@ -1292,7 +1299,13 @@ final class CaskrunModel: ObservableObject {
                 refresh()
                 selectedBottleID = result.bottle.id
                 importedBottleID = result.bottle.id
-                let note = result.external_launchers == 0 ? "" : " \(result.external_launchers) external saved app path(s) may need to be reselected."
+                var note = result.external_launchers == 0 ? "" : " \(result.external_launchers) external saved app path(s) may need to be reselected."
+                if result.host_folders > 0 {
+                    note += " \(result.host_folders) Windows user folder(s) now use your Mac folders."
+                }
+                if result.private_host_folders > 0 {
+                    note += " \(result.private_host_folders) had no matching Mac folder and stay inside the bottle."
+                }
                 message = "Restored \(result.bottle.name) from \(url.lastPathComponent).\(note)"
             } catch { message = error.localizedDescription }
         }

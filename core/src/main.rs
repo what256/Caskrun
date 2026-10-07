@@ -24,7 +24,7 @@ mod wine_tools;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
-use std::ffi::{CString, c_char};
+use std::ffi::{CString, OsStr, c_char};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
@@ -163,7 +163,11 @@ struct PrefixRecord {
 // A .caskrun-bottle backup is a directory containing manifest.json and payload/.
 // The manifest is written last, so an interrupted export cannot be imported.
 const BACKUP_FORMAT: &str = "caskrun-bottle";
-const BACKUP_VERSION: u32 = 1;
+// Version 2 records Wine's user-folder mappings instead of refusing their
+// absolute host paths, so an older reader must not accept this payload.
+const BACKUP_VERSION: u32 = 2;
+// Wine creates one mapping per standard user folder in each bottle account.
+const MAX_HOST_FOLDER_LINKS: usize = 64;
 
 #[derive(Serialize, Deserialize)]
 struct BackupManifest {
@@ -171,6 +175,41 @@ struct BackupManifest {
     version: u32,
     bottle: Bottle,
     launchers: Vec<PortableLauncher>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    host_folders: Vec<HostFolderMapping>,
+}
+
+/// Wine's mapping from a Windows user folder in the bottle to a folder in this
+/// account's home. Backups keep the folder name, never an absolute host path.
+#[derive(Serialize, Deserialize, Clone)]
+struct HostFolderMapping {
+    path: String,
+    folder: String,
+}
+
+/// What a bottle copy needs beyond its current directory: the bottle it started
+/// from, this account's home folder, and the user-folder mappings found so far.
+struct CopyPolicy<'a> {
+    source_root: &'a Path,
+    account_home: Option<PathBuf>,
+    host_folders: Vec<HostFolderMapping>,
+}
+
+impl<'a> CopyPolicy<'a> {
+    fn new(source_root: &'a Path) -> Self {
+        Self {
+            source_root,
+            account_home: bottle_xdg::account_home(),
+            host_folders: Vec::new(),
+        }
+    }
+
+    fn with_recorded(source_root: &'a Path, host_folders: Vec<HostFolderMapping>) -> Self {
+        Self {
+            host_folders,
+            ..Self::new(source_root)
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -197,12 +236,15 @@ struct BackupResult {
     path: String,
     bottle: Bottle,
     external_launchers: usize,
+    host_folders: usize,
 }
 
 #[derive(Serialize)]
 struct ImportResult {
     bottle: Bottle,
     external_launchers: usize,
+    host_folders: usize,
+    private_host_folders: usize,
 }
 
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
@@ -968,7 +1010,7 @@ fn copy_stable_file(from: &Path, to: &Path, before: &fs::Metadata) -> Result<(),
 }
 
 fn copy_tree_contents(
-    source_root: &Path,
+    policy: &mut CopyPolicy<'_>,
     source: &Path,
     destination: &Path,
     relative: &Path,
@@ -996,8 +1038,25 @@ fn copy_tree_contents(
             }
             let target = fs::read_link(&from).map_err(|e| e.to_string())?;
             assert_stable_path(&from, &before)?;
-            let target = bottle_xdg::portable_desktop_link(source_root, &child_relative, &target)
-                .unwrap_or(target);
+            // Record Wine's own user-folder mapping rather than copying an
+            // absolute host path. The link itself is never followed.
+            if let Some(folder) = policy
+                .account_home
+                .as_deref()
+                .and_then(|home| bottle_xdg::host_folder_link(home, &child_relative, &target))
+            {
+                if policy.host_folders.len() >= MAX_HOST_FOLDER_LINKS {
+                    return Err("Bottle has too many user folder mappings".into());
+                }
+                policy.host_folders.push(HostFolderMapping {
+                    path: child_relative.display().to_string(),
+                    folder,
+                });
+                continue;
+            }
+            let target =
+                bottle_xdg::portable_desktop_link(policy.source_root, &child_relative, &target)
+                    .unwrap_or(target);
             validate_backup_symlink(&child_relative, &target)?;
             symlink(target, &to).map_err(|e| e.to_string())?;
         } else if kind.is_dir() {
@@ -1009,7 +1068,7 @@ fn copy_tree_contents(
                 ));
             }
             fs::create_dir(&to).map_err(|e| e.to_string())?;
-            copy_tree_contents(source_root, &from, &to, &child_relative, &[])?;
+            copy_tree_contents(policy, &from, &to, &child_relative, &[])?;
             fs::set_permissions(&to, before.permissions()).map_err(|e| e.to_string())?;
         } else if kind.is_file() {
             copy_stable_file(&from, &to, &before)?;
@@ -1145,8 +1204,9 @@ fn duplicate_bottle_with_runtime(
     let destination = storage_root(home, true)?.join(&bottle.id);
     fs::create_dir(&destination).map_err(|e| e.to_string())?;
     let result = (|| {
+        let mut policy = CopyPolicy::new(&source);
         copy_tree_contents(
-            &source,
+            &mut policy,
             &source,
             &destination,
             Path::new(""),
@@ -1157,6 +1217,11 @@ fn duplicate_bottle_with_runtime(
                 "active-processes.json",
                 "native-apps",
             ],
+        )?;
+        bottle_xdg::restore_host_folder_links(
+            policy.account_home.as_deref(),
+            &destination,
+            &policy.host_folders,
         )?;
         bottle_xdg::for_bottle(&destination)?;
         let launchers = restore_launchers(&destination, &launchers)?;
@@ -1216,18 +1281,13 @@ fn export_bottle_with_runtime(
             .map_err(|e| e.to_string())?;
     let launchers = portable_launchers(&source, list_launchers(home, id)?);
     let external_launchers = external_launcher_count(&launchers);
-    let manifest = BackupManifest {
-        format: BACKUP_FORMAT.into(),
-        version: BACKUP_VERSION,
-        bottle: bottle.clone(),
-        launchers,
-    };
     fs::create_dir(output).map_err(|e| e.to_string())?;
     let result = (|| {
         let payload = output.join("payload");
         fs::create_dir(&payload).map_err(|e| e.to_string())?;
+        let mut policy = CopyPolicy::new(&source);
         copy_tree_contents(
-            &source,
+            &mut policy,
             &source,
             &payload,
             Path::new(""),
@@ -1240,16 +1300,29 @@ fn export_bottle_with_runtime(
                 "native-apps",
             ],
         )?;
-        save_json(&output.join("manifest.json"), &manifest)?;
-        Ok::<(), String>(())
+        let host_folders = policy.host_folders;
+        let recorded = host_folders.len();
+        // The manifest is written last, so an interrupted export stays unusable.
+        save_json(
+            &output.join("manifest.json"),
+            &BackupManifest {
+                format: BACKUP_FORMAT.into(),
+                version: BACKUP_VERSION,
+                bottle: bottle.clone(),
+                launchers,
+                host_folders,
+            },
+        )?;
+        Ok::<usize, String>(recorded)
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(output);
     }
-    result.map(|()| BackupResult {
+    result.map(|host_folders| BackupResult {
         path: output.display().to_string(),
         bottle,
         external_launchers,
+        host_folders,
     })
 }
 
@@ -1302,7 +1375,15 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
     }
     fs::create_dir(&destination).map_err(|e| e.to_string())?;
     let result = (|| {
-        copy_tree_contents(&payload, &payload, &destination, Path::new(""), &[])?;
+        // A mapping the payload still carries is restored alongside the recorded
+        // ones; a path listed twice is refused rather than silently merged.
+        let mut policy = CopyPolicy::with_recorded(&payload, manifest.host_folders.clone());
+        copy_tree_contents(&mut policy, &payload, &destination, Path::new(""), &[])?;
+        let restored = bottle_xdg::restore_host_folder_links(
+            policy.account_home.as_deref(),
+            &destination,
+            &policy.host_folders,
+        )?;
         bottle_xdg::for_bottle(&destination)?;
         let launchers = restore_launchers(&destination, &manifest.launchers)?;
         if !launchers.is_empty() {
@@ -1311,14 +1392,16 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
         // The Wine path from another machine is intentionally not restored. On first
         // launch wineboot will inspect/update the imported prefix with the chosen runtime.
         save_json(&destination.join("bottle.json"), &bottle)?;
-        Ok::<(), String>(())
+        Ok::<bottle_xdg::HostFolderOutcome, String>(restored)
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(destination);
     }
-    result.map(|()| ImportResult {
+    result.map(|restored| ImportResult {
         bottle,
         external_launchers: external_launcher_count(&manifest.launchers),
+        host_folders: restored.linked,
+        private_host_folders: restored.private,
     })
 }
 
@@ -3970,6 +4053,16 @@ mod tests {
             source.join("prefix/drive_c/users/example/Desktop"),
         )
         .unwrap();
+        // Wine maps Windows user folders onto this account's home folder. The
+        // fixture names a folder this account does not have, so the copy records
+        // the mapping and nothing in the real home folder is read or created.
+        let host_folder = format!("Caskrun test {}", Uuid::new_v4());
+        let account_home = bottle_xdg::account_home().unwrap();
+        symlink(
+            account_home.join(&host_folder),
+            source.join("prefix/drive_c/users/example/Documents"),
+        )
+        .unwrap();
         fs::create_dir(source.join("logs")).unwrap();
         fs::write(source.join("logs/first.log"), b"log data").unwrap();
         let runtime = home.join("runtime");
@@ -4022,6 +4115,11 @@ mod tests {
             fs::read(duplicate_dir.join("xdg/desktop/private-note.txt")).unwrap(),
             b"kept in bottle"
         );
+        // The copy keeps a usable Documents folder without an absolute host path.
+        assert!(path_is_real_directory(
+            &duplicate_dir.join("prefix/drive_c/users/example/Documents")
+        ));
+        assert!(!account_home.join(&host_folder).exists());
         assert!(
             fs::read_to_string(duplicate_dir.join("xdg/config/user-dirs.dirs"))
                 .unwrap()
@@ -4052,7 +4150,21 @@ mod tests {
         let exported =
             export_bottle_with_runtime(&home, &original.id, &backup, Some(&wine)).unwrap();
         assert_eq!(exported.external_launchers, 1);
+        assert_eq!(exported.host_folders, 1);
         assert!(backup.join("manifest.json").is_file());
+        // The backup names the user folder instead of keeping a host path.
+        let recorded: BackupManifest =
+            serde_json::from_slice(&fs::read(backup.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(recorded.host_folders.len(), 1);
+        assert_eq!(
+            recorded.host_folders[0].path,
+            "prefix/drive_c/users/example/Documents"
+        );
+        assert_eq!(recorded.host_folders[0].folder, host_folder);
+        assert!(
+            fs::symlink_metadata(backup.join("payload/prefix/drive_c/users/example/Documents"))
+                .is_err()
+        );
         assert!(!backup.join("payload/prefix-record.json").exists());
         assert!(!backup.join("payload/bottle.json").exists());
         assert!(!backup.join("payload/native-apps").exists());
@@ -4072,6 +4184,10 @@ mod tests {
         let restored_home = test_home();
         let restored = import_bottle(&restored_home, &backup, Some("Restored game")).unwrap();
         assert_eq!(restored.external_launchers, 1);
+        assert_eq!(
+            (restored.host_folders, restored.private_host_folders),
+            (0, 1)
+        );
         assert_eq!(restored.bottle.name, "Restored game");
         assert_ne!(restored.bottle.id, original.id);
         let restored_dir = bottle_dir(&restored_home, &restored.bottle.id).unwrap();
@@ -4087,6 +4203,10 @@ mod tests {
             fs::read_link(restored_dir.join("prefix/drive_c/users/example/Desktop")).unwrap(),
             Path::new("../../../../xdg/desktop")
         );
+        assert!(path_is_real_directory(
+            &restored_dir.join("prefix/drive_c/users/example/Documents")
+        ));
+        assert!(!account_home.join(&host_folder).exists());
         assert!(
             fs::read_to_string(restored_dir.join("xdg/config/user-dirs.dirs"))
                 .unwrap()
@@ -4150,6 +4270,49 @@ mod tests {
         assert!(import_bottle(&other, &backup, None).is_err());
         assert!(list(&other).unwrap().is_empty());
         fs::remove_file(backup.join("payload/alias")).unwrap();
+        // A recorded user folder cannot point outside this account's home folder,
+        // reach past its bottle account, or replace a folder in the payload.
+        fs::create_dir_all(backup.join("payload/prefix/drive_c/users/example")).unwrap();
+        for refused in [
+            ("prefix/drive_c/users/example/Documents", "../../Documents"),
+            ("prefix/drive_c/users/example/Documents", "/Users"),
+            ("../escape", "Documents"),
+            ("prefix/dosdevices/z:", "Documents"),
+            ("prefix/drive_c/users/example/AppData/Roaming", "Documents"),
+        ] {
+            manifest.host_folders = vec![HostFolderMapping {
+                path: refused.0.into(),
+                folder: refused.1.into(),
+            }];
+            save_json(&manifest_path, &manifest).unwrap();
+            assert!(import_bottle(&other, &backup, None).is_err());
+            assert!(list(&other).unwrap().is_empty());
+        }
+        manifest.host_folders.clear();
+        save_json(&manifest_path, &manifest).unwrap();
+        // An absolute link that is not one of Wine's own user folders still stops
+        // a copy instead of travelling into the backup.
+        let outside = source.join("prefix/drive_c/users/example");
+        fs::create_dir_all(&outside).unwrap();
+        symlink("/private/etc", outside.join("Elsewhere")).unwrap();
+        let second = home
+            .parent()
+            .unwrap()
+            .join(format!("{}.caskrun-bottle", Uuid::new_v4()));
+        assert!(
+            export_bottle(&home, &bottle.id, &second)
+                .err()
+                .unwrap()
+                .contains("absolute symlink")
+        );
+        assert!(!second.exists());
+        assert!(
+            duplicate_bottle(&home, &bottle.id, None)
+                .err()
+                .unwrap()
+                .contains("absolute symlink")
+        );
+        fs::remove_file(outside.join("Elsewhere")).unwrap();
         let metadata = source.join("bottle.json");
         let saved_metadata = source.join("saved-metadata.json");
         fs::rename(&metadata, &saved_metadata).unwrap();
