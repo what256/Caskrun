@@ -144,68 +144,170 @@ pub(super) fn account_home() -> Option<PathBuf> {
         .filter(|home| home.is_absolute())
 }
 
+/// The one policy that decides which of Wine's host-folder links a bottle copy
+/// may carry. Each entry is an exact path inside a bottle account folder and the
+/// home folders that path is allowed to name. The packaged runtime was observed
+/// creating every entry below; `Videos` also accepts `Videos` because that is
+/// the XDG default name for the same folder.
+///
+/// `Desktop` is absent on purpose: Caskrun replaces it with the bottle's own
+/// private Desktop so Windows programs cannot write to the real one. Any other
+/// path or target, including a home folder such as `Library` or `.ssh`, is
+/// refused in both directions and stops the copy instead of travelling into a
+/// backup or being recreated from one.
+const STANDARD_USER_FOLDERS: &[(&str, &[&str])] = &[
+    ("Documents", &["Documents"]),
+    ("Downloads", &["Downloads"]),
+    ("Music", &["Music"]),
+    ("Pictures", &["Pictures"]),
+    ("Videos", &["Movies", "Videos"]),
+    (
+        "AppData/Roaming/Microsoft/Windows/Templates",
+        &["Templates"],
+    ),
+];
+
+/// The home folders this exact path inside a bottle account may be mapped to.
+fn allowed_host_folders(inside: &Path) -> Option<&'static [&'static str]> {
+    STANDARD_USER_FOLDERS
+        .iter()
+        .find(|(path, _)| inside == Path::new(path))
+        .map(|(_, folders)| *folders)
+}
+
 /// Wine maps several Windows user folders onto this account's macOS home folder
 /// with an absolute symlink, so a copied bottle cannot keep the link verbatim.
-/// Recognise only a link placed directly in a bottle account folder whose target
-/// is exactly one folder inside this account's home. Caskrun keeps its own
-/// private Desktop mapping instead, so Desktop is deliberately not included.
+/// Recognise one only where the standard-folder policy allows both the path
+/// inside the bottle account and the home folder it names.
 pub(super) fn host_folder_link(home: &Path, relative: &Path, target: &Path) -> Option<String> {
-    let (_, windows_name) = account_folder_parts(relative)?;
-    if windows_name == "Desktop" {
-        return None;
-    }
-    let mut inside = target.strip_prefix(home).ok()?.components();
-    let Some(Component::Normal(folder)) = inside.next() else {
+    let (_, inside) = account_folder_parts(relative)?;
+    let allowed = allowed_host_folders(&inside)?;
+    let mut named = target.strip_prefix(home).ok()?.components();
+    let Some(Component::Normal(folder)) = named.next() else {
         return None;
     };
-    if inside.next().is_some() {
+    if named.next().is_some() {
         return None;
     }
     let folder = folder.to_str()?;
-    check_host_folder_name(folder).ok()?;
-    Some(folder.to_owned())
+    allowed.contains(&folder).then(|| folder.to_owned())
 }
 
-/// A user-folder mapping lives at prefix/drive_c/users/<account>/<folder>.
-fn account_folder_parts(relative: &Path) -> Option<(&OsStr, &OsStr)> {
-    let components: Vec<_> = relative.components().collect();
-    let [first, second, third, account, name] = components.as_slice() else {
+/// Split prefix/drive_c/users/<account>/<path inside the account>.
+fn account_folder_parts(relative: &Path) -> Option<(&OsStr, PathBuf)> {
+    let mut components = relative.components();
+    for expected in ["prefix", "drive_c", "users"] {
+        if components.next()?.as_os_str() != expected {
+            return None;
+        }
+    }
+    let Component::Normal(account) = components.next()? else {
         return None;
     };
-    if first.as_os_str() != "prefix"
-        || second.as_os_str() != "drive_c"
-        || third.as_os_str() != "users"
-    {
-        return None;
+    let mut inside = PathBuf::new();
+    for component in components {
+        let Component::Normal(name) = component else {
+            return None;
+        };
+        inside.push(name);
     }
-    match (account, name) {
-        (Component::Normal(account), Component::Normal(name)) => Some((account, name)),
-        _ => None,
-    }
+    (!inside.as_os_str().is_empty()).then_some((account, inside))
 }
 
-/// A restored mapping names a home folder, never a path. Reject anything else.
-pub(super) fn check_host_folder_name(folder: &str) -> Result<(), String> {
-    if folder.is_empty()
-        || folder.len() > 64
-        || folder == "."
-        || folder == ".."
-        || folder.contains('/')
-        || folder.contains('\0')
-    {
-        return Err("Backup has an unusable user folder name".into());
-    }
-    Ok(())
-}
-
-pub(super) fn check_host_folder_path(relative: &Path) -> Result<(), String> {
-    if account_folder_parts(relative).is_none() {
-        return Err(format!(
-            "Backup user folder mapping is not inside a bottle account: {}",
+/// The same policy that decides what a copy may record decides what a backup may
+/// restore, so a hand-edited manifest cannot introduce a mapping export refuses.
+pub(super) fn check_host_folder_mapping(relative: &Path, folder: &str) -> Result<(), String> {
+    let refused = || {
+        Err(format!(
+            "Backup user folder mapping is not a standard Windows user folder: {}",
             relative.display()
-        ));
+        ))
+    };
+    let Some((_, inside)) = account_folder_parts(relative) else {
+        return refused();
+    };
+    match allowed_host_folders(&inside) {
+        Some(allowed) if allowed.contains(&folder) => Ok(()),
+        _ => refused(),
+    }
+}
+
+/// Wine names each bottle profile folder after the account that created it, so
+/// a bottle restored under another account would otherwise get a fresh, empty
+/// profile and leave its installed programs' settings and data unreachable.
+const MAX_ACCOUNT_NAME: usize = 64;
+
+/// The macOS account name Wine will use for this bottle's Windows profile.
+pub(super) fn account_name() -> Option<String> {
+    let name = env::var("USER").ok()?;
+    check_account_name(&name).ok()?;
+    Some(name)
+}
+
+fn check_account_name(name: &str) -> Result<(), String> {
+    let plain = Path::new(name)
+        .components()
+        .next()
+        .is_some_and(|only| matches!(only, Component::Normal(part) if part == name));
+    if !plain || name.len() > MAX_ACCOUNT_NAME || name == "." || name == ".." {
+        return Err("Backup names an unusable Windows profile folder".into());
     }
     Ok(())
+}
+
+/// The bottle account folder this account's Windows profile uses, following only
+/// a link to a sibling profile inside the same bottle. Recording it lets a
+/// restore under a different account reach the same profile.
+pub(super) fn profile_account(prefix: &Path, account: Option<&str>) -> Option<String> {
+    let name = account?.to_owned();
+    check_account_name(&name).ok()?;
+    let accounts = prefix.join("drive_c/users");
+    let profile = accounts.join(&name);
+    if path_is_real_directory(&profile) {
+        return Some(name);
+    }
+    // A bottle restored under this account already points at another profile.
+    let target = fs::read_link(&profile).ok()?;
+    let sibling = match target.components().next()? {
+        Component::Normal(part) if target.components().count() == 1 => part.to_str()?.to_owned(),
+        _ => return None,
+    };
+    check_account_name(&sibling).ok()?;
+    path_is_real_directory(&accounts.join(&sibling)).then_some(sibling)
+}
+
+/// Let this account's Windows profile reach the restored one. Wine creates
+/// `drive_c/users/<account>` from the account that runs it, so a bottle restored
+/// under a different account needs that name to resolve to the profile the
+/// backup actually holds. This adds one bottle-relative link beside it; it never
+/// renames, moves, merges or removes a profile, and it leaves an existing
+/// profile folder of that name untouched.
+pub(super) fn link_restored_profile(
+    destination: &Path,
+    account: Option<&str>,
+    recorded: Option<&str>,
+) -> Result<bool, String> {
+    let Some(recorded) = recorded else {
+        return Ok(false);
+    };
+    check_account_name(recorded)?;
+    let Some(name) = account.filter(|name| check_account_name(name).is_ok()) else {
+        return Ok(false);
+    };
+    if name == recorded {
+        return Ok(false);
+    }
+    let accounts = destination.join("prefix/drive_c/users");
+    if !path_is_real_directory(&accounts) || !path_is_real_directory(&accounts.join(recorded)) {
+        return Ok(false);
+    }
+    let profile = accounts.join(name);
+    if fs::symlink_metadata(&profile).is_ok() {
+        return Ok(false);
+    }
+    symlink(recorded, &profile)
+        .map_err(|e| format!("Could not connect the restored Windows profile: {e}"))?;
+    Ok(true)
 }
 
 #[derive(Default)]
@@ -234,8 +336,7 @@ pub(super) fn restore_host_folder_links(
     for mapping in mappings {
         let relative = Path::new(&mapping.path);
         validate_relative_path(relative)?;
-        check_host_folder_path(relative)?;
-        check_host_folder_name(&mapping.folder)?;
+        check_host_folder_mapping(relative, &mapping.folder)?;
         if seen.contains(&relative) {
             return Err(format!(
                 "Backup repeats the user folder mapping {}",
@@ -432,58 +533,160 @@ mod tests {
     }
 
     #[test]
-    fn recognises_only_wine_user_folder_links_in_a_bottle_account() {
+    fn one_standard_folder_policy_governs_recording_and_restoring() {
         let home = Path::new("/example/home");
         let account = Path::new("prefix/drive_c/users/example");
+        // Every mapping the packaged runtime creates is carried, including the
+        // deeper Templates path and the macOS Movies name for Videos.
+        for (inside, folder) in [
+            ("Documents", "Documents"),
+            ("Downloads", "Downloads"),
+            ("Music", "Music"),
+            ("Pictures", "Pictures"),
+            ("Videos", "Movies"),
+            ("Videos", "Videos"),
+            ("AppData/Roaming/Microsoft/Windows/Templates", "Templates"),
+        ] {
+            let relative = account.join(inside);
+            assert_eq!(
+                host_folder_link(home, &relative, &home.join(folder)),
+                Some(folder.to_owned()),
+                "{inside} should map to {folder}"
+            );
+            assert!(check_host_folder_mapping(&relative, folder).is_ok());
+        }
+        // Export and restore refuse the same things. Desktop stays private to the
+        // bottle, and no mapping may name an unrelated or sensitive home folder.
+        for (inside, folder) in [
+            ("Desktop", "Desktop"),
+            ("Documents", "Library"),
+            ("Documents", ".ssh"),
+            ("Documents", "Movies"),
+            ("Documents", "Documents2"),
+            ("Videos", "Pictures"),
+            ("AppData/Roaming", "Documents"),
+            ("AppData/Roaming/Microsoft/Windows/Templates", "Documents"),
+            ("Saved Games", "Documents"),
+            ("Documents/Nested", "Documents"),
+        ] {
+            let relative = account.join(inside);
+            assert_eq!(
+                host_folder_link(home, &relative, &home.join(folder)),
+                None,
+                "{inside} must not map to {folder}"
+            );
+            assert!(
+                check_host_folder_mapping(&relative, folder).is_err(),
+                "restoring {inside} from {folder} must be refused"
+            );
+        }
+        // The home folder itself, a deeper target, a neighbouring home folder, a
+        // relative target and a path outside a bottle account stay refused.
+        let documents = account.join("Documents");
+        assert_eq!(host_folder_link(home, &documents, home), None);
         assert_eq!(
-            host_folder_link(home, &account.join("Documents"), &home.join("Documents")),
-            Some("Documents".into())
-        );
-        // macOS names some folders differently from Windows.
-        assert_eq!(
-            host_folder_link(home, &account.join("Videos"), &home.join("Movies")),
-            Some("Movies".into())
-        );
-        // Caskrun keeps its own private Desktop mapping instead.
-        assert_eq!(
-            host_folder_link(home, &account.join("Desktop"), &home.join("Desktop")),
-            None
-        );
-        // The home folder itself, a deeper folder, a sibling of the home folder,
-        // a relative target and a path outside an account folder stay refused.
-        assert_eq!(host_folder_link(home, &account.join("Home"), home), None);
-        assert_eq!(
-            host_folder_link(home, &account.join("Documents"), &home.join("Library/Mail")),
+            host_folder_link(home, &documents, &home.join("Library/Documents")),
             None
         );
         assert_eq!(
             host_folder_link(
                 home,
-                &account.join("Documents"),
+                &documents,
                 Path::new("/example/home-elsewhere/Documents")
             ),
             None
         );
         assert_eq!(
-            host_folder_link(home, &account.join("Documents"), Path::new("Documents")),
+            host_folder_link(home, &documents, Path::new("Documents")),
             None
+        );
+        for outside in [
+            "prefix/drive_c/Documents",
+            "prefix/dosdevices/z:",
+            "prefix/drive_c/users/example",
+            "Documents",
+        ] {
+            assert_eq!(
+                host_folder_link(home, Path::new(outside), &home.join("Documents")),
+                None
+            );
+            assert!(check_host_folder_mapping(Path::new(outside), "Documents").is_err());
+        }
+    }
+
+    #[test]
+    fn connects_a_restored_profile_only_beside_an_existing_one() {
+        let root = xdg_test_root();
+        let bottle = root.join("bottle");
+        let accounts = bottle.join("prefix/drive_c/users");
+        fs::create_dir_all(accounts.join("first/AppData/Roaming/Example")).unwrap();
+        fs::write(
+            accounts.join("first/AppData/Roaming/Example/settings.ini"),
+            b"installed program settings",
+        )
+        .unwrap();
+
+        // A bottle restored under another account reaches the saved profile.
+        assert!(link_restored_profile(&bottle, Some("second"), Some("first")).unwrap());
+        assert_eq!(
+            fs::read_link(accounts.join("second")).unwrap(),
+            Path::new("first")
         );
         assert_eq!(
-            host_folder_link(
-                home,
-                Path::new("prefix/drive_c/Documents"),
-                &home.join("Documents")
-            ),
-            None
+            fs::read(accounts.join("second/AppData/Roaming/Example/settings.ini")).unwrap(),
+            b"installed program settings"
         );
+        // The saved profile keeps its own name and contents.
+        assert!(path_is_real_directory(&accounts.join("first")));
+
+        // Nothing to do for the same account, a missing record, an unknown saved
+        // profile, or an account name that is not a plain folder name.
+        assert!(!link_restored_profile(&bottle, Some("first"), Some("first")).unwrap());
+        assert!(!link_restored_profile(&bottle, Some("third"), None).unwrap());
+        assert!(!link_restored_profile(&bottle, Some("third"), Some("absent")).unwrap());
+        assert!(!link_restored_profile(&bottle, None, Some("first")).unwrap());
+        assert!(!link_restored_profile(&bottle, Some("../escape"), Some("first")).unwrap());
+        assert!(link_restored_profile(&bottle, Some("third"), Some("../first")).is_err());
+        assert!(link_restored_profile(&bottle, Some("third"), Some("a/b")).is_err());
+        assert!(!accounts.join("third").exists());
+
+        // An account that already has a profile folder is never replaced.
+        fs::create_dir(accounts.join("fourth")).unwrap();
+        fs::write(accounts.join("fourth/own.txt"), b"existing profile").unwrap();
+        assert!(!link_restored_profile(&bottle, Some("fourth"), Some("first")).unwrap());
         assert_eq!(
-            host_folder_link(
-                home,
-                &account.join("AppData/Roaming"),
-                &home.join("Documents")
-            ),
-            None
+            fs::read(accounts.join("fourth/own.txt")).unwrap(),
+            b"existing profile"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn records_the_profile_folder_this_account_actually_uses() {
+        let root = xdg_test_root();
+        let prefix = root.join("prefix");
+        let accounts = prefix.join("drive_c/users");
+        fs::create_dir_all(accounts.join("first")).unwrap();
+        assert_eq!(
+            profile_account(&prefix, Some("first")),
+            Some("first".into())
+        );
+        // An account whose profile already points at a sibling records that one.
+        symlink("first", accounts.join("second")).unwrap();
+        assert_eq!(
+            profile_account(&prefix, Some("second")),
+            Some("first".into())
+        );
+        // A profile that is absent, left outside the bottle, or named unusably
+        // records nothing rather than guessing.
+        assert_eq!(profile_account(&prefix, Some("third")), None);
+        symlink("/tmp", accounts.join("fourth")).unwrap();
+        assert_eq!(profile_account(&prefix, Some("fourth")), None);
+        symlink("../../../elsewhere", accounts.join("fifth")).unwrap();
+        assert_eq!(profile_account(&prefix, Some("fifth")), None);
+        assert_eq!(profile_account(&prefix, None), None);
+        assert_eq!(profile_account(&prefix, Some("../first")), None);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

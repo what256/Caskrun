@@ -163,9 +163,11 @@ struct PrefixRecord {
 // A .caskrun-bottle backup is a directory containing manifest.json and payload/.
 // The manifest is written last, so an interrupted export cannot be imported.
 const BACKUP_FORMAT: &str = "caskrun-bottle";
-// Version 2 records Wine's user-folder mappings instead of refusing their
-// absolute host paths, so an older reader must not accept this payload.
+// Version 2 records Wine's user-folder mappings and the Windows profile folder
+// they belong to. Version 1 predates both and carries neither, so it still
+// restores correctly; any other version is refused.
 const BACKUP_VERSION: u32 = 2;
+const SUPPORTED_BACKUP_VERSIONS: &[u32] = &[1, BACKUP_VERSION];
 // Wine creates one mapping per standard user folder in each bottle account.
 const MAX_HOST_FOLDER_LINKS: usize = 64;
 
@@ -177,6 +179,9 @@ struct BackupManifest {
     launchers: Vec<PortableLauncher>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     host_folders: Vec<HostFolderMapping>,
+    /// The bottle account folder the exporting account's Windows profile used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile_account: Option<String>,
 }
 
 /// Wine's mapping from a Windows user folder in the bottle to a folder in this
@@ -237,6 +242,7 @@ struct BackupResult {
     bottle: Bottle,
     external_launchers: usize,
     host_folders: usize,
+    profile_account: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -245,6 +251,8 @@ struct ImportResult {
     external_launchers: usize,
     host_folders: usize,
     private_host_folders: usize,
+    /// Whether this account's Windows profile now reaches the restored one.
+    profile_account_linked: bool,
 }
 
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
@@ -1302,6 +1310,12 @@ fn export_bottle_with_runtime(
         )?;
         let host_folders = policy.host_folders;
         let recorded = host_folders.len();
+        // Name the Windows profile folder so a restore under another account can
+        // reach the installed programs' own settings and data.
+        let profile_account = bottle_xdg::profile_account(
+            &source.join("prefix"),
+            bottle_xdg::account_name().as_deref(),
+        );
         // The manifest is written last, so an interrupted export stays unusable.
         save_json(
             &output.join("manifest.json"),
@@ -1311,18 +1325,20 @@ fn export_bottle_with_runtime(
                 bottle: bottle.clone(),
                 launchers,
                 host_folders,
+                profile_account: profile_account.clone(),
             },
         )?;
-        Ok::<usize, String>(recorded)
+        Ok::<(usize, Option<String>), String>((recorded, profile_account))
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(output);
     }
-    result.map(|host_folders| BackupResult {
+    result.map(|(host_folders, profile_account)| BackupResult {
         path: output.display().to_string(),
         bottle,
         external_launchers,
         host_folders,
+        profile_account,
     })
 }
 
@@ -1338,8 +1354,14 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
     let manifest: BackupManifest =
         serde_json::from_slice(&fs::read(metadata).map_err(|e| e.to_string())?)
             .map_err(|e| format!("Invalid backup manifest: {e}"))?;
-    if manifest.format != BACKUP_FORMAT || manifest.version != BACKUP_VERSION {
+    if manifest.format != BACKUP_FORMAT || !SUPPORTED_BACKUP_VERSIONS.contains(&manifest.version) {
         return Err("Unsupported Caskrun backup format".into());
+    }
+    // Only the current format describes user folders and the Windows profile.
+    if manifest.version < BACKUP_VERSION
+        && (!manifest.host_folders.is_empty() || manifest.profile_account.is_some())
+    {
+        return Err("Backup version is too old for its user folder mappings".into());
     }
     if Uuid::parse_str(&manifest.bottle.id).is_err() {
         return Err("Backup has an invalid bottle ID".into());
@@ -1384,6 +1406,11 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
             &destination,
             &policy.host_folders,
         )?;
+        let profile_account_linked = bottle_xdg::link_restored_profile(
+            &destination,
+            bottle_xdg::account_name().as_deref(),
+            manifest.profile_account.as_deref(),
+        )?;
         bottle_xdg::for_bottle(&destination)?;
         let launchers = restore_launchers(&destination, &manifest.launchers)?;
         if !launchers.is_empty() {
@@ -1392,16 +1419,17 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
         // The Wine path from another machine is intentionally not restored. On first
         // launch wineboot will inspect/update the imported prefix with the chosen runtime.
         save_json(&destination.join("bottle.json"), &bottle)?;
-        Ok::<bottle_xdg::HostFolderOutcome, String>(restored)
+        Ok::<(bottle_xdg::HostFolderOutcome, bool), String>((restored, profile_account_linked))
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(destination);
     }
-    result.map(|restored| ImportResult {
+    result.map(|(restored, profile_account_linked)| ImportResult {
         bottle,
         external_launchers: external_launcher_count(&manifest.launchers),
         host_folders: restored.linked,
         private_host_folders: restored.private,
+        profile_account_linked,
     })
 }
 
@@ -4053,14 +4081,15 @@ mod tests {
             source.join("prefix/drive_c/users/example/Desktop"),
         )
         .unwrap();
-        // Wine maps Windows user folders onto this account's home folder. The
-        // fixture names a folder this account does not have, so the copy records
-        // the mapping and nothing in the real home folder is read or created.
-        let host_folder = format!("Caskrun test {}", Uuid::new_v4());
+        // Wine maps Windows user folders onto this account's home folder. Use the
+        // standard Videos mapping the packaged runtime creates, and record whether
+        // that folder exists so the test can prove a copy never creates one.
+        let host_folder = "Movies";
         let account_home = bottle_xdg::account_home().unwrap();
+        let home_folder_existed = account_home.join(host_folder).exists();
         symlink(
-            account_home.join(&host_folder),
-            source.join("prefix/drive_c/users/example/Documents"),
+            account_home.join(host_folder),
+            source.join("prefix/drive_c/users/example/Videos"),
         )
         .unwrap();
         fs::create_dir(source.join("logs")).unwrap();
@@ -4115,11 +4144,14 @@ mod tests {
             fs::read(duplicate_dir.join("xdg/desktop/private-note.txt")).unwrap(),
             b"kept in bottle"
         );
-        // The copy keeps a usable Documents folder without an absolute host path.
-        assert!(path_is_real_directory(
-            &duplicate_dir.join("prefix/drive_c/users/example/Documents")
-        ));
-        assert!(!account_home.join(&host_folder).exists());
+        // The copy keeps a usable Videos folder, either reconnected to this
+        // account's own folder or kept inside the bottle, and never creates one.
+        let copied_videos = duplicate_dir.join("prefix/drive_c/users/example/Videos");
+        match fs::read_link(&copied_videos) {
+            Ok(target) => assert_eq!(target, account_home.join(host_folder)),
+            Err(_) => assert!(path_is_real_directory(&copied_videos)),
+        }
+        assert_eq!(account_home.join(host_folder).exists(), home_folder_existed);
         assert!(
             fs::read_to_string(duplicate_dir.join("xdg/config/user-dirs.dirs"))
                 .unwrap()
@@ -4158,11 +4190,12 @@ mod tests {
         assert_eq!(recorded.host_folders.len(), 1);
         assert_eq!(
             recorded.host_folders[0].path,
-            "prefix/drive_c/users/example/Documents"
+            "prefix/drive_c/users/example/Videos"
         );
         assert_eq!(recorded.host_folders[0].folder, host_folder);
+        assert_eq!(recorded.profile_account, exported.profile_account);
         assert!(
-            fs::symlink_metadata(backup.join("payload/prefix/drive_c/users/example/Documents"))
+            fs::symlink_metadata(backup.join("payload/prefix/drive_c/users/example/Videos"))
                 .is_err()
         );
         assert!(!backup.join("payload/prefix-record.json").exists());
@@ -4184,10 +4217,9 @@ mod tests {
         let restored_home = test_home();
         let restored = import_bottle(&restored_home, &backup, Some("Restored game")).unwrap();
         assert_eq!(restored.external_launchers, 1);
-        assert_eq!(
-            (restored.host_folders, restored.private_host_folders),
-            (0, 1)
-        );
+        assert_eq!(restored.host_folders + restored.private_host_folders, 1);
+        // The backup came from this same account, so no profile link is needed.
+        assert!(!restored.profile_account_linked);
         assert_eq!(restored.bottle.name, "Restored game");
         assert_ne!(restored.bottle.id, original.id);
         let restored_dir = bottle_dir(&restored_home, &restored.bottle.id).unwrap();
@@ -4203,10 +4235,12 @@ mod tests {
             fs::read_link(restored_dir.join("prefix/drive_c/users/example/Desktop")).unwrap(),
             Path::new("../../../../xdg/desktop")
         );
-        assert!(path_is_real_directory(
-            &restored_dir.join("prefix/drive_c/users/example/Documents")
-        ));
-        assert!(!account_home.join(&host_folder).exists());
+        let restored_videos = restored_dir.join("prefix/drive_c/users/example/Videos");
+        match fs::read_link(&restored_videos) {
+            Ok(target) => assert_eq!(target, account_home.join(host_folder)),
+            Err(_) => assert!(path_is_real_directory(&restored_videos)),
+        }
+        assert_eq!(account_home.join(host_folder).exists(), home_folder_existed);
         assert!(
             fs::read_to_string(restored_dir.join("xdg/config/user-dirs.dirs"))
                 .unwrap()
@@ -4222,6 +4256,85 @@ mod tests {
                 .to_string()
         );
         assert_eq!(restored_apps[1].path, external.display().to_string());
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(restored_home).unwrap();
+        fs::remove_dir_all(backup).unwrap();
+    }
+
+    #[test]
+    fn older_backups_restore_and_unknown_versions_are_refused() {
+        let home = test_home();
+        let bottle = create(&home, "Older backup").unwrap();
+        let source = bottle_dir(&home, &bottle.id).unwrap();
+        let account = source.join("prefix/drive_c/users/example");
+        fs::create_dir_all(account.join("AppData/Roaming/Example")).unwrap();
+        fs::write(
+            account.join("AppData/Roaming/Example/settings.ini"),
+            b"saved",
+        )
+        .unwrap();
+        let backup = home
+            .parent()
+            .unwrap()
+            .join(format!("{}.caskrun-bottle", Uuid::new_v4()));
+        export_bottle(&home, &bottle.id, &backup).unwrap();
+        let manifest_path = backup.join("manifest.json");
+        let saved: BackupManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        assert_eq!(saved.version, BACKUP_VERSION);
+
+        // A version 1 backup predates both new fields and still restores.
+        let older = serde_json::json!({
+            "format": BACKUP_FORMAT,
+            "version": 1,
+            "bottle": saved.bottle,
+            "launchers": [],
+        });
+        save_json(&manifest_path, &older).unwrap();
+        let restored_home = test_home();
+        let restored = import_bottle(&restored_home, &backup, Some("From version 1")).unwrap();
+        assert_eq!(
+            (restored.host_folders, restored.private_host_folders),
+            (0, 0)
+        );
+        assert!(!restored.profile_account_linked);
+        let restored_dir = bottle_dir(&restored_home, &restored.bottle.id).unwrap();
+        assert_eq!(
+            fs::read(
+                restored_dir
+                    .join("prefix/drive_c/users/example/AppData/Roaming/Example/settings.ini")
+            )
+            .unwrap(),
+            b"saved"
+        );
+
+        // A version 1 backup must not smuggle in the newer fields, and an
+        // unknown version is refused rather than guessed at.
+        let refused_home = test_home();
+        for manifest in [
+            serde_json::json!({
+                "format": BACKUP_FORMAT, "version": 1, "bottle": saved.bottle, "launchers": [],
+                "host_folders": [{"path": "prefix/drive_c/users/example/Documents",
+                                  "folder": "Documents"}],
+            }),
+            serde_json::json!({
+                "format": BACKUP_FORMAT, "version": 1, "bottle": saved.bottle, "launchers": [],
+                "profile_account": "example",
+            }),
+            serde_json::json!({
+                "format": BACKUP_FORMAT, "version": 0, "bottle": saved.bottle, "launchers": [],
+            }),
+            serde_json::json!({
+                "format": BACKUP_FORMAT, "version": BACKUP_VERSION + 1, "bottle": saved.bottle,
+                "launchers": [],
+            }),
+        ] {
+            save_json(&manifest_path, &manifest).unwrap();
+            assert!(import_bottle(&refused_home, &backup, None).is_err());
+            assert!(list(&refused_home).unwrap().is_empty());
+        }
+        // A refused version is rejected before any bottle storage is created.
+        assert!(!refused_home.exists());
         fs::remove_dir_all(home).unwrap();
         fs::remove_dir_all(restored_home).unwrap();
         fs::remove_dir_all(backup).unwrap();

@@ -250,6 +250,7 @@ struct BottleImportResult: Decodable, Sendable {
     let external_launchers: Int
     let host_folders: Int
     let private_host_folders: Int
+    let profile_account_linked: Bool
 }
 
 struct CrossOverImportResult: Decodable, Sendable {
@@ -1305,6 +1306,9 @@ final class CaskrunModel: ObservableObject {
                 }
                 if result.private_host_folders > 0 {
                     note += " \(result.private_host_folders) had no matching Mac folder and stay inside the bottle."
+                }
+                if result.profile_account_linked {
+                    note += " This Mac account now uses the restored Windows profile, so imported apps keep their settings and data."
                 }
                 message = "Restored \(result.bottle.name) from \(url.lastPathComponent).\(note)"
             } catch { message = error.localizedDescription }
