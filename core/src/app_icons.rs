@@ -216,7 +216,7 @@ fn extract_for_launcher(
     };
     let file = match OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW_ANY)
+        .custom_flags(O_NOFOLLOW_ANY | 0x4)
         .open(exe)
     {
         Ok(file) => file,
@@ -235,6 +235,20 @@ fn extract_for_launcher(
     let Some(ico) = ico else {
         return Ok(IconResult { path: None });
     };
+    // This converts bounded data only, without creating native .app aliases
+    // or starting Wine. Older engines and safe renderer failures retain the
+    // publisher ICO fallback below.
+    let rendered = native_app_identity::rendered_icon(bottle, &ico);
+    if !same_snapshot(&before, &file.metadata().map_err(|e| e.to_string())?)
+        || !fs::symlink_metadata(exe).is_ok_and(|after| same_snapshot(&before, &after))
+    {
+        return Ok(IconResult { path: None });
+    }
+    if let Some(path) = rendered {
+        return Ok(IconResult {
+            path: Some(path.display().to_string()),
+        });
+    }
     let artwork = bottle.join("artwork");
     match fs::create_dir(&artwork) {
         Ok(()) => {}
@@ -280,7 +294,7 @@ fn cached_icon_matches(path: &Path, expected: &[u8]) -> bool {
     }
     let Ok(mut file) = OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW_ANY)
+        .custom_flags(O_NOFOLLOW_ANY | 0x4)
         .open(path)
     else {
         return false;
@@ -860,6 +874,27 @@ mod tests {
         );
         fs::remove_file(&second_exe).unwrap();
         assert!(bottle_icon(&home, &bottle.id).unwrap().path.is_none());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn saved_manual_host_exe_artwork_does_not_require_native_alias_containment() {
+        let home = test_path("manual-host");
+        let bottle = crate::create(&home, "Manual app artwork").unwrap();
+        let host = home.join("host-installers");
+        fs::create_dir(&host).unwrap();
+        let exe = host.join("OriginalManualApp.exe");
+        let bytes = pe_with_icon();
+        fs::write(&exe, &bytes).unwrap();
+        let launcher = crate::add_launcher(&home, &bottle.id, "Manual app", &exe).unwrap();
+        let result = app_icon(&home, &bottle.id, &launcher.id).unwrap();
+        let path = result
+            .path
+            .expect("Saved host EXEs retain their publisher artwork");
+        assert!(Path::new(&path).exists());
+        assert_eq!(fs::read(&exe).unwrap(), bytes);
+        let dir = crate::bottle_dir(&home, &bottle.id).unwrap();
+        assert!(!dir.join("native-apps").exists());
         fs::remove_dir_all(home).unwrap();
     }
 }

@@ -65,17 +65,25 @@ malformed responses, and linked or out-of-home loader paths. A separate
 Foundation probe confirms the generated bundle's name overrides neutral
 embedded metadata. These checks do not establish game or launcher compatibility.
 
-`native_icon.swift` is an original LGPL-2.1-or-later offscreen ARM64 helper.
+`native_icon.swift` is an original MIT-licensed offscreen ARM64 helper. The current
+app packages it as a signed `caskrun-native-icon` sibling of the core and shares
+its composition code with the UI. A guarded app-helper selection keeps the
+included Windows runtime byte-identical, so icon polish alone does not migrate
+existing bottles. Older engine packages retain their recorded renderer source
+and notices. Wine patches retain their upstream licences.
 It accepts an original ICO or Caskrun's own fallback PNG and writes a new
 1024-pixel PNG plus ICNS with native and Retina PNG representations. It retains
-publisher colours, alpha and aspect ratio inside a padded charcoal native tile.
+publisher colours and aspect ratio through adaptive alpha/background composition;
+finished tiles and circles retain their own shape, while sparse low-contrast
+marks can receive a restrained contrasting plate. See [icon policy](../docs/ICON_COMPOSITION.md).
 ImageIO validates at most 64 representations, each at most 4096 pixels per
 side, before decoding only a 1024-pixel thumbnail. Input and output are bounded
 to 16 MiB; anchored no-follow directory/file operations reject symbolic links
 and preserve pre-existing outputs. No native application or window is created.
-Fourteen isolated icon-format, decode-limit and safe-failure checks pass; Apple
-iconutil reads the resulting ICNS. Cold PNG conversion measured 0.514 seconds
-on the development Mac; this is a sample, not a universal timing guarantee.
+Twenty-three real CLI synthetic-image cases pass for composition, native/Retina
+representations, decode limits and safe failures. The slowest successful
+conversion measured 0.365 seconds against the 1.1-second callback deadline;
+this is a sample, not a universal timing guarantee.
 Eighty-five isolated Cocoa role checks confirm ordinary apps/tools remain
 eligible for foreground use while the narrowly identified background roles
 are accessory. Full packaged-runtime and vendor-launcher checks remain separate.

@@ -1,8 +1,87 @@
 import AppKit
 import SwiftUI
+import ImageIO
+import Darwin
 
-private struct CatalogArtworkSource {
-    enum Format {
+// Shared with the offscreen Dock renderer; no window or Windows process is created.
+private enum MacAppArtwork {
+    static func png(_ data: Data, crop: CGRect? = nil, svg: Bool = false) -> Data? {
+        guard !data.isEmpty, data.count <= 16 * 1024 * 1024 else { return nil }
+        let bitmap: CGImage
+        if svg {
+            guard let image = NSImage(data: data), image.isValid,
+                  image.size.width > 0, image.size.height > 0,
+                  image.size.width <= 2048, image.size.height <= 2048,
+                  let decoded = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  decoded.width <= 4096, decoded.height <= 4096 else { return nil }
+            if let crop {
+                let sx = CGFloat(decoded.width) / image.size.width
+                let sy = CGFloat(decoded.height) / image.size.height
+                let rect = CGRect(x: crop.minX * sx, y: crop.minY * sy,
+                                  width: crop.width * sx, height: crop.height * sy).integral
+                guard rect.minX >= 0, rect.minY >= 0,
+                      rect.maxX <= CGFloat(decoded.width), rect.maxY <= CGFloat(decoded.height),
+                      let cropped = decoded.cropping(to: rect) else { return nil }
+                bitmap = cropped
+            } else { bitmap = decoded }
+        } else {
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  CGImageSourceGetCount(source) > 0, CGImageSourceGetCount(source) <= 64 else { return nil }
+            var best = 0, area = 0
+            for index in 0..<CGImageSourceGetCount(source) {
+                guard let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
+                      let width = props[kCGImagePropertyPixelWidth] as? NSNumber,
+                      let height = props[kCGImagePropertyPixelHeight] as? NSNumber,
+                      width.intValue > 0, height.intValue > 0,
+                      width.intValue <= 4096, height.intValue <= 4096 else { return nil }
+                if width.intValue * height.intValue > area {
+                    best = index; area = width.intValue * height.intValue
+                }
+            }
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 1024,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true
+            ]
+            guard let decoded = CGImageSourceCreateThumbnailAtIndex(source, best, options as CFDictionary) else { return nil }
+            bitmap = decoded
+        }
+        return try? caskrunAdaptiveIconPNG(bitmap, size: 256)
+    }
+
+    static func read(_ path: String, maximum: Int) -> Data? {
+        guard path.hasPrefix("/"), !path.contains("\0"),
+              URL(fileURLWithPath: path).standardizedFileURL.path == path else { return nil }
+        let fd = Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW | 0x2000_0000)
+        guard fd >= 0 else { return nil }
+        defer { Darwin.close(fd) }
+        var before = stat()
+        guard fstat(fd, &before) == 0, (before.st_mode & S_IFMT) == S_IFREG,
+              before.st_size > 0, before.st_size <= maximum else { return nil }
+        var data = Data(count: Int(before.st_size))
+        let readOK = data.withUnsafeMutableBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.read(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                if count < 0, errno == EINTR { continue }
+                guard count > 0 else { return false }
+                offset += count
+            }
+            return true
+        }
+        var after = stat()
+        guard readOK, fstat(fd, &after) == 0, before.st_size == after.st_size,
+              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
+              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else { return nil }
+        return data
+    }
+}
+
+private struct CatalogArtworkSource: Sendable {
+    enum Format: Sendable {
         case png, icon, svg
     }
 
@@ -70,7 +149,7 @@ private final class CatalogArtworkStore: ObservableObject {
             .appendingPathComponent(source.cacheName)
     }
 
-    private func decode(_ data: Data, source: CatalogArtworkSource) -> NSImage? {
+    private nonisolated static func prepare(_ data: Data, source: CatalogArtworkSource) -> Data? {
         guard !data.isEmpty, data.count <= 512 * 1024 else { return nil }
         switch source.format {
         case .png:
@@ -78,24 +157,10 @@ private final class CatalogArtworkStore: ObservableObject {
         case .icon:
             guard data.starts(with: [0, 0, 1, 0]) else { return nil }
         case .svg:
-            guard let xml = String(data: data, encoding: .utf8),
-                  xml.contains("<svg "),
+            guard let xml = String(data: data, encoding: .utf8), xml.contains("<svg "),
                   !["<!DOCTYPE", "<script", "<foreignObject", "<image", "<use", "href=", "url("].contains(where: xml.contains) else { return nil }
         }
-        guard let image = NSImage(data: data), image.isValid,
-              image.size.width > 0, image.size.height > 0,
-              image.size.width <= 2048, image.size.height <= 2048 else { return nil }
-        guard let crop = source.crop else { return image }
-        guard let bitmap = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              bitmap.width <= 4096, bitmap.height <= 4096 else { return nil }
-        let scaleX = CGFloat(bitmap.width) / image.size.width
-        let scaleY = CGFloat(bitmap.height) / image.size.height
-        let pixelCrop = CGRect(x: crop.minX * scaleX, y: crop.minY * scaleY,
-                               width: crop.width * scaleX, height: crop.height * scaleY).integral
-        guard pixelCrop.minX >= 0, pixelCrop.minY >= 0,
-              pixelCrop.maxX <= CGFloat(bitmap.width), pixelCrop.maxY <= CGFloat(bitmap.height),
-              let cropped = bitmap.cropping(to: pixelCrop) else { return nil }
-        return NSImage(cgImage: cropped, size: crop.size)
+        return MacAppArtwork.png(data, crop: source.crop, svg: source.format == .svg)
     }
 
     func load(_ id: String) {
@@ -107,17 +172,16 @@ private final class CatalogArtworkStore: ObservableObject {
               let cache = cacheURL(for: source),
               requested.insert(id).inserted else { return }
 
-        if let attributes = try? FileManager.default.attributesOfItem(atPath: cache.path),
-           let size = attributes[.size] as? NSNumber, size.intValue <= 512 * 1024,
-           let data = try? Data(contentsOf: cache),
-           let image = decode(data, source: source) {
-            images[id] = image
-            requested.remove(id)
-            return
-        }
-
         Task {
             defer { requested.remove(id) }
+            let cached = await Task.detached(priority: .utility) {
+                MacAppArtwork.read(cache.path, maximum: 512 * 1024)
+                    .flatMap { Self.prepare($0, source: source) }
+            }.value
+            if let cached, let image = NSImage(data: cached) {
+                images[id] = image
+                return
+            }
             do {
                 var request = URLRequest(url: source.url)
                 request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Caskrun/0.1", forHTTPHeaderField: "User-Agent")
@@ -139,7 +203,10 @@ private final class CatalogArtworkStore: ObservableObject {
                     guard data.count < 512 * 1024 else { return }
                     data.append(byte)
                 }
-                guard let image = decode(data, source: source) else { return }
+                let prepared = await Task.detached(priority: .utility) {
+                    Self.prepare(data, source: source)
+                }.value
+                guard let prepared, let image = NSImage(data: prepared) else { return }
                 images[id] = image
                 // A cache write failure must not hide an image we already decoded.
                 try? FileManager.default.createDirectory(at: cache.deletingLastPathComponent(),
@@ -995,29 +1062,49 @@ final class CaskrunModel: ObservableObject {
         activeCatalogCancellation.cancel()
     }
 
+    private func artworkPolicyStamp() -> String {
+        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/caskrun-native-icon").path
+        let renderer = FileManager.default.fileExists(atPath: bundled) ? bundled : status.wine_path.map {
+            URL(fileURLWithPath: $0).deletingLastPathComponent().appendingPathComponent("native-icon").path
+        }
+        return "adaptive-v1:\(status.wine_path ?? "none"):\(renderer.map(iconStamp(for:)) ?? "none")"
+    }
+
+    private func launcherIconStamp(_ launcher: SavedLauncher) -> String {
+        "\(artworkPolicyStamp()):\(launcher.name):\(iconStamp(for: launcher.path))"
+    }
+
     private func iconStamp(for path: String) -> String {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
               let size = attributes[.size] as? NSNumber,
               let modified = attributes[.modificationDate] as? Date else { return "missing" }
-        return "\(size.uint64Value):\(modified.timeIntervalSince1970)"
+        return "\(size.uint64Value):\(modified.timeIntervalSince1970):\(attributes[.systemFileNumber] ?? "none")"
     }
 
     private func bottleIconStamp(_ bottle: Bottle) -> String {
-        (launchers[bottle.id] ?? []).prefix(64).map { launcher in
-            "\(launcher.id):\(iconStamp(for: launcher.path))"
+        artworkPolicyStamp() + ":" + (launchers[bottle.id] ?? []).prefix(64).map { launcher in
+            "\(launcher.id):\(launcherIconStamp(launcher))"
         }.joined(separator: "|")
     }
 
     func loadLauncherIcon(_ launcher: SavedLauncher, in bottle: Bottle) {
         let key = "\(bottle.id):\(launcher.id)"
-        let stamp = iconStamp(for: launcher.path)
+        let stamp = launcherIconStamp(launcher)
         let requestKey = "app:\(key)"
         guard launcherIcons[key] == nil || launcherIconStamps[key] != stamp else { return }
         guard requestedIcons.insert(requestKey).inserted else { return }
         Task {
-            defer { requestedIcons.remove(requestKey) }
-            guard let result = try? await callAsync(["app-icon", bottle.id, launcher.id], as: AppIconResult.self),
-                  let path = result.path,
+            defer {
+                requestedIcons.remove(requestKey)
+                if let current = launchers[bottle.id]?.first(where: { $0.id == launcher.id }),
+                   launcherIconStamp(current) != stamp {
+                    loadLauncherIcon(current, in: bottle)
+                }
+            }
+            let result = try? await callAsync(["app-icon", bottle.id, launcher.id], as: AppIconResult.self)
+            guard let current = launchers[bottle.id]?.first(where: { $0.id == launcher.id }),
+                  launcherIconStamp(current) == stamp else { return }
+            guard let result, let path = result.path,
                   let icon = NSImage(contentsOfFile: path) else {
                 launcherIcons.removeValue(forKey: key)
                 launcherIconStamps.removeValue(forKey: key)
@@ -1034,9 +1121,15 @@ final class CaskrunModel: ObservableObject {
         guard bottleIcons[bottle.id] == nil || bottleIconStamps[bottle.id] != stamp else { return }
         guard requestedIcons.insert(requestKey).inserted else { return }
         Task {
-            defer { requestedIcons.remove(requestKey) }
-            guard let result = try? await callAsync(["bottle-icon", bottle.id], as: AppIconResult.self),
-                  let path = result.path,
+            defer {
+                requestedIcons.remove(requestKey)
+                if let current = bottles.first(where: { $0.id == bottle.id }), bottleIconStamp(current) != stamp {
+                    loadBottleIcon(current)
+                }
+            }
+            let result = try? await callAsync(["bottle-icon", bottle.id], as: AppIconResult.self)
+            guard bottles.contains(where: { $0.id == bottle.id }), bottleIconStamp(bottle) == stamp else { return }
+            guard let result, let path = result.path,
                   let icon = NSImage(contentsOfFile: path) else {
                 bottleIcons.removeValue(forKey: bottle.id)
                 bottleIconStamps.removeValue(forKey: bottle.id)
@@ -1878,27 +1971,9 @@ private struct LauncherBadge: View {
     let fallbackSymbol: String
     var size: CGFloat = 56
 
-    private var isSteam: Bool {
-        URL(fileURLWithPath: launcher.path).lastPathComponent
-            .localizedCaseInsensitiveCompare("steam.exe") == .orderedSame
-    }
-
     var body: some View {
         LauncherArtwork(model: model, bottle: bottle, launcher: launcher,
-                        fallbackSymbol: fallbackSymbol, size: isSteam ? size * 2 / 3 : size)
-            .frame(width: size, height: size)
-            .background {
-                if isSteam {
-                    RoundedRectangle(cornerRadius: size * 0.25, style: .continuous)
-                        .fill(.white)
-                }
-            }
-            .overlay {
-                if isSteam {
-                    RoundedRectangle(cornerRadius: size * 0.25, style: .continuous)
-                        .strokeBorder(.black.opacity(0.07), lineWidth: 1)
-                }
-            }
+                        fallbackSymbol: fallbackSymbol, size: size)
     }
 }
 
@@ -2132,16 +2207,13 @@ private struct CatalogArtworkTile: View {
 
     var body: some View {
         ZStack {
-            if id != "steam" || store.images[id] == nil {
-                RoundedRectangle(cornerRadius: size * 0.23).fill(fallback.background)
-            }
             if let image = store.images[id] {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
-                    .padding(id == "steam" ? 0 : (id == "battle-net" ? 1 : 3))
             } else {
+                RoundedRectangle(cornerRadius: size * 0.23).fill(fallback.background)
                 Text(fallback.label)
                     .font(.system(size: size * (fallback.label.count > 2 ? 0.25 : 0.39),
                                   weight: .black, design: .rounded))
@@ -2149,7 +2221,6 @@ private struct CatalogArtworkTile: View {
             }
         }
         .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: size * 0.23))
         .accessibilityHidden(true)
         .task(id: id) { store.load(id) }
     }
@@ -2217,11 +2288,8 @@ private struct SteamGameTile: View {
             icon = nil
             if let path = game.icon_path {
                 let data = await Task.detached(priority: .utility) { () -> Data? in
-                    guard let file = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
-                    defer { try? file.close() }
-                    guard let data = try? file.read(upToCount: 8 * 1024 * 1024 + 1),
-                          data.count <= 8 * 1024 * 1024 else { return nil }
-                    return data
+                    guard let bytes = MacAppArtwork.read(path, maximum: 8 * 1024 * 1024) else { return nil }
+                    return MacAppArtwork.png(bytes)
                 }.value
                 if !Task.isCancelled, let data { icon = NSImage(data: data) }
             }

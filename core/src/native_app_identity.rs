@@ -109,15 +109,10 @@ fn runtime_inputs(wine: &Path) -> Result<Option<RuntimeInputs>, String> {
     if !fs::symlink_metadata(&ntdll).is_ok_and(|m| m.file_type().is_file()) {
         return Err("Native app loader has no packaged NTDLL".into());
     }
-    let icon_renderer = root.join("bin/native-icon");
-    let renderer_bytes = read_stable_file(&icon_renderer, MAX_LOADER_BYTES)?;
-    if !is_executable(&icon_renderer)
-        || renderer_bytes.len() < 32
-        || renderer_bytes[..4] != [0xcf, 0xfa, 0xed, 0xfe]
-        || u32::from_le_bytes(renderer_bytes[4..8].try_into().unwrap()) != 0x0100_000c
-    {
-        return Err("Native icon renderer is not the package's ARM64 utility".into());
-    }
+    let core = env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|e| e.to_string())?;
+    let (icon_renderer, renderer_bytes) = select_icon_renderer(&root, &core)?;
     let fallback_icon = read_stable_file(&root.join("native-default-icon.png"), 4 * 1024 * 1024)?;
     let fallback_icns = read_stable_file(&root.join("native-default-icon.icns"), 16 * 1024 * 1024)?;
     let fallback_png =
@@ -132,6 +127,62 @@ fn runtime_inputs(wine: &Path) -> Result<Option<RuntimeInputs>, String> {
         fallback_icon: Some(fallback_icon),
         fallback_artwork: Some((fallback_icns, fallback_png)),
     }))
+}
+
+fn read_icon_renderer(path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = read_stable_file(path, MAX_LOADER_BYTES)?;
+    if !is_executable(path)
+        || bytes.len() < 32
+        || bytes[..4] != [0xcf, 0xfa, 0xed, 0xfe]
+        || u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != 0x0100_000c
+    {
+        return Err("Native icon renderer is not a packaged ARM64 utility".into());
+    }
+    Ok(bytes)
+}
+
+/// Artwork can evolve without changing Wine's verified package identity.
+/// Only a core running inside our exact generated app layout may select its
+/// signed sibling helper; a development CLI keeps the runtime's own utility.
+fn select_icon_renderer(root: &Path, core: &Path) -> Result<(PathBuf, Vec<u8>), String> {
+    let runtime_renderer = || {
+        let path = root.join("bin/native-icon");
+        let bytes = read_icon_renderer(&path)?;
+        Ok((path, bytes))
+    };
+    if !core.is_absolute() || !core.ends_with("Caskrun.app/Contents/MacOS/caskrun-core") {
+        return runtime_renderer();
+    }
+    let macos = core.parent().ok_or("Missing Caskrun app MacOS directory")?;
+    let contents = macos
+        .parent()
+        .ok_or("Missing Caskrun app Contents directory")?;
+    let app = contents.parent().ok_or("Missing Caskrun app directory")?;
+    let resources = contents.join("Resources");
+    let marker = resources.join(".caskrun-generated-app");
+    match fs::symlink_metadata(&marker) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return runtime_renderer(),
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => {}
+    }
+    let mut guards = Vec::new();
+    for directory in [app, contents, macos, resources.as_path()] {
+        guards.push(open_cache_directory(directory)?);
+    }
+    let before = fs::symlink_metadata(core).map_err(|e| e.to_string())?;
+    let _core_guard = open_stable_regular_file(core, &before)?;
+    if !read_stable_file(&marker, 128)?.is_empty() {
+        return Err("Unrecognized generated Caskrun app marker".into());
+    }
+    let path = macos.join("caskrun-native-icon");
+    let bytes = read_icon_renderer(&path)?;
+    for (directory, guard) in [app, contents, macos, resources.as_path()]
+        .into_iter()
+        .zip(&guards)
+    {
+        assert_artwork_directory(directory, guard)?;
+    }
+    Ok((path, bytes))
 }
 
 /// A narrow shutdown proof for Caskrun's generated native aliases. The held
@@ -314,10 +365,195 @@ pub(super) fn prepare(home: &Path, id: &str, image: &Path) -> Result<PathBuf, St
 pub(super) fn cached_icon(home: &Path, id: &str, image: &Path) -> Option<PathBuf> {
     let wine = wine_path()?;
     let inputs = runtime_inputs(&wine).ok()??;
-    let loader = prepare_with_inputs_mode(home, id, image, None, &inputs, false).ok()?;
-    let png = loader.parent()?.parent()?.join("Resources/app.png");
+    cached_icon_with_inputs(home, id, image, &inputs)
+}
+
+fn cached_icon_with_inputs(
+    home: &Path,
+    id: &str,
+    image: &Path,
+    inputs: &RuntimeInputs,
+) -> Option<PathBuf> {
+    let loader = prepare_with_inputs_mode(home, id, image, None, inputs, false).ok()?;
+    let resources = loader.parent()?.parent()?.join("Resources");
+    // A previous launch may have used the original fallback after a bounded
+    // publisher render failed. Home can retry that publisher's data-only
+    // conversion without reusing the fallback or generating another alias.
+    if read_stable_file(&resources.join("native-icon-mode"), 32).ok()? == b"fallback\n"
+        && read_stable_file(&resources.join("app.ico"), 16 * 1024 * 1024).is_ok()
+    {
+        return None;
+    }
+    let png = resources.join("app.png");
     read_stable_file(&png, 4 * 1024 * 1024).ok()?;
     Some(png)
+}
+
+/// Convert an already extracted publisher ICO for Home. This cache contains
+/// only image data: listing never creates an app alias or executes Windows.
+/// The saved launcher's source may be outside the prefix; its stable bytes
+/// were extracted by app_icons, so native loader containment does not apply.
+pub(super) fn rendered_icon(dir: &Path, ico: &[u8]) -> Option<PathBuf> {
+    let wine = wine_path()?;
+    let inputs = runtime_inputs(&wine).ok()??;
+    render_artwork_with_inputs(dir, ico, &inputs).ok()
+}
+
+const ARTWORK_VERSION: &[u8] = b"caskrun-native-artwork-v1\0";
+
+fn artwork_key(ico: &[u8], renderer: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(ARTWORK_VERSION);
+    digest.update((ico.len() as u64).to_be_bytes());
+    digest.update(ico);
+    digest.update((renderer.len() as u64).to_be_bytes());
+    digest.update(renderer);
+    format!("{:x}", digest.finalize())
+}
+
+fn artwork_receipt(key: &str, ico: &[u8], renderer: &[u8], icns: &[u8], png: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "caskrun-native-artwork-v1\n{key}\n{:x}\n{:x}\n{:x}\n{:x}\n",
+        Sha256::digest(ico),
+        Sha256::digest(renderer),
+        Sha256::digest(icns),
+        Sha256::digest(png)
+    )
+}
+
+fn assert_artwork_directory(path: &Path, guard: &File) -> Result<(), String> {
+    let held = guard.metadata().map_err(|e| e.to_string())?;
+    let current = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !same_identity(&held, &current) {
+        return Err("Artwork directory was replaced".into());
+    }
+    Ok(())
+}
+
+fn validate_artwork_cache(
+    dir: &Path,
+    key: &str,
+    ico: &[u8],
+    renderer: &[u8],
+) -> Result<PathBuf, String> {
+    let guard = open_cache_directory(dir)?;
+    let mut names = fs::read_dir(dir)
+        .map_err(|e| e.to_string())?
+        .take(5)
+        .map(|entry| entry.map(|e| e.file_name()).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort();
+    let expected: Vec<_> = ["app.icns", "app.ico", "app.png", "artwork.sha256"]
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    if names != expected || read_stable_file(&dir.join("app.ico"), 16 * 1024 * 1024)? != ico {
+        return Err("Artwork cache source or contents changed".into());
+    }
+    let icns = read_stable_file(&dir.join("app.icns"), 16 * 1024 * 1024)?;
+    let png = read_stable_file(&dir.join("app.png"), 4 * 1024 * 1024)?;
+    validate_native_artwork(&icns, &png)?;
+    let expected = artwork_receipt(key, ico, renderer, &icns, &png);
+    if read_stable_file(&dir.join("artwork.sha256"), 512)? != expected.as_bytes() {
+        return Err("Artwork cache receipt changed".into());
+    }
+    assert_artwork_directory(dir, &guard)?;
+    Ok(dir.join("app.png"))
+}
+
+fn render_artwork_with_inputs(
+    dir: &Path,
+    ico: &[u8],
+    inputs: &RuntimeInputs,
+) -> Result<PathBuf, String> {
+    if ico.len() > 16 * 1024 * 1024 || !ico.starts_with(&[0, 0, 1, 0]) {
+        return Err("Artwork source is not a bounded publisher ICO".into());
+    }
+    let renderer = inputs
+        .icon_renderer
+        .as_ref()
+        .ok_or("No native icon renderer")?;
+    let (_renderer_guard, renderer_bytes) = read_stable_open_file(renderer, MAX_LOADER_BYTES)?;
+    if renderer_bytes != inputs.renderer_bytes || !is_executable(renderer) {
+        return Err("Artwork renderer changed".into());
+    }
+    let bottle_guard = open_cache_directory(dir)?;
+    let prefix = dir.join("prefix");
+    let (prefix_guard, prefix_snapshot) = open_stable_directory(&prefix)?;
+    let artwork = dir.join("artwork");
+    let cache = artwork.join("native");
+    let mut guards = Vec::new();
+    for path in [&artwork, &cache] {
+        match fs::create_dir(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        guards.push(open_cache_directory(path)?);
+    }
+    let check_guards = || {
+        assert_artwork_directory(dir, &bottle_guard)?;
+        bottle_control::assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
+        for (path, guard) in [&artwork, &cache].into_iter().zip(&guards) {
+            assert_artwork_directory(path, guard)?;
+        }
+        if read_stable_file(renderer, MAX_LOADER_BYTES)? != renderer_bytes {
+            return Err("Artwork renderer changed during conversion".into());
+        }
+        Ok::<_, String>(())
+    };
+    let key = artwork_key(ico, &renderer_bytes);
+    let destination = cache.join(&key);
+    if fs::symlink_metadata(&destination).is_ok() {
+        let png = validate_artwork_cache(&destination, &key, ico, &renderer_bytes)?;
+        check_guards()?;
+        return Ok(png);
+    }
+    let temporary = cache.join(format!(".artwork-{}", Uuid::new_v4()));
+    fs::create_dir(&temporary).map_err(|e| e.to_string())?;
+    let temporary_guard = open_cache_directory(&temporary)?;
+    let result = (|| {
+        write_new(&temporary.join("app.ico"), ico, 0o600)?;
+        let (icns, png) = render_once(renderer, &temporary.join("app.ico"), &temporary)?;
+        let receipt = artwork_receipt(&key, ico, &renderer_bytes, &icns, &png);
+        write_new(&temporary.join("artwork.sha256"), receipt.as_bytes(), 0o600)?;
+        validate_artwork_cache(&temporary, &key, ico, &renderer_bytes)?;
+        assert_artwork_directory(&temporary, &temporary_guard)?;
+        check_guards()?;
+        // A concurrent image request can win. Never replace an existing
+        // nonempty cache; the losing request accepts only an exact winner.
+        let from =
+            CString::new(temporary.file_name().unwrap().as_bytes()).map_err(|e| e.to_string())?;
+        let to = CString::new(key.as_bytes()).map_err(|e| e.to_string())?;
+        let published = unsafe {
+            renameatx_np(
+                guards[1].as_raw_fd(),
+                from.as_ptr(),
+                guards[1].as_raw_fd(),
+                to.as_ptr(),
+                RENAME_EXCL | RENAME_NOFOLLOW_ANY,
+            )
+        };
+        if published != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                validate_artwork_cache(&destination, &key, ico, &renderer_bytes)
+                    .map_err(|detail| format!("Artwork cache collision: {error}; {detail}"))?;
+            } else {
+                return Err(error.to_string());
+            }
+        }
+        let png = validate_artwork_cache(&destination, &key, ico, &renderer_bytes)?;
+        check_guards()?;
+        Ok(png)
+    })();
+    // Remove only this invocation's still-owned temporary directory.
+    if assert_artwork_directory(&temporary, &temporary_guard).is_ok() {
+        let _ = fs::remove_dir_all(&temporary);
+    }
+    result
 }
 
 fn prepare_with_inputs(
@@ -1065,6 +1301,294 @@ mod tests {
         fixture.inputs.fallback_artwork = Some(fixture_artwork());
         add_launcher(&fixture.home, &fixture.bottle.id, "Artwork Game", &image).unwrap();
         (fixture, image)
+    }
+
+    fn artwork_fixture() -> (Fixture, PathBuf, Vec<u8>) {
+        let (fixture, image) = fallback_fixture(
+            br##"#!/bin/sh
+[ "$1" = '--input' ] && [ "$3" = '--output' ] && [ "$5" = '--png-output' ] || exit 1
+printf x >> "$0.calls"
+/bin/cp "$(dirname "$0")/render.icns" "$4" || exit 1
+/bin/cp "$(dirname "$0")/render.png" "$6"
+"##,
+        );
+        let (icns, png) = fixture_artwork();
+        fs::write(fixture.home.join("render.icns"), icns).unwrap();
+        fs::write(fixture.home.join("render.png"), png).unwrap();
+        let file = File::open(&image).unwrap();
+        let ico = app_icons::executable_artwork(&file, file.metadata().unwrap().len())
+            .ico
+            .unwrap();
+        let dir = bottle_dir(&fixture.home, &fixture.bottle.id).unwrap();
+        (fixture, dir, ico)
+    }
+
+    fn original_arm64_renderer(path: &Path, revision: u8) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 64];
+        bytes[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        bytes[4..8].copy_from_slice(&0x0100_000c_u32.to_le_bytes());
+        bytes[32] = revision;
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, &bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        bytes
+    }
+
+    fn renderer_selection_fixture() -> (Fixture, PathBuf, PathBuf, PathBuf) {
+        let fixture = Fixture::new();
+        let runtime = fixture.inputs.root.join("bin/native-icon");
+        original_arm64_renderer(&runtime, 1);
+        let app = fixture.home.join("Caskrun.app");
+        let core = app.join("Contents/MacOS/caskrun-core");
+        let sibling = app.join("Contents/MacOS/caskrun-native-icon");
+        original_arm64_renderer(&core, 3);
+        original_arm64_renderer(&sibling, 2);
+        fs::create_dir_all(app.join("Contents/Resources")).unwrap();
+        fs::write(app.join("Contents/Resources/.caskrun-generated-app"), []).unwrap();
+        (fixture, core, sibling, runtime)
+    }
+
+    #[test]
+    fn generated_app_prefers_own_renderer_without_changing_wine_package() {
+        let (fixture, core, sibling, runtime) = renderer_selection_fixture();
+        let original = fs::read(&runtime).unwrap();
+        let (selected, bytes) = select_icon_renderer(&fixture.inputs.root, &core).unwrap();
+        assert_eq!(selected, sibling);
+        assert_eq!(bytes, fs::read(&sibling).unwrap());
+        assert_ne!(bytes, original);
+        assert_eq!(fs::read(&runtime).unwrap(), original);
+        fs::remove_file(
+            fixture
+                .home
+                .join("Caskrun.app/Contents/Resources/.caskrun-generated-app"),
+        )
+        .unwrap();
+        assert_eq!(
+            select_icon_renderer(&fixture.inputs.root, &core).unwrap().0,
+            runtime
+        );
+        assert_eq!(
+            select_icon_renderer(
+                &fixture.inputs.root,
+                &fixture.home.join("target/debug/caskrun-core")
+            )
+            .unwrap()
+            .0,
+            runtime
+        );
+    }
+
+    #[test]
+    fn generated_app_refuses_missing_invalid_or_linked_sibling_and_marker() {
+        for field in [
+            "missing",
+            "architecture",
+            "not-executable",
+            "linked",
+            "marker",
+            "linked-marker",
+            "linked-macos",
+        ] {
+            let (fixture, core, sibling, runtime) = renderer_selection_fixture();
+            let marker = fixture
+                .home
+                .join("Caskrun.app/Contents/Resources/.caskrun-generated-app");
+            match field {
+                "missing" => fs::remove_file(&sibling).unwrap(),
+                "architecture" => {
+                    let mut bytes = fs::read(&sibling).unwrap();
+                    bytes[4..8].copy_from_slice(&0x0100_0007_u32.to_le_bytes());
+                    fs::write(&sibling, bytes).unwrap();
+                }
+                "not-executable" => {
+                    fs::set_permissions(&sibling, fs::Permissions::from_mode(0o600)).unwrap()
+                }
+                "linked" => {
+                    fs::remove_file(&sibling).unwrap();
+                    symlink(&runtime, &sibling).unwrap();
+                }
+                "marker" => fs::write(marker, b"unrecognized generation").unwrap(),
+                "linked-marker" => {
+                    fs::remove_file(&marker).unwrap();
+                    symlink(&runtime, &marker).unwrap();
+                }
+                "linked-macos" => {
+                    let macos = core.parent().unwrap();
+                    let moved = fixture.home.join("foreign-macos");
+                    fs::rename(macos, &moved).unwrap();
+                    symlink(moved, macos).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                select_icon_renderer(&fixture.inputs.root, &core).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn artwork_listing_renders_once_without_creating_native_aliases() {
+        let (fixture, dir, ico) = artwork_fixture();
+        let png = render_artwork_with_inputs(&dir, &ico, &fixture.inputs).unwrap();
+        assert_eq!(fs::read(&png).unwrap(), fixture_artwork().1);
+        assert_eq!(png.file_name().unwrap(), "app.png");
+        assert!(!dir.join("native-apps").exists());
+        let renderer = fixture.inputs.icon_renderer.as_ref().unwrap();
+        assert_eq!(
+            fs::read(PathBuf::from(format!("{}.calls", renderer.display()))).unwrap(),
+            b"x"
+        );
+        let repeated = render_artwork_with_inputs(&dir, &ico, &fixture.inputs).unwrap();
+        assert_eq!(repeated, png);
+        assert_eq!(
+            fs::read(PathBuf::from(format!("{}.calls", renderer.display()))).unwrap(),
+            b"x"
+        );
+        assert_eq!(fs::read_dir(dir.join("artwork/native")).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn artwork_cache_invalidates_source_and_renderer_bytes() {
+        let (mut fixture, dir, mut ico) = artwork_fixture();
+        let first = render_artwork_with_inputs(&dir, &ico, &fixture.inputs).unwrap();
+        ico[22] ^= 1;
+        let changed_source = render_artwork_with_inputs(&dir, &ico, &fixture.inputs).unwrap();
+        assert_ne!(first, changed_source);
+        let renderer = fixture.inputs.icon_renderer.as_ref().unwrap();
+        fixture
+            .inputs
+            .renderer_bytes
+            .extend_from_slice(b"# Original renderer revision 2\n");
+        fs::write(renderer, &fixture.inputs.renderer_bytes).unwrap();
+        let changed_renderer = render_artwork_with_inputs(&dir, &ico, &fixture.inputs).unwrap();
+        assert_ne!(changed_source, changed_renderer);
+        assert_eq!(fs::read_dir(dir.join("artwork/native")).unwrap().count(), 3);
+        assert!(!dir.join("native-apps").exists());
+        fs::write(renderer, b"#!/bin/sh\nexit 99\n").unwrap();
+        assert!(render_artwork_with_inputs(&dir, &ico, &fixture.inputs).is_err());
+    }
+
+    #[test]
+    fn concurrent_artwork_requests_publish_one_exact_data_cache() {
+        let (fixture, dir, ico) = artwork_fixture();
+        let barrier = std::sync::Barrier::new(2);
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                barrier.wait();
+                render_artwork_with_inputs(&dir, &ico, &fixture.inputs)
+            });
+            let second = scope.spawn(|| {
+                barrier.wait();
+                render_artwork_with_inputs(&dir, &ico, &fixture.inputs)
+            });
+            (
+                first.join().unwrap().unwrap(),
+                second.join().unwrap().unwrap(),
+            )
+        });
+        assert_eq!(first, second);
+        assert_eq!(fs::read(first).unwrap(), fixture_artwork().1);
+        assert_eq!(fs::read_dir(dir.join("artwork/native")).unwrap().count(), 1);
+        assert!(!dir.join("native-apps").exists());
+    }
+
+    #[test]
+    fn artwork_cache_refuses_modified_source_receipt_and_linked_files() {
+        for field in ["app.ico", "app.icns", "app.png", "artwork.sha256"] {
+            for linked in [false, true] {
+                let (fixture, dir, ico) = artwork_fixture();
+                let png = render_artwork_with_inputs(&dir, &ico, &fixture.inputs).unwrap();
+                let path = png.parent().unwrap().join(field);
+                if linked {
+                    let host = fixture.home.join("untouched-host-artwork");
+                    fs::write(&host, b"host bytes").unwrap();
+                    fs::remove_file(&path).unwrap();
+                    symlink(&host, &path).unwrap();
+                    assert!(render_artwork_with_inputs(&dir, &ico, &fixture.inputs).is_err());
+                    assert_eq!(fs::read(host).unwrap(), b"host bytes");
+                    assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+                } else {
+                    fs::write(&path, b"modified cache").unwrap();
+                    assert!(render_artwork_with_inputs(&dir, &ico, &fixture.inputs).is_err());
+                    assert_eq!(fs::read(path).unwrap(), b"modified cache");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn artwork_cache_refuses_linked_roots_empty_collisions_and_extra_children() {
+        let (fixture, dir, ico) = artwork_fixture();
+        let key = artwork_key(&ico, &fixture.inputs.renderer_bytes);
+        let destination = dir.join("artwork/native").join(&key);
+        fs::create_dir_all(&destination).unwrap();
+        assert!(render_artwork_with_inputs(&dir, &ico, &fixture.inputs).is_err());
+        assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
+        fs::remove_dir(&destination).unwrap();
+        let png = render_artwork_with_inputs(&dir, &ico, &fixture.inputs).unwrap();
+        fs::write(png.parent().unwrap().join("host-payload"), b"untouched").unwrap();
+        assert!(render_artwork_with_inputs(&dir, &ico, &fixture.inputs).is_err());
+        fs::remove_dir_all(dir.join("artwork/native")).unwrap();
+        let host = fixture.home.join("untouched-host-directory");
+        fs::create_dir(&host).unwrap();
+        symlink(&host, dir.join("artwork/native")).unwrap();
+        assert!(render_artwork_with_inputs(&dir, &ico, &fixture.inputs).is_err());
+        assert_eq!(fs::read_dir(host).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn artwork_failed_helper_is_bounded_reaped_and_leaves_no_partial_cache() {
+        let (fixture, image) = fallback_fixture(
+            br##"#!/bin/sh
+printf '%s' "$$" > "$0.pid"
+exec /bin/sleep 10
+"##,
+        );
+        let file = File::open(image).unwrap();
+        let ico = app_icons::executable_artwork(&file, file.metadata().unwrap().len())
+            .ico
+            .unwrap();
+        let dir = bottle_dir(&fixture.home, &fixture.bottle.id).unwrap();
+        let started = Instant::now();
+        assert!(render_artwork_with_inputs(&dir, &ico, &fixture.inputs).is_err());
+        assert!(started.elapsed() < Duration::from_millis(1900));
+        let renderer = fixture.inputs.icon_renderer.as_ref().unwrap();
+        let pid: i32 = fs::read_to_string(PathBuf::from(format!("{}.pid", renderer.display())))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { kill(pid, 0) }, -1);
+        assert_eq!(fs::read_dir(dir.join("artwork/native")).unwrap().count(), 0);
+        assert!(!dir.join("native-apps").exists());
+    }
+
+    #[test]
+    fn home_retries_publisher_data_after_native_alias_used_fallback() {
+        let (fixture, image) = fallback_fixture(b"#!/bin/sh\nexit 1\n");
+        let loader = fixture.prepare(&image).unwrap();
+        assert_eq!(
+            fs::read(
+                loader
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("Resources/native-icon-mode")
+            )
+            .unwrap(),
+            b"fallback\n"
+        );
+        assert!(
+            cached_icon_with_inputs(&fixture.home, &fixture.bottle.id, &image, &fixture.inputs)
+                .is_none()
+        );
+        let no_icon = fixture.image("NoPublisherIcon.exe");
+        fixture.prepare(&no_icon).unwrap();
+        assert!(
+            cached_icon_with_inputs(&fixture.home, &fixture.bottle.id, &no_icon, &fixture.inputs)
+                .is_some()
+        );
     }
 
     fn app_name(loader: &Path) -> String {

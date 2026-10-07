@@ -124,8 +124,14 @@ if [ "${CASKRUN_TLS_VARIANT:-tls}" = native-apps ]; then
     "$source_meta/patches/wine-11.0-native-app-identity.patch"
   verify_sha256 cbb1781ded5b61bf7d3c7a87315aa54bce151879a073132216d043a9124eb7d5 \
     "$source_meta/patches/native_app_info.plist.in"
-  verify_sha256 ee6957ce414da832719b31ec7eb66378477094af9004fa2a2f3bfc8f82fa03d0 \
-    "$source_meta/patches/native_icon.swift"
+  # The recorded legacy stage remains valid; fresh builds use the reviewed
+  # adaptive MIT helper. Never substitute unreviewed renderer source.
+  native_icon_hash=$(/usr/bin/shasum -a 256 "$source_meta/patches/native_icon.swift" | /usr/bin/awk '{ print $1 }')
+  case "$native_icon_hash" in
+    ee6957ce414da832719b31ec7eb66378477094af9004fa2a2f3bfc8f82fa03d0) native_icon_library_flag='' ;;
+    cbe01c657e5113ff999e139cb8a272f96d3ee18db0fc4d207551632df85ef6b2) native_icon_library_flag='-parse-as-library' ;;
+    *) printf 'Unreviewed native icon renderer source.\n' >&2; exit 65 ;;
+  esac
   /usr/bin/codesign --verify --strict "$stage/lib/wine/x86_64-unix/WindowsApp"
   [ -f "$repo/assets/caskrun-icon.png" ] || exit 66
 fi
@@ -151,7 +157,7 @@ ln -s _dispatch "$tmp/bin/wine"
 ln -s _dispatch "$tmp/bin/wineboot"
 ln -s _dispatch "$tmp/bin/wineserver"
 if [ "${CASKRUN_TLS_VARIANT:-tls}" = native-apps ]; then
-  /usr/bin/swiftc -O -target arm64-apple-macos13 \
+  /usr/bin/swiftc -O -target arm64-apple-macos13 ${native_icon_library_flag:-} \
     "$tmp/source/patches/native_icon.swift" -o "$tmp/bin/native-icon"
   /usr/bin/codesign --force --sign - "$tmp/bin/native-icon"
   /usr/bin/codesign --verify --strict "$tmp/bin/native-icon"

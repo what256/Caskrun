@@ -29,7 +29,7 @@ Include a manually installed Windows app and its child process in native identit
 
 ## Native app identity and shutdown
 
-The independent development runtime now has an opt-in native identity path for Windows apps. Caskrun derives a friendly name and vendor artwork from the selected executable's checked PE resources, with saved launcher names taking precedence. An original renderer prepares a padded macOS icon tile and Retina sizes. Missing or invalid artwork uses an original fallback while preserving the app's name. Caskrun's own app and menu-bar logos are unchanged.
+The independent development runtime now has an opt-in native identity path for Windows apps. Caskrun derives a friendly name and vendor artwork from the selected executable's checked PE resources, with saved launcher names taking precedence. A shared original adaptive renderer preserves finished publisher shapes, normalizes padding and adds contrast support only for sparse marks. Home prepares image-only artwork before launch, and the same policy produces native and Retina Dock sizes. See [icon composition](ICON_COMPOSITION.md). Missing or invalid artwork uses an original fallback while preserving the app's name. Caskrun's own app and menu-bar logos are unchanged.
 
 Each visible executable gets a generated native app bundle in its bottle. Its parent directory carries the internal cache key; the visible app name has no cache suffix. Bounded, stable file checks restrict this path to the current bottle, the selected runtime's builtin tools, or an explicitly chosen initial installer. Visible child applications can receive their own identity; service processes and explicit Chromium/Electron helper roles are hidden from the Dock. Home reuses validated cached artwork without creating native bundles during listing. These bundles are disposable and excluded from bottle duplicate, export and import payloads.
 
@@ -81,6 +81,6 @@ A separate original Caskrun MSI installed its exact test payload successfully. T
 
 ## Source verification
 
-The current serial Rust verification passed 250 unit tests and 2 integration tests; 2 existing tests remain ignored. Parallel runs exposed timing-sensitive failures, so the serial result is not a clean parallel-suite result. The Python harness, publication-privacy and catalog checks passed 46 tests. These tests cover source behavior and fixtures, not real store authentication or games.
+The current serial Rust verification passed 260 unit tests and 2 integration tests; 2 existing tests remain ignored. Parallel runs exposed timing-sensitive failures, so the serial result is not a clean parallel-suite result. The Python harness, publication-privacy and catalog checks passed 46 tests. The adaptive renderer passed 23 real original image CLI cases, and an original packaged-core PE-artwork smoke verified first-list rendering and cache reuse without Windows execution or native launch aliases. The native UI compiled and the development DMG/signatures verified. These tests cover source behavior and fixtures, not real store authentication or games.
 
 See the separate [feature inventory](FEATURES.md) for the demo's limitations.
