@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Fail closed before committing or pushing Caskrun source.
 
-Local private terms live exclusively in .git/publication-private.json. Findings
+Local private terms live exclusively in a git directory's publication-private.json,
+this worktree's or the one shared by every worktree of the repository. Findings
 include a file, line and category, never the matched contents. Reachable history
 is scanned, because deleting a sensitive file does not remove it from Git.
 """
@@ -219,13 +220,24 @@ def git(*args: str, input_data: bytes | None = None) -> bytes:
 
 
 def local_terms() -> list[str]:
-    path = Path(os.fsdecode(git("rev-parse", "--git-path", "publication-private.json").strip()))
-    if path.is_symlink():
-        raise GuardError("The local privacy configuration must be a regular file.")
-    try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raise GuardError("Missing or invalid git-local publication-private.json; configure local private terms first.") from None
+    # A linked worktree has its own git directory, so also accept the shared one
+    # every worktree of this repository uses. Both must be regular files, and an
+    # absent configuration still fails closed.
+    candidates = [Path(os.fsdecode(git("rev-parse", "--git-path", "publication-private.json").strip()))]
+    common = Path(os.fsdecode(git("rev-parse", "--git-common-dir").strip())) / "publication-private.json"
+    if common not in candidates:
+        candidates.append(common)
+    config = None
+    for path in candidates:
+        if path.is_symlink():
+            raise GuardError("The local privacy configuration must be a regular file.")
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        break
+    if config is None:
+        raise GuardError("Missing or invalid git-local publication-private.json; configure local private terms first.")
     if not isinstance(config, dict) or not isinstance(config.get("terms"), list):
         raise GuardError("The local privacy configuration must contain a terms list.")
     terms = config["terms"]
