@@ -1,0 +1,84 @@
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -78,6 +78,30 @@
+ 
+ static UINT process_error_mode;
+ 
++/* Caskrun's opt-in Steam compatibility flags belong to the web helper's
++ * Windows command line, not only the Unix loader argv. Steam replaces its
++ * own files during updates, so altering steamwebhelper.exe is not durable. */
++static BOOL caskrun_image_basename_is( const UNICODE_STRING *image, const char *basename )
++{
++    const WCHAR *start, *end, *cursor;
++    SIZE_T i, length;
++
++    if (!image || !image->Buffer || image->Length % sizeof(WCHAR)) return FALSE;
++    start = image->Buffer;
++    end = start + image->Length / sizeof(WCHAR);
++    for (cursor = start; cursor < end; cursor++)
++        if (*cursor == '\\' || *cursor == '/') start = cursor + 1;
++    length = end - start;
++    if (length != strlen( basename )) return FALSE;
++    for (i = 0; i < length; i++)
++    {
++        WCHAR c = start[i];
++        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++        if (c != basename[i]) return FALSE;
++    }
++    return TRUE;
++}
++
+ static char **build_argv( const UNICODE_STRING *cmdline, int reserved )
+ {
+     char **argv, *arg, *src, *dst;
+@@ -706,6 +730,8 @@
+     const PS_ATTRIBUTE *handles_attr = NULL, *jobs_attr = NULL;
+     data_size_t handles_size, jobs_size;
+     obj_handle_t *handles, *jobs;
++    RTL_USER_PROCESS_PARAMETERS caskrun_params;
++    WCHAR *caskrun_cmdline = NULL;
+ 
+     if (thread_flags & THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER)
+     {
+@@ -775,6 +801,33 @@
+         machine = pe_info.machine;
+         if (is_arm64ec() && pe_info.is_hybrid && machine == IMAGE_FILE_MACHINE_ARM64)
+             machine = main_image_info.Machine;
++    }
++    if (getenv( "CASKRUN_STEAM_MODE" ) && !strcmp( getenv( "CASKRUN_STEAM_MODE" ), "1" ) &&
++        caskrun_image_basename_is( &path, "steamwebhelper.exe" ) &&
++        peb->ProcessParameters &&
++        caskrun_image_basename_is( &peb->ProcessParameters->ImagePathName, "steam.exe" ))
++    {
++        static const char flags[] = " --in-process-gpu --disable-gpu";
++        SIZE_T length = params->CommandLine.Length;
++        SIZE_T flag_chars = sizeof(flags);
++        SIZE_T j;
++
++        if (params->CommandLine.Buffer && !(length % sizeof(WCHAR)) &&
++            length <= 0xffff - flag_chars * sizeof(WCHAR))
++        {
++            if ((caskrun_cmdline = malloc( length + flag_chars * sizeof(WCHAR) )))
++            {
++                memcpy( caskrun_cmdline, params->CommandLine.Buffer, length );
++                for (j = 0; j < flag_chars; j++)
++                    caskrun_cmdline[length / sizeof(WCHAR) + j] = flags[j];
++                caskrun_params = *params;
++                caskrun_params.CommandLine.Buffer = caskrun_cmdline;
++                caskrun_params.CommandLine.Length = length + (flag_chars - 1) * sizeof(WCHAR);
++                caskrun_params.CommandLine.MaximumLength = length + flag_chars * sizeof(WCHAR);
++                params = &caskrun_params;
++                TRACE( "Caskrun Steam web helper flags applied to %s\\n", debugstr_us( &path ) );
++            }
++        }
+     }
+     if (!(startup_info = create_startup_info( attr.ObjectName, process_flags, params, &pe_info, &startup_info_size )))
+         goto done;
+@@ -955,6 +1008,7 @@
+     free( winedebug );
+     free( unix_name );
+     free( nt_name.Buffer );
++    free( caskrun_cmdline );
+     return status;
+ }
+ 

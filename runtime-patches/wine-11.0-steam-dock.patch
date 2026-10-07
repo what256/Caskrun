@@ -1,0 +1,134 @@
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -32,6 +32,7 @@
+ #include <signal.h>
+ #include <spawn.h>
+ #include <string.h>
++#include <strings.h>
+ #include <stdlib.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -521,6 +522,20 @@
+     execv( argv[1], argv + 1 );
+ }
+ 
++/* Isolated Caskrun experiment. Select the native executable's basename per
++ * Windows process so a game launched from Steam does not inherit Steam's Dock
++ * identity. No Steam asset or CrossOver implementation is involved. */
++static BOOL caskrun_steam_dock_program( const char *command )
++{
++    const char *identity = getenv( "CASKRUN_STEAM_MODE" );
++    const char *name = command, *cursor;
++
++    if (!identity || strcmp( identity, "1" ) || !command) return FALSE;
++    for (cursor = command; *cursor; cursor++)
++        if (*cursor == '/' || *cursor == '\\') name = cursor + 1;
++    return !strcasecmp( name, "steam.exe" ) || !strcasecmp( name, "steamwebhelper.exe" );
++}
++
+ /* exec the appropriate wine loader for the specified machine */
+ static NTSTATUS loader_exec( char **argv, WORD machine )
+ {
+@@ -530,7 +545,10 @@
+ 
+     if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv );
+ 
+-    argv[1] = strdup( wineloader );
++    if (!build_dir && argv[2] && caskrun_steam_dock_program( argv[2] ))
++        argv[1] = build_path( ntdll_dir, "Steam" );
++    else
++        argv[1] = strdup( wineloader );
+     preloader_exec( argv );
+     return STATUS_INVALID_IMAGE_FORMAT;
+ }
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -22,6 +22,7 @@
+ #import "cocoa_cursorclipping.h"
+ #import "cocoa_event.h"
+ #import "cocoa_window.h"
++#include <sys/stat.h>
+ 
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+ 
+@@ -70,6 +71,45 @@
+ static NSString* WineLocalizedString(unsigned int stringID)
+ {
+     return ((NSDictionary*)localized_strings)[@(stringID)];
++}
++
++/* Caskrun's Steam-only Dock experiment. Match the Windows process image at
++ * argv[0], or argv[1] only when argv[0] is the native Wine loader. */
++static BOOL CaskrunSteamDockEnabled(void)
++{
++    const char *value = getenv("CASKRUN_STEAM_MODE");
++    return value && !strcmp(value, "1");
++}
++
++static NSString* CaskrunArgumentBasename(NSString *argument)
++{
++    return [[argument stringByReplacingOccurrencesOfString:@"\\" withString:@"/"] lastPathComponent];
++}
++
++static BOOL CaskrunIsWindowsProcess(NSString *expected)
++{
++    NSArray *arguments = [[NSProcessInfo processInfo] arguments];
++    NSString *first;
++
++    if (![arguments count]) return NO;
++    first = CaskrunArgumentBasename(arguments[0]);
++    if ([first caseInsensitiveCompare:expected] == NSOrderedSame) return YES;
++    if ([arguments count] < 2 ||
++        ([first caseInsensitiveCompare:@"Steam"] != NSOrderedSame &&
++         [first caseInsensitiveCompare:@"wine"] != NSOrderedSame)) return NO;
++    return [CaskrunArgumentBasename(arguments[1]) caseInsensitiveCompare:expected] == NSOrderedSame;
++}
++
++static NSImage* CaskrunSteamIcon(void)
++{
++    const char *raw = getenv("CASKRUN_STEAM_ICON");
++    struct stat info;
++    NSString *path;
++
++    if (!raw || *raw != '/' || lstat(raw, &info) || !S_ISREG(info.st_mode) ||
++        info.st_size <= 0 || info.st_size > 16 * 1024 * 1024) return nil;
++    if (!(path = [NSString stringWithUTF8String:raw])) return nil;
++    return [[[NSImage alloc] initWithContentsOfFile:path] autorelease];
+ }
+ 
+ 
+@@ -222,6 +262,19 @@
+ 
+     - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+     {
++        /* Steam's visible login belongs to steamwebhelper.exe. Keep that
++         * process as the sole regular Dock app so clicking its tile focuses
++         * its own windows; Steam.exe can retain accessory windows. */
++        if (CaskrunSteamDockEnabled() && CaskrunIsWindowsProcess(@"steam.exe"))
++        {
++            [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
++            return;
++        }
++        if (CaskrunSteamDockEnabled() && CaskrunIsWindowsProcess(@"steamwebhelper.exe"))
++        {
++            NSImage *icon = CaskrunSteamIcon();
++            if (icon) self.applicationIcon = icon;
++        }
+         if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
+         {
+             NSMenu* mainMenu;
+@@ -1087,7 +1140,14 @@
+                 nsimage = nil;
+         }
+ 
++        if (CaskrunSteamDockEnabled() && CaskrunIsWindowsProcess(@"steamwebhelper.exe"))
++        {
++            NSImage *icon = CaskrunSteamIcon();
++            if (icon) nsimage = icon;
++        }
+         self.applicationIcon = nsimage;
++        if ([NSApp activationPolicy] == NSApplicationActivationPolicyRegular && nsimage)
++            [NSApp setApplicationIconImage:nsimage];
+     }
+ 
+     - (void) handleCommandTab

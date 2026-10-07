@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+project_root=$(git rev-parse --show-toplevel)
+exec python3 "$project_root/scripts/check-publication-privacy.py" --pre-push

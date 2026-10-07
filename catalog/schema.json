@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:caskrun:catalog:v1",
+  "title": "Caskrun starter app catalog",
+  "description": "Publisher-sourced Windows app entries with original experimental automatic setup flows. Catalog presence does not establish app compatibility.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "entries"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "category",
+        "symbol",
+        "detail",
+        "downloadPageURL",
+        "compatibilityStatus"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "name": { "type": "string", "minLength": 1 },
+        "category": { "type": "string", "enum": ["Game stores", "Publisher launchers"] },
+        "symbol": { "type": "string", "minLength": 1 },
+        "detail": { "type": "string", "minLength": 1 },
+        "downloadPageURL": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "compatibilityStatus": { "type": "string", "enum": ["untested"] },
+        "installMode": { "type": "string", "enum": ["automatic"] },
+        "installerNotes": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

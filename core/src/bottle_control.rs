@@ -1,0 +1,421 @@
+//! Explicit controls for one Caskrun-owned, initialized Wine bottle.
+//!
+//! Wine's wineserver selects its target by WINEPREFIX. Never send signals to
+//! recorded PIDs here: an old PID can belong to an unrelated macOS process.
+
+use super::*;
+use std::io::Write;
+
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
+
+#[derive(Debug, Serialize)]
+pub(super) struct QuitResult {
+    pub(super) bottle_id: String,
+    pub(super) forced: bool,
+    pub(super) server_stopped: bool,
+    pub(super) tracked_before: usize,
+    pub(super) tracked_after: usize,
+    pub(super) log_path: String,
+    pub(super) message: String,
+}
+
+/// Force-quit Windows applications in this bottle only. The ordinary UI makes
+/// this an explicit user action; catalog timeout recovery can also use it.
+/// `wineserver -k` can discard unsaved app data.
+pub(super) fn quit_windows_apps(home: &Path, id: &str) -> Result<QuitResult, String> {
+    let wine = wine_path()
+        .ok_or("Caskrun could not find its included Wine runtime. Reinstall Caskrun.")?;
+    quit_windows_apps_with_wine(home, id, &wine, CONTROL_TIMEOUT)
+}
+
+pub(super) fn quit_windows_apps_with_wine(
+    home: &Path,
+    id: &str,
+    wine: &Path,
+    timeout: Duration,
+) -> Result<QuitResult, String> {
+    let _lock = lock_bottle(home, id)?;
+    let (dir, prefix, wineserver, prefix_guard, prefix_snapshot) =
+        checked_control_paths(home, id, wine)?;
+    let tracked_before = live_processes(&dir)?.len();
+    let (mut log, log_path) = new_control_log(&dir)?;
+    writeln!(
+        log,
+        "Caskrun: force-quit requested for bottle {id}. WINEPREFIX={}",
+        prefix.display()
+    )
+    .map_err(|e| format!("Could not write bottle-control log: {e}"))?;
+    assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
+    // Hold the cleanup claim only after lock and path preflight. A Cancel
+    // requested while those steps wait must win before we ask Wine to stop
+    // every Windows process in this bottle.
+    let _timeout_cleanup = cancellation::begin_timeout_cleanup()?;
+
+    let (kill_status, kill_timed_out) = run_wineserver(&wineserver, &prefix, "-k", &log, timeout)?;
+    if kill_timed_out {
+        return Err(format!(
+            "Wine's quit request timed out for this bottle. Check {}",
+            log_path.display()
+        ));
+    }
+    // Wine returns status 1 when -k finds no running server. A failed kill
+    // can also return 1, so only a subsequent successful -w can establish
+    // that the bottle is idle. Do not claim a force-quit on that path.
+    writeln!(
+        log,
+        "Caskrun: wineserver -k exited with status {:?}; checking whether the server is idle.",
+        kill_status.code()
+    )
+    .map_err(|e| format!("Could not write bottle-control log: {e}"))?;
+
+    // Keep the prefix directory open throughout both commands and verify its
+    // path still names the same directory before asking Wine to wait for it.
+    assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
+    let (wait_status, wait_timed_out) = run_wineserver(&wineserver, &prefix, "-w", &log, timeout)?;
+    drop(prefix_guard);
+    if wait_timed_out || !wait_status.success() {
+        return Err(format!(
+            "Wine received the quit request, but this bottle's server did not stop within the limit. Check {}",
+            log_path.display()
+        ));
+    }
+    writeln!(log, "Caskrun: this bottle's wineserver stopped.")
+        .map_err(|e| format!("Could not write bottle-control log: {e}"))?;
+    let tracked_after = live_processes(&dir)?.len();
+    let message = if !kill_status.success() {
+        "No active Wine server remained in this bottle.".to_string()
+    } else if tracked_after == 0 {
+        "Wine's server stopped for this bottle.".to_string()
+    } else {
+        format!(
+            "Wine's server stopped, but {tracked_after} tracked macOS process(es) still appear active."
+        )
+    };
+    Ok(QuitResult {
+        bottle_id: id.to_string(),
+        forced: kill_status.success(),
+        server_stopped: true,
+        tracked_before,
+        tracked_after,
+        log_path: log_path.display().to_string(),
+        message,
+    })
+}
+
+/// Open Wine's installed-programs panel for an initialized bottle. This does
+/// not uninstall anything by itself; the user chooses a program in Wine's UI.
+pub(super) fn open_uninstaller(home: &Path, id: &str) -> Result<LaunchResult, String> {
+    let wine = wine_path()
+        .ok_or("Caskrun could not find its included Wine runtime. Reinstall Caskrun.")?;
+    open_uninstaller_with_wine(home, id, &wine)
+}
+
+fn open_uninstaller_with_wine(home: &Path, id: &str, wine: &Path) -> Result<LaunchResult, String> {
+    let dir = bottle_dir(home, id)?;
+    let prefix = dir.join("prefix");
+    require_initialized_prefix(&dir, &prefix)?;
+    let uninstaller = checked_uninstaller(&prefix)?;
+    let (child, log_path) = start_launch_with_wine_checked(
+        home,
+        id,
+        &uninstaller,
+        wine,
+        LaunchFlags {
+            quiet_msi: false,
+            steam_mode: false,
+        },
+        &[],
+        |resolved| {
+            let dir = bottle_dir(home, id)?;
+            let prefix = dir.join("prefix");
+            let checked = checked_uninstaller(&prefix)?;
+            if checked != resolved {
+                return Err("Wine's uninstaller changed before launch".into());
+            }
+            Ok(())
+        },
+    )?;
+    Ok(LaunchResult {
+        pid: child.id(),
+        log_path: log_path.display().to_string(),
+    })
+}
+
+pub(super) fn checked_control_paths(
+    home: &Path,
+    id: &str,
+    wine: &Path,
+) -> Result<(PathBuf, PathBuf, PathBuf, File, fs::Metadata), String> {
+    if !wine.is_absolute() || !is_usable_wine(wine) {
+        return Err("Selected Wine runtime is unavailable or not independent".into());
+    }
+    let dir = bottle_dir(home, id)?;
+    let prefix = dir.join("prefix");
+    require_initialized_prefix(&dir, &prefix)?;
+    let (guard, snapshot) = open_stable_directory(&prefix)?;
+    let record = recorded_runtime_for_prefix(&dir, Some(wine))?
+        .ok_or("This bottle has no recorded Wine runtime")?;
+    if !runtime_record_matches(&record, wine)? {
+        return Err(
+            "This bottle uses a different Windows engine. Select its recorded engine.".into(),
+        );
+    }
+    let wineserver = wine
+        .parent()
+        .ok_or("Wine runtime has no parent directory")?
+        .join("wineserver");
+    if !is_executable(&wineserver) || !is_independent_runtime(&wineserver) {
+        return Err("This independent Wine runtime has no companion wineserver".into());
+    }
+    Ok((dir, prefix, wineserver, guard, snapshot))
+}
+
+fn require_initialized_prefix(dir: &Path, prefix: &Path) -> Result<(), String> {
+    let _ = open_stable_directory(prefix)?;
+    if !path_is_real_file(&prefix.join("system.reg")) {
+        return Err("Initialize this bottle before using its Windows controls".into());
+    }
+    if !path_is_real_file(&dir.join("prefix-record.json")) {
+        return Err(
+            "Open this bottle with its independent Wine engine before using Windows controls"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn assert_same_prefix(
+    prefix: &Path,
+    guard: &File,
+    snapshot: &fs::Metadata,
+) -> Result<(), String> {
+    let current = fs::symlink_metadata(prefix)
+        .map_err(|e| format!("Could not recheck bottle prefix: {e}"))?;
+    let held = guard
+        .metadata()
+        .map_err(|e| format!("Could not recheck open bottle prefix: {e}"))?;
+    // Registry files can change while Wine exits, so timestamps and directory
+    // size are not stable. The device/inode pair must continue to match.
+    if !same_identity(snapshot, &current) || !same_identity(snapshot, &held) {
+        return Err("Bottle prefix changed while controlling Windows apps".into());
+    }
+    Ok(())
+}
+
+fn checked_uninstaller(prefix: &Path) -> Result<PathBuf, String> {
+    let _ = open_stable_directory(prefix)?;
+    let mut parent = prefix.to_path_buf();
+    for component in ["drive_c", "windows", "system32"] {
+        parent.push(component);
+        let _ = open_stable_directory(&parent)?;
+    }
+    let path = parent.join("uninstaller.exe");
+    if !path_is_real_file(&path) {
+        return Err("Wine's installed-programs panel is missing from this bottle".into());
+    }
+    let canonical_prefix = prefix
+        .canonicalize()
+        .map_err(|e| format!("Could not resolve bottle prefix: {e}"))?;
+    let expected = canonical_prefix.join("drive_c/windows/system32/uninstaller.exe");
+    let resolved = path
+        .canonicalize()
+        .map_err(|e| format!("Could not resolve Wine's uninstaller: {e}"))?;
+    if resolved != expected {
+        return Err("Wine's uninstaller must remain inside this bottle".into());
+    }
+    Ok(resolved)
+}
+
+fn new_control_log(dir: &Path) -> Result<(File, PathBuf), String> {
+    let logs = real_subdirectory(dir, "logs")?;
+    // Existing log browsing accepts launch-<timestamp>-<UUID>.log. Keep the
+    // bottle control log visible there until it gets a dedicated UI label.
+    let log_path = logs.join(format!("launch-{}-{}.log", now_seconds()?, Uuid::new_v4()));
+    let log = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(O_NOFOLLOW_ANY)
+        .open(&log_path)
+        .map_err(|e| format!("Could not create bottle-control log: {e}"))?;
+    Ok((log, log_path))
+}
+
+pub(super) fn run_wineserver(
+    wineserver: &Path,
+    prefix: &Path,
+    argument: &str,
+    log: &File,
+    timeout: Duration,
+) -> Result<(ExitStatus, bool), String> {
+    let stdout = log.try_clone().map_err(|e| e.to_string())?;
+    let stderr = log.try_clone().map_err(|e| e.to_string())?;
+    let dir = prefix
+        .parent()
+        .ok_or("Bottle prefix has no parent directory")?;
+    let xdg = bottle_xdg::for_bottle(dir)?;
+    let mut command = Command::new(wineserver);
+    xdg.apply(&mut command);
+    if argument == "-k" {
+        cancellation::check()?;
+    }
+    let mut child = command
+        .arg(argument)
+        .env("WINEPREFIX", prefix)
+        .current_dir(prefix)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|e| format!("Could not run this bottle's wineserver {argument}: {e}"))?;
+    wait_child_bounded_status(&mut child, timeout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Parallel installer tests can briefly delay these tiny mock processes.
+    const MOCK_PROCESS_TIMEOUT: Duration = Duration::from_secs(8);
+
+    fn test_home() -> PathBuf {
+        let parent = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-data");
+        fs::create_dir_all(&parent).unwrap();
+        parent.join(format!("caskrun-control-test-{}", Uuid::new_v4()))
+    }
+
+    fn fake_runtime(home: &Path) -> PathBuf {
+        let runtime = home.join("test-runtime");
+        fs::create_dir_all(&runtime).unwrap();
+        let wine = runtime.join("wine");
+        let wineboot = runtime.join("wineboot");
+        let wineserver = runtime.join("wineserver");
+        fs::write(
+            &wine,
+            b"#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$WINEPREFIX/opened-uninstaller\"\n",
+        )
+        .unwrap();
+        fs::write(&wineboot, b"#!/bin/sh\ntouch \"$WINEPREFIX/system.reg\"\n").unwrap();
+        fs::write(
+            &wineserver,
+            b"#!/bin/sh\ncase \"$1\" in\n-k) if test -f \"$WINEPREFIX/mock.pid\"; then printf '%s\\n' \"$WINEPREFIX\" > \"$WINEPREFIX/quit-request\"; kill \"$(cat \"$WINEPREFIX/mock.pid\")\"; rm \"$WINEPREFIX/mock.pid\"; else exit 1; fi;;\n-w) test ! -f \"$WINEPREFIX/mock.pid\";;\n*) exit 64;;\nesac\n",
+        )
+        .unwrap();
+        for executable in [&wine, &wineboot, &wineserver] {
+            let mut permissions = fs::metadata(executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(executable, permissions).unwrap();
+        }
+        wine
+    }
+
+    #[test]
+    fn quit_targets_only_the_selected_bottle() {
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let first = create(&home, "First").unwrap();
+        let second = create(&home, "Second").unwrap();
+        ensure_prefix_with_wine(&home, &first.id, &wine).unwrap();
+        ensure_prefix_with_wine(&home, &second.id, &wine).unwrap();
+        let first_prefix = bottle_dir(&home, &first.id).unwrap().join("prefix");
+        let second_prefix = bottle_dir(&home, &second.id).unwrap().join("prefix");
+        let mut first_child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let mut second_child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        fs::write(first_prefix.join("mock.pid"), first_child.id().to_string()).unwrap();
+        fs::write(
+            second_prefix.join("mock.pid"),
+            second_child.id().to_string(),
+        )
+        .unwrap();
+        let result =
+            quit_windows_apps_with_wine(&home, &first.id, &wine, MOCK_PROCESS_TIMEOUT).unwrap();
+        assert!(result.forced && result.server_stopped);
+        assert_eq!(result.bottle_id, first.id);
+        assert_eq!(
+            fs::read_to_string(first_prefix.join("quit-request"))
+                .unwrap()
+                .trim(),
+            first_prefix.display().to_string()
+        );
+        assert!(!second_prefix.join("quit-request").exists());
+        assert!(first_child.wait().unwrap().signal().is_some());
+        assert!(second_child.try_wait().unwrap().is_none());
+        assert!(Path::new(&result.log_path).exists());
+        second_child.kill().unwrap();
+        second_child.wait().unwrap();
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn quit_refuses_other_runtime_and_symlinked_prefix() {
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let bottle = create(&home, "Control").unwrap();
+        ensure_prefix_with_wine(&home, &bottle.id, &wine).unwrap();
+        let other = home.join("other-runtime");
+        fs::create_dir(&other).unwrap();
+        for name in ["wine", "wineboot", "wineserver"] {
+            fs::copy(wine.parent().unwrap().join(name), other.join(name)).unwrap();
+        }
+        assert!(
+            quit_windows_apps_with_wine(
+                &home,
+                &bottle.id,
+                &other.join("wine"),
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        assert!(!dir.join("prefix/quit-request").exists());
+        fs::rename(dir.join("prefix"), dir.join("old-prefix")).unwrap();
+        symlink(dir.join("old-prefix"), dir.join("prefix")).unwrap();
+        assert!(
+            quit_windows_apps_with_wine(&home, &bottle.id, &wine, Duration::from_secs(1)).is_err()
+        );
+        assert!(!dir.join("old-prefix/quit-request").exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn already_idle_bottle_is_reported_without_claiming_a_force_quit() {
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let bottle = create(&home, "Idle").unwrap();
+        ensure_prefix_with_wine(&home, &bottle.id, &wine).unwrap();
+        let result =
+            quit_windows_apps_with_wine(&home, &bottle.id, &wine, MOCK_PROCESS_TIMEOUT).unwrap();
+        assert!(result.server_stopped);
+        assert!(!result.forced);
+        assert!(result.message.contains("No active Wine server"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn opens_only_the_bottle_local_uninstaller() {
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let bottle = create(&home, "Apps").unwrap();
+        ensure_prefix_with_wine(&home, &bottle.id, &wine).unwrap();
+        let prefix = bottle_dir(&home, &bottle.id).unwrap().join("prefix");
+        let system32 = prefix.join("drive_c/windows/system32");
+        fs::create_dir_all(&system32).unwrap();
+        let uninstaller = system32.join("uninstaller.exe");
+        fs::write(&uninstaller, b"MZmock").unwrap();
+        let launch = open_uninstaller_with_wine(&home, &bottle.id, &wine).unwrap();
+        let deadline = Instant::now() + MOCK_PROCESS_TIMEOUT;
+        while !prefix.join("opened-uninstaller").exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            fs::read_to_string(prefix.join("opened-uninstaller"))
+                .unwrap()
+                .trim(),
+            uninstaller.display().to_string()
+        );
+        assert!(Path::new(&launch.log_path).exists());
+        fs::remove_file(&uninstaller).unwrap();
+        symlink("/bin/sleep", &uninstaller).unwrap();
+        assert!(open_uninstaller_with_wine(&home, &bottle.id, &wine).is_err());
+        fs::remove_dir_all(home).unwrap();
+    }
+}

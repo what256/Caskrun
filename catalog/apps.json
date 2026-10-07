@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "id": "steam",
+      "name": "Steam",
+      "category": "Game stores",
+      "symbol": "gamecontroller.fill",
+      "detail": "Games, community, and updates",
+      "downloadPageURL": "https://store.steampowered.com/about/",
+      "compatibilityStatus": "untested",
+      "installMode": "automatic",
+      "installerNotes": "Caskrun can download Valve's Windows installer, create a Steam bottle, and start the installed launcher. Steam account sign-in and gameplay have not been verified."
+    },
+    {
+      "id": "epic-games-store",
+      "name": "Epic Games Store",
+      "category": "Game stores",
+      "symbol": "sparkles.rectangle.stack",
+      "detail": "Games and weekly offers",
+      "downloadPageURL": "https://store.epicgames.com/en-US/download",
+      "compatibilityStatus": "untested",
+      "installMode": "automatic",
+      "installerNotes": "Experimental setup downloads Epic's Windows MSI and opens its setup wizard. Complete publisher prompts inside the installer. Sign-in and games remain unverified."
+    },
+    {
+      "id": "gog-galaxy",
+      "name": "GOG Galaxy",
+      "category": "Game stores",
+      "symbol": "square.stack.3d.up.fill",
+      "detail": "GOG games and library management",
+      "downloadPageURL": "https://www.gog.com/galaxy",
+      "compatibilityStatus": "untested",
+      "installMode": "automatic",
+      "installerNotes": "Experimental setup uses GOG's published Windows installer manifest and checks the downloaded installer before starting it. Complete any publisher prompts inside the installer. Sign-in and games remain unverified."
+    },
+    {
+      "id": "battle-net",
+      "name": "Battle.net",
+      "category": "Publisher launchers",
+      "symbol": "circle.hexagongrid.fill",
+      "detail": "Blizzard games and updates",
+      "downloadPageURL": "https://download.battle.net/en-us/desktop",
+      "compatibilityStatus": "untested",
+      "installMode": "automatic",
+      "installerNotes": "Experimental setup downloads Blizzard's Windows installer from its official downloader and checks the file before opening it. Complete any publisher prompts in the installer. Sign-in and games remain unverified."
+    },
+    {
+      "id": "ubisoft-connect",
+      "name": "Ubisoft Connect",
+      "category": "Publisher launchers",
+      "symbol": "circle.grid.2x2.fill",
+      "detail": "Ubisoft games and library",
+      "downloadPageURL": "https://www.ubisoft.com/en-us/ubisoft-connect/download",
+      "compatibilityStatus": "untested",
+      "installMode": "automatic",
+      "installerNotes": "Experimental setup downloads Ubisoft's Windows installer, checks it, and creates a dedicated bottle. Complete publisher prompts inside the installer. Sign-in and games remain unverified."
+    },
+    {
+      "id": "ea-app",
+      "name": "EA app",
+      "category": "Publisher launchers",
+      "symbol": "square.grid.2x2.fill",
+      "detail": "EA games and library",
+      "downloadPageURL": "https://www.ea.com/ea-app",
+      "compatibilityStatus": "untested",
+      "installMode": "automatic",
+      "installerNotes": "Experimental setup downloads EA's Windows installer, checks it, and creates a dedicated bottle. Complete publisher prompts inside the installer. Sign-in and games remain unverified."
+    },
+    {
+      "id": "itch-io-app",
+      "name": "itch.io app",
+      "category": "Game stores",
+      "symbol": "heart.rectangle.fill",
+      "detail": "Indie games and software",
+      "downloadPageURL": "https://itch.io/app",
+      "compatibilityStatus": "untested",
+      "installMode": "automatic",
+      "installerNotes": "Experimental setup follows itch.io's checked Windows installer download, creates a dedicated bottle, and saves its stable launcher. Complete publisher prompts inside the installer. Sign-in and games remain unverified."
+    },
+    {
+      "id": "rockstar-games-launcher",
+      "name": "Rockstar Games Launcher",
+      "category": "Publisher launchers",
+      "symbol": "star.square.fill",
+      "detail": "Rockstar games and updates",
+      "downloadPageURL": "https://support.rockstargames.com/articles/4extB4aITvMKdDEZzsFAwE/rockstar-games-launcher-download",
+      "compatibilityStatus": "untested",
+      "installMode": "automatic",
+      "installerNotes": "Experimental setup downloads Rockstar's Windows installer, checks it, and creates a dedicated bottle. Complete publisher prompts inside the installer. Sign-in and games remain unverified."
+    }
+  ]
+}
