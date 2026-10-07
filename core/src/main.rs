@@ -251,8 +251,12 @@ struct ImportResult {
     external_launchers: usize,
     host_folders: usize,
     private_host_folders: usize,
-    /// Whether this account's Windows profile now reaches the restored one.
+    /// Whether this account's Windows profile reaches the restored one.
+    profile_account_resolved: bool,
+    /// Whether this restore had to add that connection.
     profile_account_linked: bool,
+    /// Set when a recorded profile was left unused, with the reason.
+    profile_warning: Option<String>,
 }
 
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
@@ -1406,7 +1410,7 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
             &destination,
             &policy.host_folders,
         )?;
-        let profile_account_linked = bottle_xdg::link_restored_profile(
+        let profile = bottle_xdg::resolve_restored_profile(
             &destination,
             bottle_xdg::account_name().as_deref(),
             manifest.profile_account.as_deref(),
@@ -1419,17 +1423,21 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
         // The Wine path from another machine is intentionally not restored. On first
         // launch wineboot will inspect/update the imported prefix with the chosen runtime.
         save_json(&destination.join("bottle.json"), &bottle)?;
-        Ok::<(bottle_xdg::HostFolderOutcome, bool), String>((restored, profile_account_linked))
+        Ok::<(bottle_xdg::HostFolderOutcome, bottle_xdg::ProfileOutcome), String>((
+            restored, profile,
+        ))
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(destination);
     }
-    result.map(|(restored, profile_account_linked)| ImportResult {
+    result.map(|(restored, profile)| ImportResult {
         bottle,
         external_launchers: external_launcher_count(&manifest.launchers),
         host_folders: restored.linked,
         private_host_folders: restored.private,
-        profile_account_linked,
+        profile_account_resolved: profile.resolved(),
+        profile_account_linked: profile.linked(),
+        profile_warning: profile.warning().map(str::to_owned),
     })
 }
 
@@ -4218,8 +4226,12 @@ mod tests {
         let restored = import_bottle(&restored_home, &backup, Some("Restored game")).unwrap();
         assert_eq!(restored.external_launchers, 1);
         assert_eq!(restored.host_folders + restored.private_host_folders, 1);
-        // The backup came from this same account, so no profile link is needed.
+        // This fixture's profile folder is not named after the account running the
+        // test, so the backup records no profile and claims nothing about one.
+        assert_eq!(exported.profile_account, None);
+        assert!(!restored.profile_account_resolved);
         assert!(!restored.profile_account_linked);
+        assert_eq!(restored.profile_warning, None);
         assert_eq!(restored.bottle.name, "Restored game");
         assert_ne!(restored.bottle.id, original.id);
         let restored_dir = bottle_dir(&restored_home, &restored.bottle.id).unwrap();
@@ -4262,6 +4274,95 @@ mod tests {
     }
 
     #[test]
+    fn backups_record_and_resolve_the_windows_profile_folder() {
+        let account = bottle_xdg::account_name().expect("a usable account name");
+        let home = test_home();
+        let bottle = create(&home, "Profile backup").unwrap();
+        let source = bottle_dir(&home, &bottle.id).unwrap();
+        let accounts = source.join("prefix/drive_c/users");
+        let settings = accounts.join(&account).join("AppData/Roaming/Example");
+        fs::create_dir_all(&settings).unwrap();
+        fs::write(settings.join("settings.ini"), b"installed program settings").unwrap();
+        let backup = home
+            .parent()
+            .unwrap()
+            .join(format!("{}.caskrun-bottle", Uuid::new_v4()));
+
+        // The backup names the profile folder this account's Windows programs use.
+        let exported = export_bottle(&home, &bottle.id, &backup).unwrap();
+        assert_eq!(exported.profile_account.as_deref(), Some(account.as_str()));
+        let restored_home = test_home();
+        let restored = import_bottle(&restored_home, &backup, Some("Same account")).unwrap();
+        assert!(restored.profile_account_resolved);
+        assert!(!restored.profile_account_linked);
+        assert_eq!(restored.profile_warning, None);
+        let restored_dir = bottle_dir(&restored_home, &restored.bottle.id).unwrap();
+        assert_eq!(
+            fs::read(
+                restored_dir
+                    .join("prefix/drive_c/users")
+                    .join(&account)
+                    .join("AppData/Roaming/Example/settings.ini")
+            )
+            .unwrap(),
+            b"installed program settings"
+        );
+        fs::remove_dir_all(&backup).unwrap();
+
+        // A bottle already connected to another profile keeps that connection and
+        // counts as resolved, without a second link.
+        let other = accounts.join("other");
+        fs::create_dir_all(other.join("AppData/Roaming/Example")).unwrap();
+        fs::write(
+            other.join("AppData/Roaming/Example/settings.ini"),
+            b"other profile settings",
+        )
+        .unwrap();
+        fs::rename(accounts.join(&account), accounts.join("saved-profile")).unwrap();
+        symlink("other", accounts.join(&account)).unwrap();
+        let exported = export_bottle(&home, &bottle.id, &backup).unwrap();
+        assert_eq!(exported.profile_account.as_deref(), Some("other"));
+        let linked_home = test_home();
+        let linked = import_bottle(&linked_home, &backup, Some("Already linked")).unwrap();
+        assert!(linked.profile_account_resolved);
+        assert!(!linked.profile_account_linked);
+        assert_eq!(linked.profile_warning, None);
+        let linked_dir = bottle_dir(&linked_home, &linked.bottle.id).unwrap();
+        assert_eq!(
+            fs::read_link(linked_dir.join("prefix/drive_c/users").join(&account)).unwrap(),
+            Path::new("other")
+        );
+
+        // This account's own profile is preserved when the backup records another,
+        // and the restore explains why that profile is not in use.
+        fs::remove_file(accounts.join(&account)).unwrap();
+        fs::rename(accounts.join("saved-profile"), accounts.join(&account)).unwrap();
+        fs::remove_dir_all(&backup).unwrap();
+        export_bottle(&home, &bottle.id, &backup).unwrap();
+        let manifest_path = backup.join("manifest.json");
+        let mut manifest: BackupManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.profile_account = Some("other".into());
+        save_json(&manifest_path, &manifest).unwrap();
+        let conflict_home = test_home();
+        let conflict = import_bottle(&conflict_home, &backup, Some("Conflicting")).unwrap();
+        assert!(!conflict.profile_account_resolved);
+        assert!(!conflict.profile_account_linked);
+        let warning = conflict.profile_warning.as_deref().unwrap();
+        assert!(warning.contains("already has its own Windows profile"));
+        let conflict_dir = bottle_dir(&conflict_home, &conflict.bottle.id).unwrap();
+        let kept = conflict_dir.join("prefix/drive_c/users").join(&account);
+        assert!(path_is_real_directory(&kept));
+        assert_eq!(
+            fs::read(kept.join("AppData/Roaming/Example/settings.ini")).unwrap(),
+            b"installed program settings"
+        );
+        for directory in [home, restored_home, linked_home, conflict_home, backup] {
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
     fn older_backups_restore_and_unknown_versions_are_refused() {
         let home = test_home();
         let bottle = create(&home, "Older backup").unwrap();
@@ -4297,7 +4398,10 @@ mod tests {
             (restored.host_folders, restored.private_host_folders),
             (0, 0)
         );
+        // A version 1 backup records no profile, so nothing is claimed about one.
+        assert!(!restored.profile_account_resolved);
         assert!(!restored.profile_account_linked);
+        assert_eq!(restored.profile_warning, None);
         let restored_dir = bottle_dir(&restored_home, &restored.bottle.id).unwrap();
         assert_eq!(
             fs::read(
@@ -4328,13 +4432,19 @@ mod tests {
                 "format": BACKUP_FORMAT, "version": BACKUP_VERSION + 1, "bottle": saved.bottle,
                 "launchers": [],
             }),
+            // The manifest and the payload must agree about the saved profile.
+            serde_json::json!({
+                "format": BACKUP_FORMAT, "version": BACKUP_VERSION, "bottle": saved.bottle,
+                "launchers": [], "profile_account": "absent",
+            }),
         ] {
             save_json(&manifest_path, &manifest).unwrap();
             assert!(import_bottle(&refused_home, &backup, None).is_err());
             assert!(list(&refused_home).unwrap().is_empty());
         }
-        // A refused version is rejected before any bottle storage is created.
-        assert!(!refused_home.exists());
+        // A refused manifest leaves no bottle behind. A refused version is
+        // rejected before any bottle storage is created at all.
+        assert!(list(&refused_home).unwrap_or_default().is_empty());
         fs::remove_dir_all(home).unwrap();
         fs::remove_dir_all(restored_home).unwrap();
         fs::remove_dir_all(backup).unwrap();

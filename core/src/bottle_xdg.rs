@@ -276,38 +276,100 @@ pub(super) fn profile_account(prefix: &Path, account: Option<&str>) -> Option<St
     path_is_real_directory(&accounts.join(&sibling)).then_some(sibling)
 }
 
+/// What happened to the Windows profile a backup recorded.
+pub(super) enum ProfileOutcome {
+    /// The backup records no profile, so there is nothing to resolve.
+    NotRecorded,
+    /// This account's Windows profile reaches the recorded one. `linked` says
+    /// whether this restore had to add the connection.
+    Resolved { linked: bool },
+    /// This account keeps its own profile and cannot reach the recorded one.
+    Unavailable { warning: String },
+}
+
+impl ProfileOutcome {
+    pub(super) fn resolved(&self) -> bool {
+        matches!(self, Self::Resolved { .. })
+    }
+
+    pub(super) fn linked(&self) -> bool {
+        matches!(self, Self::Resolved { linked: true })
+    }
+
+    pub(super) fn warning(&self) -> Option<&str> {
+        match self {
+            Self::Unavailable { warning } => Some(warning),
+            _ => None,
+        }
+    }
+}
+
 /// Let this account's Windows profile reach the restored one. Wine creates
 /// `drive_c/users/<account>` from the account that runs it, so a bottle restored
 /// under a different account needs that name to resolve to the profile the
-/// backup actually holds. This adds one bottle-relative link beside it; it never
-/// renames, moves, merges or removes a profile, and it leaves an existing
-/// profile folder of that name untouched.
-pub(super) fn link_restored_profile(
+/// backup actually holds. At most one bottle-relative link is added beside that
+/// profile. An existing profile folder, or a link this restore did not write, is
+/// always kept: nothing is renamed, moved, merged or removed, and the caller
+/// receives a warning it can show instead of a silent half-restore. A recorded
+/// profile the payload does not contain is refused, because the manifest and the
+/// payload then disagree about what was backed up.
+pub(super) fn resolve_restored_profile(
     destination: &Path,
     account: Option<&str>,
     recorded: Option<&str>,
-) -> Result<bool, String> {
+) -> Result<ProfileOutcome, String> {
     let Some(recorded) = recorded else {
-        return Ok(false);
+        return Ok(ProfileOutcome::NotRecorded);
     };
     check_account_name(recorded)?;
+    let accounts = destination.join("prefix/drive_c/users");
+    if !path_is_real_directory(&accounts) {
+        return Err("Backup records a Windows profile but has no profile folder".into());
+    }
+    if !path_is_real_directory(&accounts.join(recorded)) {
+        return Err(format!(
+            "Backup is missing the Windows profile folder it records: {recorded}"
+        ));
+    }
+    let unavailable = |reason: &str| {
+        Ok(ProfileOutcome::Unavailable {
+            warning: format!(
+                "{reason} Windows programs in this bottle use that profile instead of the \
+                 restored \"{recorded}\" profile, so they may not find the settings and data \
+                 saved in the backup."
+            ),
+        })
+    };
     let Some(name) = account.filter(|name| check_account_name(name).is_ok()) else {
-        return Ok(false);
+        return Ok(ProfileOutcome::Unavailable {
+            warning: format!(
+                "Caskrun could not identify this Mac account, so no Windows profile was \
+                 connected. Windows programs in this bottle may not find the settings and data \
+                 saved in the backup's \"{recorded}\" profile."
+            ),
+        });
     };
     if name == recorded {
-        return Ok(false);
-    }
-    let accounts = destination.join("prefix/drive_c/users");
-    if !path_is_real_directory(&accounts) || !path_is_real_directory(&accounts.join(recorded)) {
-        return Ok(false);
+        return Ok(ProfileOutcome::Resolved { linked: false });
     }
     let profile = accounts.join(name);
-    if fs::symlink_metadata(&profile).is_ok() {
-        return Ok(false);
+    let Ok(existing) = fs::symlink_metadata(&profile) else {
+        symlink(recorded, &profile)
+            .map_err(|e| format!("Could not connect the restored Windows profile: {e}"))?;
+        return Ok(ProfileOutcome::Resolved { linked: true });
+    };
+    if !existing.file_type().is_symlink() {
+        return unavailable(
+            "This Mac account already has its own Windows profile in the restored bottle, so it was kept unchanged.",
+        );
     }
-    symlink(recorded, &profile)
-        .map_err(|e| format!("Could not connect the restored Windows profile: {e}"))?;
-    Ok(true)
+    // An earlier restore of this backup may already have connected this account.
+    if fs::read_link(&profile).map_err(|e| e.to_string())? == Path::new(recorded) {
+        return Ok(ProfileOutcome::Resolved { linked: false });
+    }
+    unavailable(
+        "This Mac account's Windows profile in the restored bottle already points elsewhere, so it was kept unchanged.",
+    )
 }
 
 #[derive(Default)]
@@ -615,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn connects_a_restored_profile_only_beside_an_existing_one() {
+    fn connects_a_restored_profile_without_disturbing_an_existing_one() {
         let root = xdg_test_root();
         let bottle = root.join("bottle");
         let accounts = bottle.join("prefix/drive_c/users");
@@ -625,9 +687,13 @@ mod tests {
             b"installed program settings",
         )
         .unwrap();
+        let resolve = |account: Option<&str>, recorded: Option<&str>| {
+            resolve_restored_profile(&bottle, account, recorded)
+        };
 
         // A bottle restored under another account reaches the saved profile.
-        assert!(link_restored_profile(&bottle, Some("second"), Some("first")).unwrap());
+        let outcome = resolve(Some("second"), Some("first")).unwrap();
+        assert!(outcome.resolved() && outcome.linked() && outcome.warning().is_none());
         assert_eq!(
             fs::read_link(accounts.join("second")).unwrap(),
             Path::new("first")
@@ -636,27 +702,96 @@ mod tests {
             fs::read(accounts.join("second/AppData/Roaming/Example/settings.ini")).unwrap(),
             b"installed program settings"
         );
-        // The saved profile keeps its own name and contents.
         assert!(path_is_real_directory(&accounts.join("first")));
 
-        // Nothing to do for the same account, a missing record, an unknown saved
-        // profile, or an account name that is not a plain folder name.
-        assert!(!link_restored_profile(&bottle, Some("first"), Some("first")).unwrap());
-        assert!(!link_restored_profile(&bottle, Some("third"), None).unwrap());
-        assert!(!link_restored_profile(&bottle, Some("third"), Some("absent")).unwrap());
-        assert!(!link_restored_profile(&bottle, None, Some("first")).unwrap());
-        assert!(!link_restored_profile(&bottle, Some("../escape"), Some("first")).unwrap());
-        assert!(link_restored_profile(&bottle, Some("third"), Some("../first")).is_err());
-        assert!(link_restored_profile(&bottle, Some("third"), Some("a/b")).is_err());
-        assert!(!accounts.join("third").exists());
-
-        // An account that already has a profile folder is never replaced.
-        fs::create_dir(accounts.join("fourth")).unwrap();
-        fs::write(accounts.join("fourth/own.txt"), b"existing profile").unwrap();
-        assert!(!link_restored_profile(&bottle, Some("fourth"), Some("first")).unwrap());
+        // Restoring the same backup again recognises the existing connection as
+        // successful instead of reporting a conflict or writing a second link.
+        let outcome = resolve(Some("second"), Some("first")).unwrap();
+        assert!(outcome.resolved() && !outcome.linked() && outcome.warning().is_none());
         assert_eq!(
-            fs::read(accounts.join("fourth/own.txt")).unwrap(),
+            fs::read_link(accounts.join("second")).unwrap(),
+            Path::new("first")
+        );
+
+        // The account that owns the recorded profile needs no connection.
+        let outcome = resolve(Some("first"), Some("first")).unwrap();
+        assert!(outcome.resolved() && !outcome.linked() && outcome.warning().is_none());
+
+        // A backup with no recorded profile resolves nothing and warns about
+        // nothing, so a restore cannot claim the profile was connected.
+        let outcome = resolve(Some("first"), None).unwrap();
+        assert!(!outcome.resolved() && !outcome.linked() && outcome.warning().is_none());
+
+        // An account with its own profile keeps it, and the restore says why the
+        // recorded profile is not in use.
+        fs::create_dir(accounts.join("third")).unwrap();
+        fs::write(accounts.join("third/own.txt"), b"existing profile").unwrap();
+        let outcome = resolve(Some("third"), Some("first")).unwrap();
+        assert!(!outcome.resolved() && !outcome.linked());
+        let warning = outcome.warning().unwrap();
+        assert!(warning.contains("already has its own Windows profile"));
+        assert!(warning.contains("\"first\""));
+        assert_eq!(
+            fs::read(accounts.join("third/own.txt")).unwrap(),
             b"existing profile"
+        );
+        assert!(path_is_real_directory(&accounts.join("third")));
+
+        // A connection this restore did not write is kept and reported too.
+        fs::create_dir(accounts.join("fourth")).unwrap();
+        symlink("fourth", accounts.join("fifth")).unwrap();
+        let outcome = resolve(Some("fifth"), Some("first")).unwrap();
+        assert!(!outcome.resolved());
+        assert!(
+            outcome
+                .warning()
+                .unwrap()
+                .contains("already points elsewhere")
+        );
+        assert_eq!(
+            fs::read_link(accounts.join("fifth")).unwrap(),
+            Path::new("fourth")
+        );
+
+        // An account Caskrun cannot identify is reported rather than guessed at.
+        let outcome = resolve(None, Some("first")).unwrap();
+        assert!(!outcome.resolved());
+        assert!(
+            outcome
+                .warning()
+                .unwrap()
+                .contains("could not identify this Mac account")
+        );
+        let outcome = resolve(Some("../escape"), Some("first")).unwrap();
+        assert!(!outcome.resolved() && outcome.warning().is_some());
+        assert!(!accounts.join("escape").exists());
+
+        // A recorded profile the payload does not contain is refused, and so is
+        // one that is not a plain profile folder name.
+        assert!(
+            resolve(Some("sixth"), Some("absent"))
+                .err()
+                .unwrap()
+                .contains("missing the Windows profile folder")
+        );
+        assert!(!accounts.join("sixth").exists());
+        assert!(resolve(Some("sixth"), Some("../first")).is_err());
+        assert!(resolve(Some("sixth"), Some("a/b")).is_err());
+        assert!(resolve(Some("sixth"), Some("")).is_err());
+        // A profile recorded for a payload without any profile folder is refused.
+        let bare = root.join("bare");
+        fs::create_dir_all(bare.join("prefix/drive_c")).unwrap();
+        assert!(
+            resolve_restored_profile(&bare, Some("first"), Some("first"))
+                .err()
+                .unwrap()
+                .contains("no profile folder")
+        );
+        // Without a recorded profile that same payload is left alone.
+        assert!(
+            !resolve_restored_profile(&bare, Some("first"), None)
+                .unwrap()
+                .resolved()
         );
         fs::remove_dir_all(root).unwrap();
     }

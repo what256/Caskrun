@@ -91,10 +91,21 @@ A disposable two-account check with the independent runtime produced the followi
 
 Policy refusals were checked live against a real bottle. A `Documents` link pointing at `~/.ssh` or `~/Library`, a non-standard `Favorites` link pointing at `~/Documents`, and a `Documents` link pointing at the wrong standard folder each stopped the export with `Backup contains an absolute symlink at …` and left no backup behind. A `Desktop` link pointing at the real `~/Desktop` is converted to the bottle's own private Desktop before the copy, which is why Desktop is absent from the table and is never carried as a mapping.
 
-Cross-account restores previously left the bottle's original Windows account folder unreachable, so `%USERPROFILE%` pointed at a new, nearly empty folder `wineboot` created and imported programs lost their settings. A restore now adds one bottle-relative link beside the saved profile, which the checks above confirm. Backups are written as `.caskrun-bottle` version 2; a version 1 backup carries neither mappings nor a profile and still restores, while a version 1 manifest claiming either field and any other version are refused. All owned test sessions were stopped, checked for remaining owners and removed.
+Cross-account restores previously left the bottle's original Windows account folder unreachable, so `%USERPROFILE%` pointed at a new, nearly empty folder `wineboot` created and imported programs lost their settings. Each backup now records the profile folder it holds, and a restore reports whether this account can reach it rather than assuming it can. A five-account disposable session checked every outcome with the independent runtime, and the signed candidate app's packaged core repeated the conflicting-link, fresh-link and refusal cases:
+
+| Restored into | Outcome | Evidence |
+| --- | --- | --- |
+| An account with no profile folder in the bottle | resolved, link added | `AccountTwo -> AccountOne`; a Windows program read the recorded profile's settings |
+| The account that owns the recorded profile | resolved, no link needed | no warning reported |
+| An account whose payload already carries the correct link | resolved, no second link written | exporting a connected bottle recorded the profile it resolves to, and re-importing recognised it |
+| An account that already owns a profile folder | **not** resolved, warning returned | its own settings file and the recorded profile both survived unchanged |
+| An account whose profile link points elsewhere | **not** resolved, warning returned | the existing link was kept and the recorded profile left intact |
+| A manifest recording a profile absent from the payload | refused | `Backup is missing the Windows profile folder it records`, and no bottle was created |
+
+Caskrun states that imported programs keep their settings and data only when the profile resolved; otherwise it shows the warning. Nothing is renamed, moved, merged or removed in any of these cases. Backups are written as `.caskrun-bottle` version 2; a version 1 backup carries neither mappings nor a profile and still restores, while a version 1 manifest claiming either field and any other version are refused. All owned test sessions were stopped, checked for remaining owners and removed.
 
 ## Source verification
 
-The current serial Rust verification passed 266 unit tests and 2 integration tests; 2 existing tests remain ignored. Parallel runs exposed timing-sensitive failures, so the serial result is not a clean parallel-suite result. The Python harness, publication-privacy and catalog checks passed 46 tests. The native UI typechecked and a signed candidate app built and verified its signature in this round. The adaptive renderer's 23 real original image CLI cases, the packaged-core PE-artwork smoke and the development DMG verification belong to the earlier icon round and were not rerun here. These tests cover source behavior and fixtures, not real store authentication or games.
+The current serial Rust verification passed 267 unit tests and 2 integration tests; 2 existing tests remain ignored. Parallel runs exposed timing-sensitive failures, so the serial result is not a clean parallel-suite result. The Python harness, publication-privacy and catalog checks passed 46 tests. The native UI typechecked and a signed candidate app built and verified its signature in this round. The adaptive renderer's 23 real original image CLI cases, the packaged-core PE-artwork smoke and the development DMG verification belong to the earlier icon round and were not rerun here. These tests cover source behavior and fixtures, not real store authentication or games.
 
 See the separate [feature inventory](FEATURES.md) for the demo's limitations.
