@@ -371,8 +371,22 @@ struct DiscoveredProgram: Decodable, Identifiable, Sendable {
     let source: String
     /// A shortcut's own Windows arguments. Two shortcuts can point at one
     /// program and still be different commands, so the identity includes them.
-    var arguments: [String] = []
-    var id: String { ([path] + arguments).joined(separator: "\u{0}") }
+    let arguments: [String]
+    /// A program and its arguments together: comparing paths alone would treat
+    /// two different commands for one program as the same suggestion.
+    var command: String { ([path.lowercased()] + arguments).joined(separator: "\u{0}") }
+    var id: String { command }
+
+    private enum CodingKeys: String, CodingKey { case name, path, source, arguments }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        name = try values.decode(String.self, forKey: .name)
+        path = try values.decode(String.self, forKey: .path)
+        source = try values.decode(String.self, forKey: .source)
+        // A program with no arguments may arrive without the key at all.
+        arguments = try values.decodeIfPresent([String].self, forKey: .arguments) ?? []
+    }
 }
 
 struct DiscoveredProgramsResult: Decodable, Sendable {
@@ -397,6 +411,11 @@ struct SavedLauncher: Codable, Identifiable, Sendable {
     let hidden_from_home: Bool
     // Older launcher records omit this field; the core treats that as no saved options.
     let saved_arguments: [String]?
+    /// The same program-and-arguments key a discovered suggestion uses, so an
+    /// already-saved command can be matched against a suggestion exactly.
+    var command: String {
+        ([path.lowercased()] + (saved_arguments ?? [])).joined(separator: "\u{0}")
+    }
 }
 
 struct BottleLog: Decodable, Identifiable, Sendable {
@@ -1437,11 +1456,11 @@ final class CaskrunModel: ObservableObject {
             defer { isManagingBottle = false }
             do {
                 let result = try await callAsync(["discover-apps", bottle.id], as: DiscoveredProgramsResult.self)
-                let saved = Set((launchers[bottle.id] ?? []).map { $0.path.lowercased() })
+                let saved = Set((launchers[bottle.id] ?? []).map(\.command))
                 manualInstallReview = ManualInstallReview(
                     bottle: bottle,
                     installerName: "",
-                    candidates: result.candidates.filter { !saved.contains($0.path.lowercased()) },
+                    candidates: result.candidates.filter { !saved.contains($0.command) },
                     searchWasLimited: result.truncated,
                     discoveryUnavailable: false
                 )
@@ -1763,7 +1782,7 @@ final class CaskrunModel: ObservableObject {
                 }
                 do {
                     let before = try? await callAsync(["discover-apps", bottleID], as: DiscoveredProgramsResult.self)
-                    let knownPaths = Set((before?.candidates ?? []).map { $0.path.lowercased() })
+                    let knownCommands = Set((before?.candidates ?? []).map(\.command))
                     let result = try await callAsync(["launch-wait", bottleID, url.path],
                                                      as: WaitLaunchResult.self, cancellation: cancellation)
                     canCancelManualInstaller = false
@@ -1774,7 +1793,7 @@ final class CaskrunModel: ObservableObject {
                     } else if result.exit_code == 0 {
                         let after = try? await callAsync(["discover-apps", bottleID], as: DiscoveredProgramsResult.self)
                         let newPrograms = before == nil ? [] : (after?.candidates ?? []).filter {
-                            !knownPaths.contains($0.path.lowercased())
+                            !knownCommands.contains($0.command)
                         }
                         manualInstallReview = ManualInstallReview(bottle: bottle,
                                                                   installerName: url.lastPathComponent,

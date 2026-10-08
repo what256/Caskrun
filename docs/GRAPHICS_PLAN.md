@@ -40,38 +40,46 @@ document, and the blocker is specific and fixable.
 
 DXMT's unix layer resolves the driver two ways. It first looks for a
 `macdrv_functions` structure, which is a CrossOver export and is absent from
-upstream Wine. Failing that it falls back to resolving individual symbols by name
-with `dlsym(RTLD_DEFAULT, ...)`. Only that fallback matters here, and it needs
-these eight: `get_win_data`, `release_win_data`, `macdrv_get_cocoa_window`,
-`macdrv_create_metal_device`, `macdrv_release_metal_device`,
-`macdrv_view_create_metal_view`, `macdrv_view_get_metal_layer` and
-`macdrv_view_release_metal_view`. A ninth name in DXMT's structure,
-`macdrv_init_display_devices`, belongs to the CrossOver path only; it does not
-exist in Wine 11.0 and the by-name fallback never asks for it.
+upstream Wine. Failing that it falls back to `dlsym(RTLD_DEFAULT, ...)` for
+individual names. Auditing every `dlsym` call at the pinned revision shows the
+fallback resolves exactly **five** functions: `get_win_data`,
+`release_win_data`, `macdrv_view_create_metal_view`,
+`macdrv_view_get_metal_layer` and `macdrv_view_release_metal_view`. The other
+names in that structure, including `macdrv_create_metal_device` and
+`macdrv_get_cocoa_window`, appear only as structure members and are never looked
+up on the upstream path.
 
-In the packaged engine all eight exist in `winemac.so` and all eight are local
+In the packaged engine all five exist in `winemac.so` and all five are local
 symbols: the library exports two symbols out of 1905 entries. An original patch
-giving those eight declarations default visibility raises the exported count to
-10, and a rebuilt `winemac.so` from a clone of this project's configured Wine
-11.0 build tree confirms it. The patch is recorded in
-[runtime-patches](../runtime-patches/README.md) and is deliberately not packaged:
-including it rebuilds the engine and changes the runtime-tree digest existing
-bottles are bound to.
+giving those five declarations default visibility raises the exported count to 7,
+and a rebuilt `winemac.so` from a clone of this project's configured Wine 11.0
+build tree confirms it, with the unused names left local.
+
+A second defect sits on the DXMT side. It declares its own four-pointer copy of
+`struct macdrv_win_data` and reads the client view from offset 24. Wine 11.0 has
+no separate `cocoa_view`: the client view is `client_view` at offset 16, and
+offset 24 begins a `struct window_rects`. Built unmodified against this driver,
+DXMT would hand window coordinates to `macdrv_view_create_metal_view` as a view
+pointer. A second patch declares only the fields that file reads, with Wine
+11.0's names and order.
+
+Both patches are recorded in [runtime-patches](../runtime-patches/README.md) and
+neither is packaged: including the Wine one rebuilds the engine and changes the
+runtime-tree digest existing bottles are bound to.
 
 Whether `dlsym(RTLD_DEFAULT, ...)` can then reach those symbols from DXMT's own
 unix library is a second, untested question, because it depends on how Wine loads
 driver libraries. Nothing has been built or executed on the DXMT side.
 
-**Provenance.** DXMT is published at `3Shain/dxmt` under LGPL-2.1-or-later,
-copyright "Feifan He for CodeWeavers", with release v0.80 of 23 April 2026 and a
-main branch head of `e94c312f5c054263acf261cfa109edf13e757587` dated
-6 October 2026. Building from that public, separately licensed repository is what
-this project's rules mean by using an independently licensed upstream component,
-and is distinct from copying anything out of an installed CrossOver, which stays
-forbidden. Any inclusion must pin a revision, carry the LGPL text and copyright
-notice, and keep a corresponding-source record. This is an engineering and
-documentation judgement, not legal advice; the project owner may want their own
-review before any release.
+**Provenance.** The pinned revision is
+`e94c312f5c054263acf261cfa109edf13e757587`, committed 6 October 2026. Its
+`LICENSE` is recorded by size, git blob and SHA-256 in
+[runtime-patches](../runtime-patches/README.md); it is a grant notice for
+LGPL-2.1-or-later and does not itself contain the licence text, so packaging
+must add a full LGPL-2.1 copy, a corresponding-source record and these patches.
+Building from that public, separately licensed repository is distinct from
+copying anything out of an installed CrossOver, which stays forbidden. This is an
+engineering and documentation judgement, not legal advice.
 
 **Toolchain.** DXMT's build guide requires Meson 1.3+, LLVM 15 exactly (the guide
 pins `llvmorg-15.0.7`) built for x86_64 with headers and static libraries,

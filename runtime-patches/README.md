@@ -88,28 +88,57 @@ Eighty-five isolated Cocoa role checks confirm ordinary apps/tools remain
 eligible for foreground use while the narrowly identified background roles
 are accessory. Full packaged-runtime and vendor-launcher checks remain separate.
 
-## `wine-11.0-winemac-metal-exports.patch` — prepared, not packaged
+## DXMT preparation — prepared, not packaged
 
-Wine builds its Unix libraries with hidden visibility. Measured against this
-project's own Wine 11.0 build, `winemac.so` exports exactly two symbols, both
-unix-call tables, out of 1905 symbol entries. The Metal and window-data entry
-points an independently sourced Direct3D-to-Metal translator needs are present
-in that library but have local binding, so a by-name lookup cannot find them.
+Neither patch below is in any packaged engine, no translator has been built or
+loaded, and no Direct3D call has been made through one.
 
-The patch annotates eight declarations in `dlls/winemac.drv/macdrv.h` and
-`macdrv_cocoa.h` with default visibility: `get_win_data`, `release_win_data`,
-`macdrv_get_cocoa_window`, `macdrv_create_metal_device`,
-`macdrv_release_metal_device`, `macdrv_view_create_metal_view`,
-`macdrv_view_get_metal_layer` and `macdrv_view_release_metal_view`. It widens
-linkage only; nothing is added, removed or renamed.
+### `wine-11.0-winemac-metal-exports.patch`
 
-Rebuilding `winemac.so` from a clone of this project's configured Wine 11.0 build
-tree with the patch applied raised its exported symbols from 2 to 10, exactly the
-eight annotated declarations. The patch also applies cleanly to a pristine
-Wine 11.0 source tree. The disposable clone was removed afterwards.
+Wine builds its Unix libraries with hidden visibility. This project's Wine 11.0
+build exports exactly two symbols from `winemac.so`, both unix-call tables, out
+of 1905 symbol entries.
 
-This patch is **not in any packaged engine**. Including it means rebuilding and
-repackaging the whole runtime, which changes the runtime-tree digest existing
-bottles are bound to, so it needs the general idle-bottle migration path the
-graphics plan already requires. No translator has been built or loaded, and no
-Direct3D call has been made through it. See the [graphics plan](../docs/GRAPHICS_PLAN.md).
+Audited against DXMT revision `e94c312f5c054263acf261cfa109edf13e757587`, its
+unix layer first looks for a `macdrv_functions` structure, which is a CrossOver
+export absent from upstream Wine, and otherwise resolves exactly **five**
+functions by name: `get_win_data`, `release_win_data`,
+`macdrv_view_create_metal_view`, `macdrv_view_get_metal_layer` and
+`macdrv_view_release_metal_view`. Other names in that structure, including
+`macdrv_create_metal_device` and `macdrv_get_cocoa_window`, are never looked up
+on the upstream path and are deliberately left local.
+
+The patch annotates those five declarations with default visibility. It widens
+linkage only. Rebuilding `winemac.so` from a clone of this project's configured
+Wine 11.0 build tree raised its exports from 2 to 7, the five plus the two
+existing tables, and left the three unused names local. It also applies cleanly
+to a pristine Wine 11.0 tree. The disposable clone was removed afterwards.
+
+### `dxmt-e94c312f-wine-11-win-data.patch`
+
+DXMT declares its own copy of `struct macdrv_win_data` with four pointer fields
+and reads the client view from offset 24. Wine 11.0 has no separate
+`cocoa_view`: its client view is `client_view` at offset 16, and offset 24 begins
+a `struct window_rects`. Reading the older layout against this driver therefore
+passes window coordinates to `macdrv_view_create_metal_view` as a view pointer.
+
+The patch declares only the fields that file reads, with Wine 11.0's names and
+order. It targets a build against upstream Wine 11.0 and does not preserve the
+older layout the `macdrv_functions` path expects, which upstream Wine never
+exports.
+
+### Provenance and licence of the pinned revision
+
+DXMT is published at `3Shain/dxmt` under LGPL-2.1-or-later. The pinned revision
+is `e94c312f5c054263acf261cfa109edf13e757587`, committed 6 October 2026, tree
+`b3cc8aaef14ec492d1bcf62acf29196efde90024`; the latest tagged release is v0.80
+of 23 April 2026. Its `LICENSE` file at that revision is 782 bytes, git blob
+`927beb2e391ca7188b15fa7fbd9599e83e84bd7a`, SHA-256
+`b87c35aef7b2cf14de854118ca55ce5c4b284c85b5f002421fb8d46d868c2d17`, and reads
+"Copyright (c) 2023-2026 Feifan He for CodeWeavers". That file is a grant notice
+only: it does not contain the LGPL text, so packaging would have to add a full
+LGPL-2.1 copy alongside it, plus a corresponding-source record and these patches.
+
+Building from that public, separately licensed repository is distinct from
+copying anything out of an installed CrossOver, which remains forbidden. This is
+an engineering and documentation judgement, not legal advice.

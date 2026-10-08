@@ -158,6 +158,7 @@ fn import_with_guard(
                 .strip_prefix(&prefix)
                 .map_err(|_| "App discovery returned a path outside the imported bottle")?;
             validate_relative_path(relative)?;
+            validate_app_arguments(&candidate.arguments)?;
             launchers.push(Launcher {
                 id: Uuid::new_v4().to_string(),
                 name: {
@@ -180,7 +181,9 @@ fn import_with_guard(
                     .to_string(),
                 created_at: bottle.created_at,
                 hidden_from_home: false,
-                saved_arguments: Vec::new(),
+                // A discovered shortcut's arguments are part of its command;
+                // dropping them here would import a different program.
+                saved_arguments: candidate.arguments.clone(),
             });
         }
         write_new_file(
@@ -751,6 +754,32 @@ mod tests {
             Path::new("../drive_c")
         );
         assert!(!bottle.join("prefix/dosdevices/z:").exists());
+    }
+
+    #[test]
+    fn imported_shortcuts_keep_their_windows_arguments() {
+        // A discovered shortcut's arguments are part of its command. Importing
+        // the program without them would start a different program.
+        let fixture = Fixture::new();
+        pe(&fixture.source.join("drive_c/Games/Nova/Nova.exe"));
+        let menu = fixture
+            .source
+            .join("drive_c/ProgramData/Microsoft/Windows/Start Menu/Programs");
+        crate::installed_apps::tests::write_shortcut(
+            &menu.join("Nova Safe Mode.lnk"),
+            "C:\\Games\\Nova\\Nova.exe",
+            Some("-safe --profile \"My Profile\""),
+        );
+        let result = fixture.import().unwrap();
+        let imported = result
+            .launchers
+            .iter()
+            .find(|launcher| launcher.name == "Nova Safe Mode")
+            .expect("the shortcut should be imported as its own command");
+        assert_eq!(
+            imported.saved_arguments,
+            ["-safe", "--profile", "My Profile"]
+        );
     }
 
     #[test]

@@ -1,0 +1,55 @@
+Read Wine 11.0's client view instead of an older driver layout.
+
+DXMT declares its own copy of winemac.drv's `struct macdrv_win_data` and reads
+`client_cocoa_view` from it. That layout has four pointer fields, placing the
+client view at offset 24.
+
+Wine 11.0's actual structure is:
+
+    HWND                hwnd;            /* offset 0  */
+    macdrv_window       cocoa_window;    /* offset 8  */
+    macdrv_view         client_view;     /* offset 16 */
+    struct window_rects rects;           /* offset 24 */
+
+There is no separate `cocoa_view`, and the client view sits at offset 16. Reading
+offset 24 against this driver yields the first bytes of a rectangle structure,
+so window coordinates are passed to macdrv_view_create_metal_view as a view
+pointer.
+
+Declare only the fields this file reads, with Wine 11.0's names and order, so a
+later field's layout cannot matter. This patch targets a build against upstream
+Wine 11.0. It intentionally does not keep the older four-field layout, which the
+`macdrv_functions` path expects; upstream Wine does not export that structure,
+so that path is unreachable in such a build.
+
+Applies to DXMT revision e94c312f5c054263acf261cfa109edf13e757587. DXMT is
+LGPL-2.1-or-later; this patch is offered under the same terms.
+
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -1661,11 +1661,14 @@
+ typedef struct macdrv_opaque_window_data *macdrv_window_data;
+ typedef struct opaque_window_surface *window_surface;
+ typedef struct opaque_HWND *HWND;
++/* Wine 11.0 keeps the client view in the third field and has no separate
++ * cocoa_view, so the older layout read the start of the following rectangle
++ * structure instead of a view pointer. Only the fields read below are
++ * declared, so a later field's layout cannot matter. */
+ struct macdrv_win_data {
+   HWND hwnd; /* hwnd that this private data belongs to */
+   macdrv_window cocoa_window;
+-  macdrv_view cocoa_view;
+-  macdrv_view client_cocoa_view;
++  macdrv_view client_view;
+ };
+ 
+ struct macdrv_functions_t {
+@@ -1707,7 +1710,7 @@
+       pfn_macdrv_view_get_metal_layer) {
+     struct macdrv_win_data *win_data = pfn_get_win_data((HWND)params->hwnd);
+     macdrv_metal_view view =
+-        pfn_macdrv_view_create_metal_view(win_data->client_cocoa_view, (macdrv_metal_device)params->device);
++        pfn_macdrv_view_create_metal_view(win_data->client_view, (macdrv_metal_device)params->device);
+     params->ret_view = (obj_handle_t)view;
+     if (view) {
+       params->ret_layer = (obj_handle_t)pfn_macdrv_view_get_metal_layer(view);

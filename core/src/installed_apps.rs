@@ -23,6 +23,10 @@ const MAX_USERS: usize = 128;
 // Matches the bounds the core applies when it saves a launcher's arguments.
 const MAX_ARGUMENTS: usize = 64;
 const MAX_ARGUMENT_BYTES: usize = 4096;
+const MAX_ARGUMENTS_TOTAL_BYTES: usize = 16 * 1024;
+// A work bound on the raw string. Quoting can only shrink a command, so this
+// cannot reject a command whose parsed form would be within the limits above.
+const MAX_ARGUMENT_STRING_BYTES: usize = 64 * 1024;
 const SHELL_LINK_CLSID: [u8; 16] = [
     0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
 ];
@@ -40,7 +44,9 @@ pub(crate) struct Candidate {
     pub(crate) source: &'static str,
     /// A shortcut's own Windows arguments, already split the way Windows splits
     /// them. Saving a suggestion without these would launch a different command.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Always serialized, including when empty, so a reader never has to infer
+    /// the difference between "no arguments" and "an older core".
+    #[serde(default)]
     pub(crate) arguments: Vec<String>,
 }
 
@@ -465,7 +471,7 @@ fn scan_shortcuts(
 /// suggested. Reference:
 /// https://learn.microsoft.com/en-us/cpp/cpp/main-function-command-line-args
 fn parse_windows_arguments(input: &str) -> Option<Vec<String>> {
-    if input.len() > MAX_ARGUMENT_BYTES {
+    if input.len() > MAX_ARGUMENT_STRING_BYTES {
         return None;
     }
     // Tab separates arguments like a space; any other control character cannot
@@ -533,6 +539,10 @@ fn parse_windows_arguments(input: &str) -> Option<Vec<String>> {
         if arguments.len() > MAX_ARGUMENTS {
             return None;
         }
+    }
+    // Never suggest a command the core would refuse to save.
+    if arguments.iter().map(String::len).sum::<usize>() > MAX_ARGUMENTS_TOTAL_BYTES {
+        return None;
     }
     Some(arguments)
 }
@@ -981,7 +991,7 @@ fn is_windows_executable(path: &Path, before: &fs::Metadata) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
     use uuid::Uuid;
@@ -1005,11 +1015,11 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
-    fn write_shortcut(path: &Path, target: &str, arguments: Option<&str>) {
+    pub(crate) fn write_shortcut(path: &Path, target: &str, arguments: Option<&str>) {
         write_shortcut_with_working(path, target, None, arguments);
     }
 
-    fn write_shortcut_with_working(
+    pub(crate) fn write_shortcut_with_working(
         path: &Path,
         target: &str,
         working: Option<&str>,
@@ -1323,7 +1333,44 @@ mod tests {
         assert_eq!(split("--line\nbreak"), None);
         assert_eq!(split("--nul\0byte"), None);
         assert_eq!(split(&"a".repeat(MAX_ARGUMENT_BYTES + 1)), None);
+        assert_eq!(split(&"a".repeat(MAX_ARGUMENT_STRING_BYTES + 1)), None);
         assert_eq!(split(&"a ".repeat(MAX_ARGUMENTS + 1)), None);
+    }
+
+    #[test]
+    fn every_candidate_serializes_its_arguments_even_when_empty() {
+        // The app decodes this field. Omitting it when empty made a reader have
+        // to tell "no arguments" apart from "an older core", and a decoder that
+        // required the key refused every ordinary suggestion.
+        let candidate = Candidate {
+            name: "Nova".into(),
+            path: "/bottle/Nova.exe".into(),
+            source: "program-files",
+            arguments: Vec::new(),
+        };
+        let encoded = serde_json::to_value(&candidate).unwrap();
+        assert_eq!(encoded.get("arguments"), Some(&serde_json::json!([])));
+        let with_arguments = Candidate {
+            arguments: vec!["-safe".into()],
+            ..candidate
+        };
+        assert_eq!(
+            serde_json::to_value(&with_arguments)
+                .unwrap()
+                .get("arguments"),
+            Some(&serde_json::json!(["-safe"]))
+        );
+    }
+
+    #[test]
+    fn a_suggested_command_never_exceeds_what_the_core_will_save() {
+        // Each argument is bounded, and so is their total, so discovery cannot
+        // offer a command that saving would then refuse.
+        let long = "a".repeat(MAX_ARGUMENT_BYTES);
+        let within = (0..3).map(|_| long.clone()).collect::<Vec<_>>().join(" ");
+        assert_eq!(parse_windows_arguments(&within).unwrap().len(), 3);
+        let beyond = (0..5).map(|_| long.clone()).collect::<Vec<_>>().join(" ");
+        assert!(parse_windows_arguments(&beyond).is_none());
     }
 
     #[test]
