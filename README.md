@@ -55,7 +55,7 @@ open .build/Caskrun.app
 The build stays in `.build/`; the script does not install into `/Applications`.
 Builds refuse to replace a Caskrun app while its own process or bundled Wine runtime is in use. To prepare a separate app while Steam keeps running from `.build/Caskrun.app`, set `CASKRUN_BUILD_OUTPUT_DIR="$PWD/.build/candidate"` for `build.sh` or `CASKRUN_PACKAGE_OUTPUT_DIR="$PWD/.build/candidate"` for `package-dmg.sh`.
 
-For a local development DMG, first create the independent Steam-enabled Wine package as described in [the runtime notes](docs/LOCAL_WINE_RUNTIME.md). Package into an isolated build directory, then publish the verified image to `dist/`:
+For a local development DMG, first stage the independent native Wine base and build the reviewed switchable package described in [DXMT app integration](docs/DXMT_APP_INTEGRATION.md). The default packager includes that package; WineD3D remains the default renderer and DXMT is an optional experimental bottle control. Package into an isolated build directory, then publish the verified image to `dist/`:
 
 ```sh
 mkdir -p .build/release-candidate
@@ -65,7 +65,7 @@ CASKRUN_PACKAGE_OUTPUT_DIR="$PWD/.build/release-candidate" ./scripts/package-dmg
 
 Packaging rebuilds the ARM64 app, includes the runtime and its source/license notices, and verifies the image. Publishing verifies the candidate and any existing deliverable before replacing the visible DMG and SHA-256 file; it does not replace an app bundle serving a running Wine process. The DMG is ad-hoc signed and **not notarized for public distribution**. `./scripts/build.sh` alone creates a lightweight app without a bundled engine.
 
-The published local development image is at `dist/Caskrun-0.1.0-arm64-dev.dmg`, with its SHA-256 file beside it. A newer verified native-identity candidate is retained in the ignored build directory until publication. The `dist/` folder contains deliverables and is not committed to Git.
+The published local development image is at `dist/Caskrun-0.1.0-arm64-dev.dmg`, with its SHA-256 file beside it. The `dist/` folder contains local deliverables and is not committed to Git or uploaded as a release.
 
 ```sh
 (cd dist && shasum -a 256 -c Caskrun-0.1.0-arm64-dev.dmg.sha256)

@@ -31,6 +31,13 @@ class CandidateGuards(unittest.TestCase):
         with self.assertRaises(PACKAGE.PackageError):
             PACKAGE.owned_path(PACKAGE.REPO / ".build")
 
+    def test_switchable_artifacts_use_the_component_runtime_view(self):
+        original = "runtime/lib/wine/x86_64-windows/d3d11.dll"
+        self.assertEqual(PACKAGE.artifact_destination(original, False), original)
+        self.assertEqual(PACKAGE.artifact_destination(original, True), "components/dxmt/" + original)
+        with self.assertRaises(PACKAGE.PackageError):
+            PACKAGE.artifact_destination("unreviewed-layout/d3d11.dll", True)
+
     def test_symlink_parent_refused_even_when_internal(self):
         target = self.root / "actual"
         target.mkdir()

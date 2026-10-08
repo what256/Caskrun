@@ -11,8 +11,10 @@ preservation. Do not reimplement those from the older Phase D bullets.
 The independently built DXMT candidate now passes x64/x86 hardware Direct3D
 10_0/11_0 device, shader/readback, HWND presentation and window-lifecycle gates.
 Read [DXMT smoke](DXMT_SMOKE.md) for source pins, commands, cleanup and exact
-boundaries. It remains separate from the app and existing bottles; app-facing
-capabilities, safe runtime migration/rollback, visible output and games remain.
+boundaries. The optional DXMT control is now integrated into the development app with exact
+capabilities, a preserved WineD3D default and reviewed idle native-v2 migration /
+runtime-record rollback. Read [app integration](DXMT_APP_INTEGRATION.md) before
+changing those paths. Visible output and games remain unvalidated.
 High Resolution stays optional and off by default. The user will perform
 manual game testing later.
 

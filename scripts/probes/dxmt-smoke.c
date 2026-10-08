@@ -5,20 +5,27 @@
  *   -std=c11 -O2 -Wall -Wextra -Werror dxmt-smoke.c -o probe.exe
  *   -ladvapi32 -ldxguid -luser32
  *
- * Run only in an owned disposable Wine prefix, with the DXMT DLLs installed
- * and appropriate overrides selected by the caller (builtin for Caskrun's
- * independently replaced builtin-DLL candidate):
+ * Run only in an owned disposable Wine prefix, with its reviewed renderer
+ * selected by Caskrun. Legacy replacement candidates use builtin overrides:
  *   probe.exe --expected-d3d11-sha256 HEX --expected-dxgi-sha256 HEX
  * Add --lifecycle for schema 2: two concurrent windows, resize/readback,
  * recreate the primary swap chain on the same HWND, destroy that HWND before
  * swap-chain release, and render again in the surviving secondary window.
- * HEX must be the SHA-256 of that architecture's independently built DLL,
- * taken from the caller's build receipt. Matching names alone do not prove
- * DXMT selection. Module paths and hashes are local evidence, not source to
- * publish. The module records precede all rendering and a mismatch refuses
- * the test. A successful WineD3D run cannot be mistaken for a DXMT pass.
+ * --identity-only emits schema 3 and checks DLL identity without creating a
+ * Direct3D device or claiming rendering. --identity-gate WINDOWS_PATH holds
+ * the live process after loading its DLLs: a fresh .ready file announces the
+ * gate, and the caller must create .release after inspecting host mappings.
+ * Gated rendering emits schema 4. Wine builtin module names can name a prefix
+ * placeholder rather than the actual section backing file, so gated hashes
+ * describe logical files only; the host must independently prove the mapped
+ * backend files before releasing this gate. There is no unverified fallback.
+ * HEX must be the SHA-256 of that architecture's logical prefix DLL from
+ * the build receipt. In legacy replacement candidates this is also the
+ * selected DLL. A switchable candidate requires the independent gated host
+ * mapping proof described above; its placeholder hash cannot prove DXMT.
+ * Module paths stay local. Mismatching logical files refuse the test too.
  *
- * Output is bounded JSON Lines, schema 1. Events: probe, module, check,
+ * Output is bounded JSON Lines, schemas 1 through 4. Events: probe, module, check,
  * pixel, modules, result. Every check carries an exact feature_level (10_0
  * or 11_0) or "none". Hardware devices have no WARP/software fallback.
  * Both levels run an offscreen clear, an original HLSL triangle, staging
@@ -145,6 +152,35 @@ done:
     if (provider) CryptReleaseContext(provider, 0);
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
     return check(name, ok, ok ? S_OK : E_FAIL);
+}
+
+static BOOL identity_gate(const char *argument)
+{
+    wchar_t ready[32768], release[32768];
+    HANDLE file;
+    int length;
+    DWORD attributes;
+    length = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, argument, -1,
+        ready, (int)(sizeof(ready) / sizeof(*ready)) - 8);
+    if (!length) return check("identity_gate", FALSE, E_INVALIDARG);
+    memcpy(release, ready, (size_t)length * sizeof(*ready));
+    memcpy(ready + length - 1, L".ready", sizeof(L".ready"));
+    memcpy(release + length - 1, L".release", sizeof(L".release"));
+    /* Refuse stale gates rather than treating evidence from another run as
+     * authorization. The process watchdog also bounds the wait below. */
+    if (GetFileAttributesW(release) != INVALID_FILE_ATTRIBUTES)
+        return check("identity_gate", FALSE, HRESULT_FROM_WIN32(ERROR_FILE_EXISTS));
+    file = CreateFileW(ready, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+        return check("identity_gate", FALSE, HRESULT_FROM_WIN32(GetLastError()));
+    CloseHandle(file);
+    for (;;) {
+        attributes = GetFileAttributesW(release);
+        if (attributes != INVALID_FILE_ATTRIBUTES)
+            return check("identity_gate", !(attributes & FILE_ATTRIBUTE_DIRECTORY), E_FAIL);
+        Sleep(25);
+    }
 }
 
 typedef struct Triangle {
@@ -523,7 +559,8 @@ int main(int argc, char **argv)
     HANDLE completed = NULL, timer = NULL;
     WNDCLASSW window_class = {0};
     HWND window = NULL;
-    BOOL identities_ok, lifecycle = FALSE;
+    BOOL identities_ok, lifecycle = FALSE, identity_only = FALSE;
+    const char *gate = NULL;
     int i, result = 2;
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--expected-d3d11-sha256") && !expected_d3d11 && i + 1 < argc)
@@ -532,15 +569,21 @@ int main(int argc, char **argv)
             expected_dxgi = argv[++i];
         else if (!strcmp(argv[i], "--lifecycle") && !lifecycle)
             lifecycle = TRUE;
+        else if (!strcmp(argv[i], "--identity-only") && !identity_only)
+            identity_only = TRUE;
+        else if (!strcmp(argv[i], "--identity-gate") && !gate && i + 1 < argc)
+            gate = argv[++i];
         else { fprintf(stderr, "Expected both --expected-d3d11-sha256 HEX and --expected-dxgi-sha256 HEX.\n"); return 2; }
     }
-    if (!valid_hash(expected_d3d11) || !valid_hash(expected_dxgi)) {
+    if (!valid_hash(expected_d3d11) || !valid_hash(expected_dxgi) || (identity_only && lifecycle)) {
         fprintf(stderr, "Both expected DLL SHA-256 values must be 64 lowercase hexadecimal characters.\n");
         return 2;
     }
-    printf("{\"event\":\"probe\",\"schema\":%u,\"architecture\":\"%s\",\"watchdog_ms\":%u,\"driver\":\"hardware\"%s}\n",
-        lifecycle ? 2u : 1u, sizeof(void *) == 8 ? "x64" : "x86", WATCHDOG_MS,
-        lifecycle ? ",\"mode\":\"lifecycle\"" : "");
+    printf("{\"event\":\"probe\",\"schema\":%u,\"architecture\":\"%s\",\"watchdog_ms\":%u,\"driver\":\"%s\"%s%s}\n",
+        identity_only ? 3u : gate ? 4u : lifecycle ? 2u : 1u,
+        sizeof(void *) == 8 ? "x64" : "x86", WATCHDOG_MS, identity_only ? "none" : "hardware",
+        identity_only ? ",\"mode\":\"identity\"" : lifecycle ? ",\"mode\":\"lifecycle\"" : "",
+        gate ? ",\"identity_source\":\"host_mapped_files\"" : "");
     fflush(stdout);
     completed = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!check("watchdog_event", completed != NULL, HRESULT_FROM_WIN32(GetLastError()))) goto done;
@@ -552,6 +595,11 @@ int main(int argc, char **argv)
     identities_ok = module_identity(d3d11, "d3d11.dll", expected_d3d11);
     identities_ok = module_identity(dxgi, "dxgi.dll", expected_dxgi) && identities_ok;
     if (!identities_ok) goto done;
+    if (gate && !identity_gate(gate)) goto done;
+    if (identity_only) {
+        result = failures ? 1 : 0;
+        goto done;
+    }
     /* memcpy avoids ISO C's object/function pointer cast diagnostic. Windows
      * guarantees GetProcAddress returns the ABI's function pointer value. */
     {

@@ -13,6 +13,7 @@ This checks rendering and Present APIs, not visible pixels or game compatibility
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import argparse
 import importlib.util
 import json
@@ -20,10 +21,12 @@ import ntpath
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import struct
 import subprocess
 import sys
+import time
 
 sys.dont_write_bytecode = True
 PROJECT = Path(__file__).resolve().parent.parent
@@ -36,7 +39,8 @@ MAX_LOG = 4 * 1024 * 1024
 MAX_RECORDS = 512
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 ARCHITECTURES = {"x64": ("x86_64", 0x8664), "x86": ("i386", 0x014C)}
-OVERRIDES = "d3d11,dxgi,d3d10core,winemetal=b;mscoree,mshtml="
+OVERRIDES = "mscoree,mshtml="
+LEGACY_OVERRIDES = "d3d11,dxgi,d3d10core,winemetal=b;mscoree,mshtml="
 NONE_CHECKS = Counter({name: 1 for name in (
     "watchdog_event", "watchdog_thread", "load_d3d11_dxgi", "d3d11.dll",
     "dxgi.dll", "d3d11_exports", "shader_compiler", "compiler_export",
@@ -81,8 +85,11 @@ def unique_object(pairs):
     return result
 
 
-def parse_probe(data: bytes, architecture: str, expected: dict[str, str], *, lifecycle=False) -> dict:
+def parse_probe(data: bytes, architecture: str, expected: dict[str, str], *, lifecycle=False,
+                identity_only=False, mapped_expected=None, mapping_evidence=None) -> dict:
     """Recompute evidence; never trust a reported pass without every stage."""
+    if identity_only and lifecycle:
+        raise HarnessError("Identity and rendering lifecycle evidence cannot be combined")
     if len(data) > MAX_LOG:
         raise HarnessError("Probe diagnostics exceed the bounded log limit")
     records = []
@@ -98,10 +105,22 @@ def parse_probe(data: bytes, architecture: str, expected: dict[str, str], *, lif
         records.append(record)
         if len(records) > MAX_RECORDS:
             raise HarnessError("Probe emitted too many records")
-    identity = {"event": "probe", "schema": 2 if lifecycle else 1,
-                "architecture": architecture, "watchdog_ms": 30000, "driver": "hardware"}
-    if lifecycle:
+    gated = mapped_expected is not None
+    identity = {"event": "probe", "schema": 3 if identity_only else 4 if gated else 2 if lifecycle else 1,
+                "architecture": architecture, "watchdog_ms": 30000, "driver": "none" if identity_only else "hardware"}
+    if identity_only:
+        identity["mode"] = "identity"
+    elif lifecycle:
         identity["mode"] = "lifecycle"
+    if gated:
+        identity["identity_source"] = "host_mapped_files"
+        if (not isinstance(mapped_expected, dict) or not isinstance(mapping_evidence, dict) or mapping_evidence != {
+                "mapping_kind": "txt", "process_verified": True, "sha256": mapped_expected}
+                or not all(isinstance(value, str) and HASH.fullmatch(value) for value in mapped_expected.values())
+                or not {"d3d11.dll", "dxgi.dll"}.issubset(mapped_expected)):
+            raise HarnessError("The live mapped-module identity was not independently verified")
+    elif mapping_evidence is not None:
+        raise HarnessError("Unexpected mapped-module evidence")
     if not records or records[0] != identity:
         raise HarnessError("Probe identity or architecture is not the expected one")
     if records[-1] != {"event": "result", "passed": True, "failed_checks": 0, "exit_code": 0}:
@@ -140,22 +159,37 @@ def parse_probe(data: bytes, architecture: str, expected: dict[str, str], *, lif
                 raise HarnessError("A clear or triangle pixel did not match the expected colour")
             pixels[level][name] += 1
     expected_none = NONE_CHECKS.copy()
-    if lifecycle:
+    if identity_only:
+        expected_none = Counter({name: 1 for name in ("watchdog_event", "watchdog_thread", "load_d3d11_dxgi", "d3d11.dll", "dxgi.dll")})
+        expected_checks = Counter()
+        expected_pixels = Counter()
+    elif lifecycle:
         del expected_none["create_hwnd"]
+    if gated:
+        expected_none["identity_gate"] = 1
     if checks["none"] != expected_none or any(checks[level] != expected_checks or pixels[level] != expected_pixels for level in pixels):
         raise HarnessError("Probe omitted or duplicated a required rendering stage")
     dimensions = [row for row in records if row["event"] == "dimensions"]
-    if lifecycle:
+    if lifecycle and not identity_only:
         if (len(dimensions) != 2 or Counter(row.get("feature_level") for row in dimensions) != Counter({"10_0": 1, "11_0": 1})
                 or any(row.get("source") != "resized_backbuffer" or row.get("width") != 192 or row.get("height") != 96 for row in dimensions)):
             raise HarnessError("Resized backbuffers did not report the expected dimensions")
     elif dimensions:
         raise HarnessError("A basic probe unexpectedly emitted lifecycle evidence")
     bridges = [row for row in records if row["event"] == "modules"]
-    if len(bridges) != 1 or bridges[0].get("winemetal_loaded") is not True or type(bridges[0].get("wined3d_loaded")) is not bool:
+    if (len(bridges) != 1 or type(bridges[0].get("winemetal_loaded")) is not bool
+            or (not identity_only and bridges[0]["winemetal_loaded"] is not True)
+            or type(bridges[0].get("wined3d_loaded")) is not bool):
         raise HarnessError("The expected Metal bridge was not observed")
+    if identity_only:
+        result = {"architecture": architecture, "passed": True, "mode": "identity",
+            "logical_module_sha256": expected, "rendering": "not_tested"}
+        if gated:
+            result["selected_module_sha256"] = mapped_expected
+            result["identity_source"] = "host_mapped_files"
+        return result
     result = {"architecture": architecture, "passed": True,
-            "selected_module_sha256": expected, "winemetal_loaded": True,
+            "selected_module_sha256": mapped_expected if gated else expected, "winemetal_loaded": True,
             "wined3d_loaded": bridges[0]["wined3d_loaded"],
             "feature_levels": {level: {"hardware_device": True, "offscreen_readback": True,
                 "hwnd_readback": True, "present_count": checks[level]["present"]} for level in pixels}}
@@ -166,6 +200,9 @@ def parse_probe(data: bytes, architecture: str, expected: dict[str, str], *, lif
             "release_after_hwnd_destroyed": True, "surviving_window_readback": True,
             "present_count": sum(count for name, count in checks[level].items() if name.endswith("_present"))}
             for level in pixels}
+    if gated:
+        result["logical_module_sha256"] = expected
+        result["identity_source"] = "host_mapped_files"
     return result
 
 
@@ -199,18 +236,36 @@ def candidate_receipt(runtime: Path, build: Path) -> dict:
         raise HarnessError("The candidate must be an owned ignored runtime package")
     path = runtime / "components.json"
     value = harness.read_json(path)
-    if (value.get("format") != "caskrun-runtime-components" or value.get("version") != 1
+    if (not isinstance(value, dict) or value.get("format") != "caskrun-runtime-components" or value.get("version") != 1
             or value.get("status") != "experimental" or value.get("game_validated") is not False):
         raise HarnessError("The candidate lacks an experimental components receipt")
-    components = [entry for entry in value.get("components", []) if entry.get("name") == "DXMT"]
+    entries = value.get("components", [])
+    if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+        raise HarnessError("The candidate has an invalid components receipt")
+    components = [entry for entry in entries if entry.get("name") == "DXMT"]
     if len(components) != 1 or components[0].get("status") != "built" or not re.fullmatch(r"[a-f0-9]{40}", components[0].get("revision", "")):
         raise HarnessError("The candidate does not record one independently built DXMT revision")
-    expected = {}
+    switchable = value.get("layout") == "switchable-v1"
+    if switchable and (value.get("default_backend") != "wined3d" or value.get("backend_roots") != {
+            "wined3d": "runtime", "dxmt": "components/dxmt/runtime"}):
+        raise HarnessError("The candidate has an unknown switchable runtime layout")
+    if value.get("layout") is not None and not switchable:
+        raise HarnessError("The candidate has an unknown runtime layout")
+    expected, mapped, mapped_hashes, baseline, baseline_mapped = {}, {}, {}, {}, {}
     artifacts = value.get("artifacts", {})
+    base_artifacts = value.get("base_artifacts", {})
+    if (not isinstance(artifacts, dict) or any(not isinstance(entry, dict) for entry in artifacts.values())
+            or not isinstance(base_artifacts, dict) or any(not isinstance(entry, dict) for entry in base_artifacts.values())):
+        raise HarnessError("The candidate has an invalid graphics artifact receipt")
+    dxmt_root = "components/dxmt/runtime" if switchable else "runtime"
     for architecture, (folder, machine) in ARCHITECTURES.items():
         expected[architecture] = {}
+        mapped[architecture] = {}
+        mapped_hashes[architecture] = {}
+        baseline[architecture] = {}
+        baseline_mapped[architecture] = {}
         for name in ("d3d11.dll", "dxgi.dll", "d3d10core.dll", "winemetal.dll"):
-            relative = f"runtime/lib/wine/{folder}-windows/{name}"
+            relative = f"{dxmt_root}/lib/wine/{folder}-windows/{name}"
             receipt = artifacts.get(relative, {})
             wanted = receipt.get("packaged_sha256", "")
             artifact = owned_artifact(runtime / relative, build)
@@ -218,14 +273,146 @@ def candidate_receipt(runtime: Path, build: Path) -> dict:
                 raise HarnessError("A packaged graphics DLL does not match its architecture or receipt")
             if name in {"d3d11.dll", "dxgi.dll"}:
                 expected[architecture][name] = wanted
+                mapped[architecture][name] = artifact
+                mapped_hashes[architecture][name] = wanted
+            if switchable:
+                relative = f"runtime/lib/wine/{folder}-windows/{name}"
+                original = owned_artifact(runtime / relative, build)
+                original_hash = base_artifacts.get(relative, {}).get("packaged_sha256", "")
+                if not HASH.fullmatch(original_hash) or harness.digest(original) != original_hash or pe_architecture(original) != machine:
+                    raise HarnessError("A baseline DLL does not match its architecture or receipt")
+                if name in {"d3d11.dll", "dxgi.dll"}:
+                    baseline[architecture][name] = original_hash
+                    baseline_mapped[architecture][name] = original
     for name in ("winemac.so", "winemetal.so"):
-        relative = f"runtime/lib/wine/x86_64-unix/{name}"
+        relative = f"{dxmt_root}/lib/wine/x86_64-unix/{name}"
         wanted = artifacts.get(relative, {}).get("packaged_sha256", "")
         artifact = owned_artifact(runtime / relative, build)
         if not HASH.fullmatch(wanted) or harness.digest(artifact) != wanted:
             raise HarnessError("A packaged Unix graphics bridge does not match its receipt")
+        if switchable and name == "winemetal.so":
+            for architecture in ARCHITECTURES:
+                mapped[architecture][name] = artifact
+                mapped_hashes[architecture][name] = wanted
     return {"component_revision": components[0]["revision"],
-            "components_receipt_sha256": harness.digest(path), "expected": expected}
+            "components_receipt_sha256": harness.digest(path), "expected": expected,
+            "switchable": switchable, "mapped": mapped, "baseline": baseline,
+            "mapped_hashes": mapped_hashes, "baseline_mapped": baseline_mapped}
+
+
+def mapped_text_paths(data: bytes, pid: int) -> set[Path]:
+    """Only lsof's mapped executable-image records count, never open handles."""
+    if len(data) > MAX_LOG:
+        raise HarnessError("Mapped-file inspection exceeds its bounded limit")
+    selected_pid, descriptor = None, None
+    paths = set()
+    for raw in data.split(b"\0"):
+        field = raw.lstrip(b"\n")
+        if not field:
+            continue
+        if field[:1] == b"p":
+            if not field[1:].isdigit() or int(field[1:]) != pid or selected_pid is not None:
+                raise HarnessError("Mapped-file inspection returned an unexpected process")
+            selected_pid = pid
+        elif field[:1] == b"f":
+            descriptor = field[1:]
+        elif field[:1] == b"n" and descriptor == b"txt":
+            if selected_pid != pid:
+                raise HarnessError("Mapped-file inspection omitted its process identity")
+            path = Path(os.fsdecode(field[1:]))
+            if path.is_absolute():
+                paths.add(path)
+    if selected_pid != pid:
+        raise HarnessError("Mapped-file inspection omitted its process identity")
+    return paths
+
+
+def mapped_fixture_owners(data: bytes) -> set[int]:
+    """Find same-user processes which map this exact owned probe executable."""
+    if len(data) > MAX_LOG:
+        raise HarnessError("Mapped fixture inspection exceeds its bounded limit")
+    owners, pid, uid = set(), None, None
+    for raw in [*data.split(b"\0"), b"p"]:
+        field = raw.lstrip(b"\n")
+        if field[:1] == b"p":
+            if pid is not None:
+                if uid != os.getuid():
+                    raise HarnessError("A mapped probe owner has an unexpected user identity")
+                owners.add(pid)
+            if not field[1:]:
+                pid = None
+                continue
+            if not field[1:].isdigit():
+                raise HarnessError("Mapped fixture inspection returned an invalid process")
+            pid, uid = int(field[1:]), None
+        elif field[:1] == b"u":
+            if pid is None or uid is not None or not field[1:].isdigit():
+                raise HarnessError("Mapped fixture inspection returned an invalid user identity")
+            uid = int(field[1:])
+    return owners
+
+
+def verify_live_mappings(session, fixture: Path, artifacts: dict[str, Path], expected: dict[str, str]) -> dict:
+    """Bind every required mapped image to one still-live owned probe process."""
+    if set(artifacts) != set(expected):
+        raise HarnessError("Mapped-file expectations do not match the selected backend")
+    session._validate_owner()
+    # Wine's start.exe can ask the server to create a detached WoW64 child.
+    # Ancestry alone then sees only start.exe. Inspect this exact owned fixture
+    # file, accepting mapped executable images and this UID only. No discovered
+    # process is signalled: prefix-scoped shutdown still owns all cleanup.
+    discovery = subprocess.run(["/usr/sbin/lsof", "-nP", "-l", "-a", "-d", "txt", "-F0pu", str(fixture)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False)
+    if len(discovery.stdout) > MAX_LOG:
+        raise HarnessError("Mapped fixture inspection exceeds its bounded limit")
+    evidence = session.raw / ("mapped-fixture-" + secrets.token_hex(8) + ".lsof")
+    fd = os.open(evidence, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(discovery.stdout)
+    if discovery.returncode != 0 or discovery.stderr:
+        raise HarnessError("The exact owned probe's mapped process could not be discovered")
+    discovered = mapped_fixture_owners(discovery.stdout)
+    table = harness.process_table()
+    tracked = dict(session.manifest["tracked"])
+    for pid in discovered:
+        if pid not in table:
+            raise HarnessError("A mapped probe exited during ownership discovery")
+        tracked[str(pid)] = table[pid]["birth"]
+    matched = []
+    for saved_pid, birth in tracked.items():
+        pid = int(saved_pid)
+        if table.get(pid, {}).get("birth") != birth:
+            continue
+        result = subprocess.run(["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-d", "txt", "-F0pfn"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False)
+        if len(result.stdout) > MAX_LOG:
+            raise HarnessError("Mapped-file inspection exceeds its bounded limit")
+        evidence = session.raw / ("mapped-images-" + str(pid) + "-" + secrets.token_hex(8) + ".lsof")
+        fd = os.open(evidence, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(result.stdout)
+        if result.returncode == 1 and not result.stdout and not result.stderr:
+            continue
+        if result.returncode != 0 or result.stderr:
+            raise HarnessError("The owned probe's mapped files could not be inspected")
+        paths = mapped_text_paths(result.stdout, pid)
+        # An exact mapped fixture proves this is the Windows probe, rather than
+        # a core/wineserver descendant which merely opened the DLLs for a hash.
+        if fixture not in paths:
+            continue
+        if (any(path not in paths for path in artifacts.values())
+                or any({path for path in paths if path.name.lower() == name.lower()} != {artifact}
+                       for name, artifact in artifacts.items())):
+            raise HarnessError("The live probe mapped different graphics files than the selected receipt")
+        if any(harness.digest(path) != expected[name] for name, path in artifacts.items()):
+            raise HarnessError("A mapped graphics artifact changed during inspection")
+        if harness.process_table().get(pid, {}).get("birth") != birth:
+            raise HarnessError("The mapped probe process exited or changed during inspection")
+        matched.append(pid)
+    if len(matched) != 1:
+        raise HarnessError("Exactly one live owned probe mapping could not be established")
+    session._mapped_probe_processes = {str(pid): tracked[str(pid)] for pid in matched}
+    return {"mapping_kind": "txt", "process_verified": True, "sha256": expected}
 
 
 class DXMTSession(harness.Session):
@@ -245,6 +432,8 @@ class DXMTSession(harness.Session):
             "DXMT_SHADER_CACHE_PATH": str(cache), "DXMT_LOG_PATH": "none", "DXMT_LOG_LEVEL": "warn",
             "DXMT_CONFIG_FILE": "Z:" + str(configuration).replace("/", "\\"),
         })
+        if self.manifest.get("dxmt_legacy_layout"):
+            environment["WINEDLLOVERRIDES"] = LEGACY_OVERRIDES
         return environment
 
     def core_call(self, arguments, deadline=120):
@@ -252,6 +441,67 @@ class DXMTSession(harness.Session):
         if invocation.exit_code != 0 or invocation.timed_out or invocation.unresolved or not isinstance(invocation.value, dict):
             raise HarnessError("The isolated core command failed; raw diagnostics were preserved")
         return invocation.value
+
+    def verify_busy_switch_refused(self, bottle: str) -> None:
+        directory = harness.real_path(self.storage / "bottles" / bottle, directory=True)
+        snapshots = {}
+        for name in ("graphics.json", "prefix-record.json"):
+            path = directory / name
+            snapshots[name] = harness.real_path(path).read_bytes() if path.exists() else None
+        # A separate read/guarded mutation process must not share invoke()'s
+        # active-invocation cancellation state with the held Windows probe.
+        environment = self.environment()
+        environment.pop("CASKRUN_CANCEL_STDIN", None)
+        result = subprocess.run([str(self.core), "set-bottle-graphics", bottle, "wined3d"],
+            cwd=self.root, env=environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False)
+        for label, data in (("stdout", result.stdout), ("stderr", result.stderr)):
+            path = self.raw / ("busy-switch-" + secrets.token_hex(8) + "." + label)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+        if (result.returncode == 0 or b"Close Windows apps in this bottle before changing it" not in result.stderr):
+            raise HarnessError("The live renderer change was not refused by the running-bottle guard")
+        for name, before in snapshots.items():
+            path = directory / name
+            after = harness.real_path(path).read_bytes() if path.exists() else None
+            if before != after:
+                raise HarnessError("A refused busy renderer change modified bottle preferences or its runtime pin")
+
+    def gated_probe(self, bottle: str, fixture: Path, arguments: list[str], artifacts: dict[str, Path],
+                    expected: dict[str, str], *, check_busy_refusal=False) -> tuple[dict, dict]:
+        gate = self.root / ("identity-gate-" + secrets.token_hex(16))
+        ready, release = gate.with_suffix(".ready"), gate.with_suffix(".release")
+        command = ["launch-wait", bottle, str(fixture), "--timeout-seconds", "60", "--", *arguments,
+                   "--identity-gate", "Z:" + str(gate).replace("/", "\\")]
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self.core_call, command, deadline=120)
+            # Core attestation and native-app setup happen before the PE's own
+            # 30-second watchdog starts; the launch timeout still bounds it.
+            expires = time.monotonic() + 75
+            while not ready.exists():
+                if future.done():
+                    future.result()  # Preserve the original invocation error.
+                    raise HarnessError("The Windows probe exited before its identity gate")
+                if time.monotonic() >= expires:
+                    raise HarnessError("The Windows probe did not reach its bounded identity gate")
+                time.sleep(0.05)
+            harness.real_path(ready)
+            # invoke() discovers descendants at most every 200 ms. Let its
+            # initial ownership record catch up before inspecting the held PE.
+            time.sleep(0.25)
+            proof = verify_live_mappings(self, fixture, artifacts, expected)
+            if check_busy_refusal:
+                self.verify_busy_switch_refused(bottle)
+                # The exact same mapped probe must still be alive after this
+                # refusal, with no renderer files exchanged underneath it.
+                proof = verify_live_mappings(self, fixture, artifacts, expected)
+            fd = os.open(release, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            os.close(fd)
+            result = future.result()
+            self.manifest["tracked"].update(getattr(self, "_mapped_probe_processes", {}))
+            self.save()
+            return result, proof
 
     def stop_owned_prefixes(self):
         self._validate_owner()
@@ -305,10 +555,12 @@ def run(arguments) -> int:
         "components_receipt_sha256": receipt["components_receipt_sha256"], "passed": False,
         "mode": "lifecycle" if arguments.lifecycle else "basic",
         "prefix_mode": "separate_fresh_win64_prefixes_for_x64_and_x86_WoW64",
-        "override_mode": "explicit_builtin", "architectures": {}, "gameplay": "untested",
+        "override_mode": "core_backend_selection" if receipt["switchable"] else "explicit_builtin",
+        "architectures": {}, "gameplay": "untested",
         "visible_pixels": "untested", "cleanup": "pending"}
     session.summary["dxmt"] = summary
     session.manifest["dxmt_bottles"] = []
+    session.manifest["dxmt_legacy_layout"] = not receipt["switchable"]
     session.save()
     failure = None
     try:
@@ -332,16 +584,54 @@ def run(arguments) -> int:
             fixture_digest = harness.digest(fixture)
             if fixture_digest != source_digest:
                 raise HarnessError("The original probe changed while its owned copy was prepared")
-            expected = receipt["expected"][architecture]
-            launched = session.core_call(["launch-wait", bottle, str(fixture), "--timeout-seconds", "45", "--",
-                "--expected-d3d11-sha256", expected["d3d11.dll"],
-                "--expected-dxgi-sha256", expected["dxgi.dll"], *(["--lifecycle"] if arguments.lifecycle else [])], deadline=90)
-            if launched.get("exit_code") != 0 or launched.get("signal") is not None or launched.get("timed_out") is not False:
-                raise HarnessError("The Windows probe failed or timed out; raw diagnostics were preserved")
-            log = harness.real_path(Path(launched["log_path"]))
-            if log.parent != expected_prefix.parent / "logs" or log.stat().st_size > MAX_LOG:
-                raise HarnessError("The core returned an unexpected or excessive probe log")
-            parsed = parse_probe(log.read_bytes(), architecture, expected, lifecycle=arguments.lifecycle)
+            def probe_run(*, identity_only=False, backend="dxmt"):
+                selected = receipt["expected"][architecture] if backend == "dxmt" else receipt["baseline"][architecture]
+                logical = receipt["baseline"][architecture] if receipt["switchable"] else selected
+                probe_arguments = ["--expected-d3d11-sha256", logical["d3d11.dll"],
+                    "--expected-dxgi-sha256", logical["dxgi.dll"]]
+                if identity_only:
+                    probe_arguments.append("--identity-only")
+                elif arguments.lifecycle:
+                    probe_arguments.append("--lifecycle")
+                proof, mapped_expected = None, None
+                if receipt["switchable"]:
+                    artifacts = receipt["mapped"][architecture] if backend == "dxmt" else receipt["baseline_mapped"][architecture]
+                    mapped_expected = receipt["mapped_hashes"][architecture] if backend == "dxmt" else selected
+                    launched, proof = session.gated_probe(bottle, fixture, probe_arguments, artifacts, mapped_expected,
+                        check_busy_refusal=backend == "dxmt" and not identity_only)
+                else:
+                    launched = session.core_call(["launch-wait", bottle, str(fixture), "--timeout-seconds", "45", "--", *probe_arguments], deadline=90)
+                if launched.get("exit_code") != 0 or launched.get("signal") is not None or launched.get("timed_out") is not False:
+                    raise HarnessError("The Windows probe failed or timed out; raw diagnostics were preserved")
+                log = harness.real_path(Path(launched["log_path"]))
+                if log.parent != expected_prefix.parent / "logs" or log.stat().st_size > MAX_LOG:
+                    raise HarnessError("The core returned an unexpected or excessive probe log")
+                result = parse_probe(log.read_bytes(), architecture, logical,
+                    lifecycle=arguments.lifecycle and not identity_only, identity_only=identity_only,
+                    mapped_expected=mapped_expected, mapping_evidence=proof)
+                session.stop_owned_prefixes()
+                return result
+
+            def checked_backend(command, selected):
+                state = session.core_call(command)
+                if (state.get("bottle_id") != bottle or state.get("selected_backend") != selected
+                        or state.get("effective_backend") != ("dxmt" if selected == "dxmt" else "wined3d")
+                        or state.get("dxmt_available") is not True):
+                    raise HarnessError("The core did not confirm the verified requested backend")
+
+            if receipt["switchable"]:
+                checked_backend(["bottle-graphics", bottle], "auto")
+                transitions = {"default": probe_run(identity_only=True, backend="wined3d")}
+                checked_backend(["set-bottle-graphics", bottle, "dxmt"], "dxmt")
+                parsed = probe_run()
+                parsed["busy_renderer_change"] = "refused_without_preference_or_pin_changes"
+                checked_backend(["set-bottle-graphics", bottle, "wined3d"], "wined3d")
+                transitions["restored_wined3d"] = probe_run(identity_only=True, backend="wined3d")
+                checked_backend(["set-bottle-graphics", bottle, "auto"], "auto")
+                transitions["restored_auto"] = probe_run(identity_only=True, backend="wined3d")
+                parsed["backend_switching"] = transitions
+            else:
+                parsed = probe_run()
             if harness.digest(fixture) != fixture_digest:
                 raise HarnessError("The executed probe fixture changed during validation")
             parsed["runtime_identity"] = pin["runtime_identity"]

@@ -337,23 +337,48 @@ def publish_exclusively(source: Path, destination: Path) -> None:
         raise OSError(ctypes.get_errno(), "Could not publish candidate without replacing a path")
 
 
+def artifact_destination(relative: str, switchable: bool) -> str:
+    if not relative.startswith("runtime/"):
+        raise PackageError("Unexpected translator artifact layout")
+    return "components/dxmt/" + relative if switchable else relative
+
+
 def create_package(plan: dict) -> None:
     paths = plan["paths"]
     output = paths["output"]
     output.parent.mkdir(parents=True, exist_ok=True)
     scratch = Path(tempfile.mkdtemp(prefix=".caskrun-dxmt-package-", dir=output.parent))
     candidate = scratch / "runtime-package"
+    switchable = plan.get("switchable", False)
     try:
         run("/bin/cp", "-cR", paths["base"], candidate)
+        if switchable:
+            (candidate / "components/dxmt").mkdir(parents=True)
+            # Real copied ntdll/loader paths are necessary: Wine canonicalizes
+            # ntdll before choosing its preferred builtin DLL directory.
+            run("/bin/cp", "-cR", candidate / "runtime", candidate / "components/dxmt/runtime")
+            shutil.copyfile(REPO / "scripts/wine-runtime-launch.sh", candidate / "bin/_dispatch")
+            (candidate / "bin/_dispatch").chmod(0o755)
+            (candidate / "graphics-layout.txt").write_text("caskrun-switchable-graphics-v1\n")
         for relative, source in plan["inputs"].items():
             if sha256(source) != plan["hashes"][relative]:
                 raise PackageError("An input changed after validation")
-            target = candidate / relative
+            target = candidate / artifact_destination(relative, switchable)
             no_symlink_parents(target)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
         for relative in list(plan["inputs"])[:2]:
-            repair_image(candidate, candidate / relative)
+            repair_image(candidate, candidate / artifact_destination(relative, switchable))
+        if switchable:
+            # Bootstrap a new default WineD3D prefix with dormant winemetal
+            # placeholders. Existing d3d* builtins remain byte-for-byte base.
+            # Older prefixes need a core-owned missing-placeholder transaction.
+            for relative, source in plan["inputs"].items():
+                if Path(relative).name not in {"winemetal.dll", "winemetal.so"}:
+                    continue
+                shutil.copy2(source, candidate / relative)
+                if relative.endswith(".so"):
+                    repair_image(candidate, candidate / relative)
         notices = candidate / "licenses"
         for name, source in plan["licenses"].items():
             shutil.copyfile(source, notices / name)
@@ -361,6 +386,9 @@ def create_package(plan: dict) -> None:
         sources.mkdir()
         for name in PATCHES:
             shutil.copyfile(REPO / "runtime-patches" / name, candidate / "source/patches" / name)
+        if switchable:
+            shutil.copyfile(REPO / "scripts/wine-runtime-launch.sh",
+                            candidate / "source/patches/wine-runtime-launch.sh")
         upstream = [("dxmt", paths["dxmt_source"], DXMT_REVISION),
                     ("llvm-project", plan["llvm"], LLVM_REVISION)]
         upstream += [(name.replace("/", "-"), paths["dxmt_source"] / name, revision)
@@ -382,12 +410,30 @@ def create_package(plan: dict) -> None:
             "llvm": {"revision": LLVM_REVISION, "version": "15.0.7", "linkage": "static"},
             "patches": PATCHES, "archives": archives,
             "patched_dxmt_sources": PATCHED_DXMT_SOURCES,
-            "artifacts": {name: {"input_sha256": plan["hashes"][name],
-                                 "packaged_sha256": sha256(candidate / name)}
+            "artifacts": {artifact_destination(name, switchable): {
+                                 "input_sha256": plan["hashes"][name],
+                                 "packaged_sha256": sha256(candidate / artifact_destination(name, switchable))}
                           for name in plan["inputs"]},
             "validation": {"device_creation": False, "shader_readback": False,
                            "window_presentation": False, "game_play": False},
         }
+        if switchable:
+            base_files = [f"runtime/lib/wine/{architecture}-windows/{name}.dll"
+                          for architecture in ["x86_64", "i386"] for name in DLLS]
+            base_files += ["runtime/lib/wine/x86_64-unix/winemac.so",
+                           "runtime/lib/wine/x86_64-unix/winemetal.so"]
+            receipt.update({
+                "layout": "switchable-v1", "default_backend": "wined3d",
+                "backend_roots": {"wined3d": "runtime", "dxmt": "components/dxmt/runtime"},
+                "base_artifacts": {name: {"packaged_sha256": sha256(candidate / name)}
+                                   for name in base_files},
+                "dispatcher_sha256": sha256(candidate / "bin/_dispatch"),
+            })
+            for relative in base_files:
+                if Path(relative).name == "winemetal.dll" or relative.endswith("winemetal.so"):
+                    continue
+                if sha256(candidate / relative) != sha256(paths["base"] / relative):
+                    raise PackageError("Default WineD3D artifacts differ from the reviewed base")
         (candidate / "components.json").write_text(json.dumps(receipt, indent=2) + "\n")
         with (candidate / "SOURCES.txt").open("a") as stream:
             stream.write("\nExperimental DXMT candidate; existing Caskrun runtimes and bottles are unchanged.\n"
@@ -402,6 +448,13 @@ def create_package(plan: dict) -> None:
                          "Apply the Wine layout adaptation before the managed client-surface patch.\n"
                          "Use the original build scripts\n"
                          "and the pinned source revisions; do not extract any installed vendor runtime.\n")
+            if switchable:
+                stream.write("The switchable-v1 layout retains original default WineD3D graphics DLLs.\n"
+                             "DXMT uses the separate real runtime view at components/dxmt/runtime.\n"
+                             "CASKRUN_GRAPHICS_BACKEND=auto or wined3d chooses the default view; dxmt\n"
+                             "chooses the experimental translator view. Servers always use the base view.\n"
+                             "Dormant winemetal support is present in both views for prefix bootstrap.\n"
+                             "No bottle DLL or registry value is modified by this package or dispatcher.\n")
         audit(candidate)
         if tree_identity(paths["base"]) != BASE_IDENTITY:
             raise PackageError("Base runtime changed while packaging; candidate not published")
@@ -419,13 +472,19 @@ def main() -> int:
     defaults = {"base": ".build/native-apps-wine-runtime-dev-v2",
                 "wine-build": ".build/dxmt/wine/build", "dxmt-source": ".build/dxmt/src",
                 "dxmt-build64": ".build/dxmt/src/build", "dxmt-build32": ".build/dxmt/src/build32",
-                "output": ".build/dxmt-wine-runtime-dev-v3"}
+                "output": None}
     for name, value in defaults.items():
-        parser.add_argument("--" + name, type=Path, default=REPO / value)
+        parser.add_argument("--" + name, type=Path, default=REPO / value if value else None)
+    parser.add_argument("--switchable", action="store_true",
+                        help="preserve WineD3D default and add a separate selectable DXMT runtime view")
     parser.add_argument("--check", action="store_true", help="validate all inputs without creating output")
     args = parser.parse_args()
+    if args.output is None:
+        args.output = REPO / (".build/dxmt-wine-runtime-dev-v4" if args.switchable else
+                              ".build/dxmt-wine-runtime-dev-v3")
     try:
         plan = validate_inputs(args)
+        plan["switchable"] = args.switchable
         if not args.check:
             create_package(plan)
         print("DXMT candidate inputs verified." if args.check else

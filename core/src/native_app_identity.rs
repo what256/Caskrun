@@ -22,6 +22,7 @@ const ENVIRONMENT: &[&str] = &[
 
 struct RuntimeInputs {
     root: PathBuf,
+    runtime_root: PathBuf,
     loader: Vec<u8>,
     ntdll: PathBuf,
     icon_renderer: Option<PathBuf>,
@@ -77,7 +78,14 @@ fn read_stable_open_file(path: &Path, maximum: u64) -> Result<(File, Vec<u8>), S
     Ok((file, bytes))
 }
 
-fn runtime_inputs(wine: &Path) -> Result<Option<RuntimeInputs>, String> {
+fn runtime_inputs_for_bottle(dir: &Path, wine: &Path) -> Result<Option<RuntimeInputs>, String> {
+    runtime_inputs(wine, |_| bottle_graphics::selected_runtime_root(dir, wine))
+}
+
+fn runtime_inputs(
+    wine: &Path,
+    select_runtime: impl FnOnce(&Path) -> Result<PathBuf, String>,
+) -> Result<Option<RuntimeInputs>, String> {
     let Some(root) = wine.parent().and_then(Path::parent) else {
         return Ok(None);
     };
@@ -95,7 +103,17 @@ fn runtime_inputs(wine: &Path) -> Result<Option<RuntimeInputs>, String> {
         return Err("Native app identity needs a complete independent Caskrun package".into());
     }
     let root = root.canonicalize().map_err(|e| e.to_string())?;
-    let loader_path = root.join("runtime/lib/wine/x86_64-unix/WindowsApp");
+    // The bottle preference is pinned to a reviewed complete package before
+    // selecting DXMT. Never derive the shutdown proof from inherited process
+    // environment: each proof uses the bottle's current, idle-only selection.
+    let runtime_root = select_runtime(&root)?
+        .canonicalize()
+        .map_err(|e| format!("Selected native runtime view is unavailable: {e}"))?;
+    if runtime_root != root.join("runtime") && runtime_root != root.join("components/dxmt/runtime")
+    {
+        return Err("Native app identity requires a direct packaged runtime view".into());
+    }
+    let loader_path = runtime_root.join("lib/wine/x86_64-unix/WindowsApp");
     let loader = read_stable_file(&loader_path, MAX_LOADER_BYTES)?;
     if loader.len() < 32
         || loader[..4] != [0xcf, 0xfa, 0xed, 0xfe]
@@ -104,7 +122,7 @@ fn runtime_inputs(wine: &Path) -> Result<Option<RuntimeInputs>, String> {
     {
         return Err("Native app loader is not the package's executable x86_64 Mach-O image".into());
     }
-    let ntdll = root.join("runtime/lib/wine/x86_64-unix/ntdll.so");
+    let ntdll = runtime_root.join("lib/wine/x86_64-unix/ntdll.so");
     let (_guard, _) = open_stable_directory(ntdll.parent().unwrap())?;
     if !fs::symlink_metadata(&ntdll).is_ok_and(|m| m.file_type().is_file()) {
         return Err("Native app loader has no packaged NTDLL".into());
@@ -120,6 +138,7 @@ fn runtime_inputs(wine: &Path) -> Result<Option<RuntimeInputs>, String> {
     validate_native_artwork(&fallback_icns, &fallback_png)?;
     Ok(Some(RuntimeInputs {
         root,
+        runtime_root,
         loader,
         ntdll,
         icon_renderer: Some(icon_renderer),
@@ -206,7 +225,7 @@ pub(crate) fn validate_shutdown_alias(
     wine: &Path,
     candidate: &Path,
 ) -> Result<Option<ShutdownAlias>, String> {
-    let Some(inputs) = runtime_inputs(wine)? else {
+    let Some(inputs) = runtime_inputs_for_bottle(dir, wine)? else {
         return Ok(None);
     };
     validate_shutdown_alias_with_inputs(dir, candidate, &inputs)
@@ -309,10 +328,10 @@ pub(super) fn configure_launch(
     for name in ENVIRONMENT {
         command.env_remove(name);
     }
-    let Some(inputs) = runtime_inputs(wine)? else {
+    let dir = bottle_dir(home, id)?;
+    let Some(inputs) = runtime_inputs_for_bottle(&dir, wine)? else {
         return Ok(());
     };
-    let dir = bottle_dir(home, id)?;
     let (_guard, _) = open_stable_directory(&dir.join("prefix"))?;
     let data = home.canonicalize().map_err(|e| e.to_string())?;
     let core = env::current_exe()
@@ -355,7 +374,9 @@ pub(super) fn configure_launch(
 
 pub(super) fn prepare(home: &Path, id: &str, image: &Path) -> Result<PathBuf, String> {
     let wine = wine_path().ok_or("Native identity runtime is unavailable")?;
-    let inputs = runtime_inputs(&wine)?.ok_or("This engine has no native app identity support")?;
+    let dir = bottle_dir(home, id)?;
+    let inputs = runtime_inputs_for_bottle(&dir, &wine)?
+        .ok_or("This engine has no native app identity support")?;
     let initial = env::var_os("CASKRUN_NATIVE_INITIAL_IMAGE").map(PathBuf::from);
     prepare_with_inputs(home, id, image, initial.as_deref(), &inputs)
 }
@@ -364,7 +385,8 @@ pub(super) fn prepare(home: &Path, id: &str, image: &Path) -> Result<PathBuf, St
 /// never generates a bundle, spawns a utility, or starts a Windows process.
 pub(super) fn cached_icon(home: &Path, id: &str, image: &Path) -> Option<PathBuf> {
     let wine = wine_path()?;
-    let inputs = runtime_inputs(&wine).ok()??;
+    let dir = bottle_dir(home, id).ok()?;
+    let inputs = runtime_inputs_for_bottle(&dir, &wine).ok()??;
     cached_icon_with_inputs(home, id, image, &inputs)
 }
 
@@ -395,7 +417,7 @@ fn cached_icon_with_inputs(
 /// were extracted by app_icons, so native loader containment does not apply.
 pub(super) fn rendered_icon(dir: &Path, ico: &[u8]) -> Option<PathBuf> {
     let wine = wine_path()?;
-    let inputs = runtime_inputs(&wine).ok()??;
+    let inputs = runtime_inputs_for_bottle(dir, &wine).ok()??;
     render_artwork_with_inputs(dir, ico, &inputs).ok()
 }
 
@@ -583,7 +605,9 @@ fn prepare_with_inputs_mode(
     let (prefix_guard, prefix_snapshot) = open_stable_directory(&prefix)?;
     let canonical = image.canonicalize().map_err(|e| e.to_string())?;
     let inside_prefix = canonical.starts_with(&prefix);
-    let inside_runtime = canonical.starts_with(inputs.root.join("runtime/lib/wine"));
+    let direct_view = inputs.runtime_root == inputs.root.join("runtime")
+        || inputs.runtime_root == inputs.root.join("components/dxmt/runtime");
+    let inside_runtime = direct_view && canonical.starts_with(inputs.runtime_root.join("lib/wine"));
     let selected_initial = initial.is_some_and(|initial| {
         initial.is_absolute() && initial.canonicalize().is_ok_and(|path| path == canonical)
     });
@@ -1236,6 +1260,7 @@ mod tests {
             loader[4..8].copy_from_slice(&0x0100_0007_u32.to_le_bytes());
             let inputs = RuntimeInputs {
                 root: home.join("independent-runtime"),
+                runtime_root: home.join("independent-runtime/runtime"),
                 loader,
                 ntdll: home.join("independent-runtime/ntdll.so"),
                 icon_renderer: None,
@@ -1286,6 +1311,97 @@ mod tests {
         icns.extend_from_slice(&41_u32.to_be_bytes());
         icns.extend_from_slice(&png);
         (icns, png)
+    }
+
+    fn runtime_views_fixture() -> (Fixture, PathBuf) {
+        let fixture = Fixture::new();
+        let root = &fixture.inputs.root;
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(
+            root.join("native-app-identity.txt"),
+            b"caskrun-native-app-identity-v1\n",
+        )
+        .unwrap();
+        fs::write(root.join("SOURCES.txt"), b"Original test package\n").unwrap();
+        fs::write(root.join("bin/_dispatch"), b"original test dispatcher").unwrap();
+        let wine = root.join("bin/wine");
+        fs::write(&wine, b"original test Wine entry point").unwrap();
+        fs::set_permissions(&wine, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::copy(&wine, root.join("bin/wineboot")).unwrap();
+        original_arm64_renderer(&root.join("bin/native-icon"), 1);
+        let (icns, png) = fixture_artwork();
+        fs::write(root.join("native-default-icon.png"), &png).unwrap();
+        fs::write(root.join("native-default-icon.icns"), &icns).unwrap();
+        fs::write(root.join("native-default-rendered.png"), &png).unwrap();
+        for view in ["runtime", "components/dxmt/runtime"] {
+            let unix = root.join(view).join("lib/wine/x86_64-unix");
+            fs::create_dir_all(&unix).unwrap();
+            fs::write(unix.join("WindowsApp"), &fixture.inputs.loader).unwrap();
+            fs::set_permissions(unix.join("WindowsApp"), fs::Permissions::from_mode(0o755))
+                .unwrap();
+            fs::write(
+                unix.join("ntdll.so"),
+                b"identical original test NTDLL bytes",
+            )
+            .unwrap();
+        }
+        (fixture, wine)
+    }
+
+    #[test]
+    fn selected_view_supplies_exact_loader_and_ntdll_for_shutdown_proof() {
+        let (fixture, wine) = runtime_views_fixture();
+        let dir = bottle_dir(&fixture.home, &fixture.bottle.id).unwrap();
+        let base = runtime_inputs_for_bottle(&dir, &wine).unwrap().unwrap();
+        let dxmt = runtime_inputs(&wine, |root| Ok(root.join("components/dxmt/runtime")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(base.runtime_root, fixture.inputs.root.join("runtime"));
+        assert_eq!(
+            dxmt.runtime_root,
+            fixture.inputs.root.join("components/dxmt/runtime")
+        );
+        assert_eq!(base.loader, dxmt.loader);
+        assert_ne!(
+            fs::metadata(&base.ntdll).unwrap().ino(),
+            fs::metadata(&dxmt.ntdll).unwrap().ino()
+        );
+        let image = fixture.image("Game.exe");
+        let loader =
+            prepare_with_inputs(&fixture.home, &fixture.bottle.id, &image, None, &dxmt).unwrap();
+        let proof = validate_shutdown_alias_with_inputs(&dir, &loader, &dxmt)
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.ntdll_path, dxmt.ntdll);
+        assert_eq!(proof.ntdll_ino, fs::metadata(&dxmt.ntdll).unwrap().ino());
+        assert_ne!(proof.ntdll_ino, fs::metadata(&base.ntdll).unwrap().ino());
+    }
+
+    #[test]
+    fn builtin_identity_accepts_only_the_selected_direct_runtime_view() {
+        let (fixture, wine) = runtime_views_fixture();
+        let inputs = runtime_inputs(&wine, |root| Ok(root.join("components/dxmt/runtime")))
+            .unwrap()
+            .unwrap();
+        let original = fixture.image("winecfg.exe");
+        let relative = "lib/wine/x86_64-windows/winecfg.exe";
+        let selected = inputs.runtime_root.join(relative);
+        let other = inputs.root.join("runtime").join(relative);
+        for path in [&selected, &other] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::copy(&original, path).unwrap();
+        }
+        let loader =
+            prepare_with_inputs(&fixture.home, &fixture.bottle.id, &selected, None, &inputs)
+                .unwrap();
+        assert!(
+            app_name(&loader)
+                .contains("<key>CFBundleDisplayName</key><string>Windows Configuration</string>")
+        );
+        assert!(
+            prepare_with_inputs(&fixture.home, &fixture.bottle.id, &other, None, &inputs).is_err()
+        );
+        assert!(runtime_inputs(&wine, |_| Ok(inputs.root.clone())).is_err());
     }
 
     fn fallback_fixture(renderer_script: &[u8]) -> (Fixture, PathBuf) {

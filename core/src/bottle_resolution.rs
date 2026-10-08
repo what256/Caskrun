@@ -2,6 +2,7 @@
 //! program while the prefix is idle; Caskrun never edits user.reg in place.
 
 use super::*;
+use std::cell::Cell;
 use std::io::Write;
 
 const REGISTRY_LIMIT: u64 = 32 * 1024 * 1024;
@@ -100,6 +101,30 @@ fn set_bottle_resolution_with_wine(
     wine: &Path,
 ) -> Result<ResolutionResult, String> {
     let _lock = lock_bottle(home, id)?;
+    let migration = runtime_migration::maybe_migrate_bundled_runtime(home, id, wine)?;
+    let started = Cell::new(false);
+    let result = set_bottle_resolution_locked(home, id, high_resolution, wine, &started);
+    match result {
+        Err(error) if !started.get() => match migration {
+            Some(backup) => match backup.restore() {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(format!(
+                    "{error}. The previous runtime record could not be restored: {restore_error}"
+                )),
+            },
+            None => Err(error),
+        },
+        result => result,
+    }
+}
+
+fn set_bottle_resolution_locked(
+    home: &Path,
+    id: &str,
+    high_resolution: bool,
+    wine: &Path,
+    started: &Cell<bool>,
+) -> Result<ResolutionResult, String> {
     let (dir, prefix, wineserver, prefix_guard, prefix_snapshot) =
         bottle_control::checked_control_paths(home, id, wine)?;
     require_initialized_registry(&prefix)?;
@@ -140,6 +165,7 @@ fn set_bottle_resolution_with_wine(
         prefix_guard: &prefix_guard,
         prefix_snapshot: &prefix_snapshot,
         log: &log,
+        started,
     };
     let changed: Result<RegistrySnapshot, String> = (|| {
         run_registry_change(&context, RegistryChange::Retina(target.retina))?;
@@ -152,6 +178,9 @@ fn set_bottle_resolution_with_wine(
     })();
     match changed {
         Ok(result) => result.result(id),
+        // Nothing could change the registry before the first successful
+        // spawn. Do not start Wine merely to roll back a preflight failure.
+        Err(error) if !started.get() => Err(error),
         Err(error) => {
             // Restore both original values, including their absence, if either
             // command failed or Wine saved only part of the requested change.
@@ -185,6 +214,7 @@ struct ChangeContext<'a> {
     prefix_guard: &'a File,
     prefix_snapshot: &'a fs::Metadata,
     log: &'a File,
+    started: &'a Cell<bool>,
 }
 
 fn run_registry_change(context: &ChangeContext<'_>, change: RegistryChange) -> Result<(), String> {
@@ -200,6 +230,7 @@ fn run_registry_change(context: &ChangeContext<'_>, change: RegistryChange) -> R
     let xdg = bottle_xdg::for_bottle(context.dir)?;
     let mut command = Command::new(context.wine);
     xdg.apply(&mut command);
+    bottle_graphics::configure_launch(&mut command, context.dir, context.wine)?;
     let mut child = command
         .args(change.arguments()?)
         .env("WINEPREFIX", context.prefix)
@@ -209,6 +240,7 @@ fn run_registry_change(context: &ChangeContext<'_>, change: RegistryChange) -> R
         .stderr(Stdio::from(stderr))
         .spawn()
         .map_err(|e| format!("Could not start Wine's registry tool: {e}"))?;
+    context.started.set(true);
     let (status, timed_out) = wait_child_bounded_status(&mut child, REG_TIMEOUT)?;
     // A registry command may exit before its wineserver persists user.reg.
     // Wait for the server to stop even when the command itself failed.
@@ -481,6 +513,31 @@ esac
     }
 
     #[test]
+    fn failed_first_spawn_preserves_registry_without_starting_a_rollback() {
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let bottle = create(&home, "Preflight failure").unwrap();
+        ensure_prefix_with_wine(&home, &bottle.id, &wine).unwrap();
+        let prefix = bottle_dir(&home, &bottle.id).unwrap().join("prefix");
+        let original = fs::read(prefix.join("user.reg")).unwrap();
+        fs::write(&wine, b"#!/missing-caskrun-test-interpreter\n").unwrap();
+        let started = Cell::new(false);
+        let lock = lock_bottle(&home, &bottle.id).unwrap();
+        let error =
+            set_bottle_resolution_locked(&home, &bottle.id, true, &wine, &started).unwrap_err();
+        assert!(
+            error.contains("Could not start Wine's registry tool"),
+            "{error}"
+        );
+        assert!(!error.contains("rollback"), "{error}");
+        assert!(!started.get());
+        assert_eq!(fs::read(prefix.join("user.reg")).unwrap(), original);
+        assert!(!prefix.join("reg-calls").exists());
+        drop(lock);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn failed_second_registry_command_restores_original_values() {
         let home = test_home();
         let wine = fake_runtime(&home);
@@ -488,10 +545,21 @@ esac
         ensure_prefix_with_wine(&home, &bottle.id, &wine).unwrap();
         let prefix = bottle_dir(&home, &bottle.id).unwrap().join("prefix");
         fs::write(prefix.join("fail-next-dpi"), b"").unwrap();
-        let error = set_bottle_resolution_with_wine(&home, &bottle.id, true, &wine).unwrap_err();
+        let started = Cell::new(false);
+        let lock = lock_bottle(&home, &bottle.id).unwrap();
+        let error =
+            set_bottle_resolution_locked(&home, &bottle.id, true, &wine, &started).unwrap_err();
         assert!(
             error.contains("previous display settings were restored"),
             "{error}"
+        );
+        assert!(started.get());
+        assert_eq!(
+            fs::read_to_string(prefix.join("reg-calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            4
         );
         assert_eq!(
             read_registry_snapshot(&prefix).unwrap(),
@@ -500,6 +568,7 @@ esac
                 dpi: None
             }
         );
+        drop(lock);
         fs::remove_dir_all(home).unwrap();
     }
 

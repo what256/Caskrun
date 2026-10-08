@@ -21,24 +21,33 @@ spec.loader.exec_module(runner)
 EXPECTED = {"d3d11.dll": "a" * 64, "dxgi.dll": "b" * 64}
 
 
-def evidence(architecture="x64", *, lifecycle=False):
-    records = [{"event": "probe", "schema": 2 if lifecycle else 1, "architecture": architecture,
-                "watchdog_ms": 30000, "driver": "hardware"}]
-    if lifecycle:
+def evidence(architecture="x64", *, lifecycle=False, identity_only=False, gated=False):
+    records = [{"event": "probe", "schema": 3 if identity_only else 4 if gated else 2 if lifecycle else 1,
+                "architecture": architecture, "watchdog_ms": 30000, "driver": "none" if identity_only else "hardware"}]
+    if identity_only:
+        records[0]["mode"] = "identity"
+    elif lifecycle:
         records[0]["mode"] = "lifecycle"
+    if gated:
+        records[0]["identity_source"] = "host_mapped_files"
     for name, digest in EXPECTED.items():
         records.append({"event": "module", "name": name,
             "path": "C:\\windows\\system32\\" + name, "sha256": digest,
             "expected_sha256": digest, "matches_receipt": True})
     none_checks = runner.NONE_CHECKS.copy()
     level_checks = runner.LIFECYCLE_CHECKS if lifecycle else runner.LEVEL_CHECKS
-    if lifecycle:
+    if identity_only:
+        none_checks = runner.Counter({name: 1 for name in ("watchdog_event", "watchdog_thread", "load_d3d11_dxgi", "d3d11.dll", "dxgi.dll")})
+        level_checks = runner.Counter()
+    elif lifecycle:
         del none_checks["create_hwnd"]
+    if gated:
+        none_checks["identity_gate"] = 1
     for level, checks in (("none", none_checks), ("10_0", level_checks), ("11_0", level_checks)):
         for name, count in checks.items():
             records.extend({"event": "check", "feature_level": level, "name": name,
                             "passed": True, "hresult": "0x00000000"} for _ in range(count))
-    for level in ("10_0", "11_0"):
+    for level in (() if identity_only else ("10_0", "11_0")):
         for name, count in (runner.LIFECYCLE_PIXELS if lifecycle else runner.PIXELS).items():
             expected = [0, 255, 0, 255] if name.endswith("triangle_center") else [32, 64, 128, 255]
             records.extend({"event": "pixel", "feature_level": level, "name": name,
@@ -47,7 +56,7 @@ def evidence(architecture="x64", *, lifecycle=False):
         if lifecycle:
             records.append({"event": "dimensions", "feature_level": level,
                 "source": "resized_backbuffer", "width": 192, "height": 96})
-    records.append({"event": "modules", "winemetal_loaded": True, "wined3d_loaded": False})
+    records.append({"event": "modules", "winemetal_loaded": not identity_only, "wined3d_loaded": identity_only})
     records.append({"event": "result", "passed": True, "failed_checks": 0, "exit_code": 0})
     return records
 
@@ -172,6 +181,68 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(runner.HarnessError):
             self.parse(evidence(), lifecycle=True)
 
+    def test_identity_only_never_claims_rendering(self):
+        for architecture in ("x64", "x86"):
+            result = runner.parse_probe(encode(evidence(architecture, identity_only=True)), architecture,
+                EXPECTED, identity_only=True)
+            self.assertEqual(result["rendering"], "not_tested")
+            self.assertNotIn("feature_levels", result)
+            self.assertNotIn("selected_module_sha256", result)
+
+    def test_identity_cannot_hide_rendering_or_missing_module(self):
+        extra = evidence(identity_only=True)
+        extra.insert(-1, {"event": "check", "feature_level": "10_0", "name": "hardware_device",
+                          "passed": True, "hresult": "0x00000000"})
+        missing = [row for row in evidence(identity_only=True) if row.get("name") != "dxgi.dll"]
+        for records in (extra, missing, evidence()):
+            with self.assertRaises(runner.HarnessError):
+                runner.parse_probe(encode(records), "x64", EXPECTED, identity_only=True)
+
+    def test_gated_render_requires_matching_independent_mapped_identity(self):
+        mapped = {"d3d11.dll": "c" * 64, "dxgi.dll": "d" * 64, "winemetal.so": "e" * 64}
+        proof = {"mapping_kind": "txt", "process_verified": True, "sha256": mapped}
+        result = runner.parse_probe(encode(evidence(gated=True)), "x64", EXPECTED,
+            mapped_expected=mapped, mapping_evidence=proof)
+        self.assertEqual(result["selected_module_sha256"], mapped)
+        self.assertEqual(result["logical_module_sha256"], EXPECTED)
+        for bad in (None, {}, {**proof, "mapping_kind": "open"}, {**proof, "process_verified": False},
+                    {**proof, "sha256": EXPECTED}):
+            with self.assertRaises(runner.HarnessError):
+                runner.parse_probe(encode(evidence(gated=True)), "x64", EXPECTED,
+                    mapped_expected=mapped, mapping_evidence=bad)
+
+    def test_gated_identity_requires_gate_and_remains_non_rendering(self):
+        proof = {"mapping_kind": "txt", "process_verified": True, "sha256": EXPECTED}
+        records = evidence(identity_only=True, gated=True)
+        result = runner.parse_probe(encode(records), "x64", EXPECTED, identity_only=True,
+            mapped_expected=EXPECTED, mapping_evidence=proof)
+        self.assertEqual(result["selected_module_sha256"], EXPECTED)
+        self.assertEqual(result["rendering"], "not_tested")
+        records = [row for row in records if row.get("name") != "identity_gate"]
+        with self.assertRaises(runner.HarnessError):
+            runner.parse_probe(encode(records), "x64", EXPECTED, identity_only=True,
+                mapped_expected=EXPECTED, mapping_evidence=proof)
+
+    def test_identity_and_rendering_modes_cannot_be_confused(self):
+        with self.assertRaises(runner.HarnessError):
+            self.parse(evidence(identity_only=True))
+        with self.assertRaises(runner.HarnessError):
+            runner.parse_probe(encode(evidence(identity_only=True)), "x64", EXPECTED, identity_only=True, lifecycle=True)
+
+    def test_lsof_only_accepts_mapped_images_for_one_exact_process(self):
+        data = b"p123\0\nftxt\0n/owned/d3d11.dll\0\nf4r\0n/owned/dxgi.dll\0\n"
+        self.assertEqual(runner.mapped_text_paths(data, 123), {Path("/owned/d3d11.dll")})
+        for bad in (data.replace(b"p123", b"p124"), b"ftxt\0n/owned/d3d11.dll\0", data + b"p123\0"):
+            with self.assertRaises(runner.HarnessError):
+                runner.mapped_text_paths(bad, 123)
+
+    def test_exact_fixture_owner_requires_numeric_current_uid(self):
+        good = b"p123\0u" + str(os.getuid()).encode() + b"\0\n"
+        self.assertEqual(runner.mapped_fixture_owners(good), {123})
+        for bad in (b"p123\0", b"p123\0uinvalid\0", b"p123\0u" + str(os.getuid() + 1).encode() + b"\0"):
+            with self.assertRaises(runner.HarnessError):
+                runner.mapped_fixture_owners(bad)
+
 
 class OwnershipTests(unittest.TestCase):
     def setUp(self):
@@ -202,6 +273,107 @@ class OwnershipTests(unittest.TestCase):
                      "XDG_CACHE_HOME", "CFFIXED_USER_HOME", "DARWIN_USER_CACHE_DIR", "DXMT_SHADER_CACHE_PATH"):
             self.assertTrue(Path(environment[name]).is_relative_to(self.session.root), name)
         self.assertEqual(environment["DXMT_LOG_PATH"], "none")
+
+    def test_receipt_refuses_unknown_layout_and_external_backend_roots(self):
+        runtime = self.build / "fixture-runtime"
+        receipt = {"format": "caskrun-runtime-components", "version": 1, "status": "experimental",
+            "game_validated": False, "components": [{"name": "DXMT", "status": "built", "revision": "a" * 40}],
+            "layout": "switchable-v1", "default_backend": "wined3d",
+            "backend_roots": {"wined3d": "runtime", "dxmt": "components/dxmt/runtime"}}
+        for changed in ({**receipt, "layout": "unreviewed"},
+                        {**receipt, "backend_roots": {"wined3d": "runtime", "dxmt": "../external"}},
+                        {**receipt, "artifacts": []}, {**receipt, "components": ["DXMT"]}, []):
+            (runtime / "components.json").write_text(json.dumps(changed))
+            with self.assertRaises(runner.HarnessError):
+                runner.candidate_receipt(runtime, self.build)
+
+    def mapped_fixture(self):
+        fixture = self.session.root / "original-probe.exe"
+        fixture.write_bytes(b"original fixture")
+        artifacts = {name: self.session.root / name for name in EXPECTED}
+        for name, path in artifacts.items():
+            path.write_bytes(name.encode())
+        wanted = {name: runner.harness.digest(path) for name, path in artifacts.items()}
+        self.session.manifest["tracked"] = {"123": "fixture birth"}
+        table = {123: {"birth": "fixture birth"}}
+        output = b"p123\0\n" + b"".join(b"ftxt\0n" + os.fsencode(path) + b"\0\n"
+            for path in (fixture, *artifacts.values()))
+        return fixture, artifacts, wanted, table, output
+
+    def discovery(self):
+        return subprocess.CompletedProcess([], 0, stdout=b"p123\0u" + str(os.getuid()).encode() + b"\0\n", stderr=b"")
+
+    def test_mapped_identity_requires_one_owned_live_probe_and_receipt_files(self):
+        fixture, artifacts, wanted, table, output = self.mapped_fixture()
+        with mock.patch.object(runner.harness, "process_table", return_value=table):
+            with mock.patch.object(runner.subprocess, "run", side_effect=[self.discovery(), subprocess.CompletedProcess([], 0,
+                    stdout=output, stderr=b"")]) as run:
+                result = runner.verify_live_mappings(self.session, fixture, artifacts, wanted)
+        self.assertEqual(result, {"mapping_kind": "txt", "process_verified": True, "sha256": wanted})
+        self.assertEqual(run.call_args.args[0], ["/usr/sbin/lsof", "-nP", "-a", "-p", "123", "-d", "txt", "-F0pfn"])
+        self.assertNotIn("path", json.dumps(result))
+
+    def test_detached_wow64_child_is_identified_by_exact_mapped_owned_fixture(self):
+        fixture, artifacts, wanted, table, output = self.mapped_fixture()
+        self.session.manifest["tracked"] = {}
+        with mock.patch.object(runner.harness, "process_table", return_value=table):
+            with mock.patch.object(runner.subprocess, "run", side_effect=[self.discovery(), subprocess.CompletedProcess([], 0,
+                    stdout=output, stderr=b"")]):
+                result = runner.verify_live_mappings(self.session, fixture, artifacts, wanted)
+        self.assertTrue(result["process_verified"])
+        self.assertEqual(self.session._mapped_probe_processes, {"123": "fixture birth"})
+
+    def test_open_files_logical_placeholders_and_other_processes_do_not_prove_mapping(self):
+        fixture, artifacts, wanted, table, output = self.mapped_fixture()
+        missing_fixture = output.replace(os.fsencode(fixture), os.fsencode(self.session.root / "another.exe"))
+        logical_copy = output.replace(os.fsencode(artifacts["dxgi.dll"]), os.fsencode(self.session.root / "prefix-dxgi.dll"))
+        ambiguous = output + b"ftxt\0n" + os.fsencode(self.session.root / "prefix" / "dxgi.dll") + b"\0\n"
+        for data in (missing_fixture, logical_copy, ambiguous, output.replace(b"ftxt", b"f4r")):
+            with mock.patch.object(runner.harness, "process_table", return_value=table):
+                with mock.patch.object(runner.subprocess, "run", side_effect=[self.discovery(), subprocess.CompletedProcess([], 0,
+                        stdout=data, stderr=b"")]):
+                    with self.assertRaises(runner.HarnessError):
+                        runner.verify_live_mappings(self.session, fixture, artifacts, wanted)
+
+    def test_mapped_identity_refuses_changed_hash_or_reused_pid(self):
+        fixture, artifacts, wanted, table, output = self.mapped_fixture()
+        for expected, tables in (({**wanted, "d3d11.dll": "f" * 64}, [table]),
+                                 (wanted, [table, {123: {"birth": "changed"}}])):
+            with mock.patch.object(runner.harness, "process_table", side_effect=tables):
+                with mock.patch.object(runner.subprocess, "run", side_effect=[self.discovery(), subprocess.CompletedProcess([], 0,
+                        stdout=output, stderr=b"")]):
+                    with self.assertRaises(runner.HarnessError):
+                        runner.verify_live_mappings(self.session, fixture, artifacts, expected)
+
+    def test_busy_switch_requires_running_guard_and_never_uses_stdin_cancellation(self):
+        bottle = "11111111-1111-4111-8111-111111111111"
+        directory = self.session.storage / "bottles" / bottle
+        directory.mkdir(parents=True)
+        preference = directory / "graphics.json"
+        preference.write_bytes(b"original preference")
+        denied = subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"Close Windows apps in this bottle before changing it")
+        with mock.patch.object(runner.subprocess, "run", return_value=denied) as run:
+            self.session.verify_busy_switch_refused(bottle)
+        self.assertNotIn("CASKRUN_CANCEL_STDIN", run.call_args.kwargs["env"])
+        self.assertEqual(preference.read_bytes(), b"original preference")
+        for result in (subprocess.CompletedProcess([], 0, stdout=b"{}", stderr=b""),
+                       subprocess.CompletedProcess([], 130, stdout=b"", stderr=b"Canceled")):
+            with mock.patch.object(runner.subprocess, "run", return_value=result):
+                with self.assertRaises(runner.HarnessError):
+                    self.session.verify_busy_switch_refused(bottle)
+
+    def test_busy_refusal_detects_preference_mutation(self):
+        bottle = "11111111-1111-4111-8111-111111111111"
+        directory = self.session.storage / "bottles" / bottle
+        directory.mkdir(parents=True)
+        preference = directory / "graphics.json"
+        preference.write_bytes(b"original preference")
+        def changed(*args, **kwargs):
+            preference.write_bytes(b"incorrect change")
+            return subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"Close Windows apps in this bottle before changing it")
+        with mock.patch.object(runner.subprocess, "run", side_effect=changed):
+            with self.assertRaises(runner.HarnessError):
+                self.session.verify_busy_switch_refused(bottle)
 
     def test_stop_uses_only_owned_prefix_kill_then_wait(self):
         bottle = "11111111-1111-4111-8111-111111111111"

@@ -151,3 +151,14 @@ The next credible D3D10/11 route remains an independently sourced Metal translat
 - Only after that evidence exists, choose a renderer automatically for the tested title and keep overrides under bottle Advanced settings. Do not make the person choose Wine, Vulkan, or a renderer in the normal Install → Open → Play flow.
 
 This graphics work is required before Caskrun can approach CrossOver-style game compatibility. Every renderer and game needs its own evidence and license review; a launcher opening is not a game test.
+
+### Optional app integration, 8 October 2026
+
+The development app now offers Automatic (WineD3D), WineD3D and verified DXMT
+in the bottle inspector. A switchable package retains the original default
+runtime and selects a separate real DXMT view; its exact package identity gates
+capabilities and a reviewed idle native-v2 upgrade. Selection, native identities,
+shutdown proofs and pre-Wine record rollback are bottle-scoped. See
+[app integration](DXMT_APP_INTEGRATION.md). Visible output and real games remain
+unvalidated; other backends and synchronization remain unavailable. High
+Resolution remains optional and off by default.

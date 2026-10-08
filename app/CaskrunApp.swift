@@ -308,6 +308,15 @@ struct BottleResolutionStatus: Decodable, Sendable {
     let dpi: Int
 }
 
+struct BottleGraphicsStatus: Decodable, Sendable {
+    let bottle_id: String
+    let selected_backend: String
+    let effective_backend: String
+    let dxmt_available: Bool
+    let unavailable_reason: String?
+    let warning: String?
+}
+
 struct WaitLaunchResult: Decodable, Sendable {
     let pid: UInt32
     let log_path: String
@@ -977,6 +986,9 @@ final class CaskrunModel: ObservableObject {
     @Published private(set) var bottleResolutions: [String: BottleResolutionStatus] = [:]
     @Published private(set) var loadingBottleResolutions: Set<String> = []
     @Published private(set) var bottleResolutionErrors: [String: String] = [:]
+    @Published private(set) var bottleGraphics: [String: BottleGraphicsStatus] = [:]
+    @Published private(set) var loadingBottleGraphics: Set<String> = []
+    @Published private(set) var bottleGraphicsErrors: [String: String] = [:]
     @Published var wineExecutable = initialWineExecutable()
     @Published private(set) var isQuitting = false
     @Published var isLaunching = false
@@ -1012,7 +1024,7 @@ final class CaskrunModel: ObservableObject {
 
     private func allowCoreCommandDuringShutdown(_ arguments: [String]) throws {
         let readCommands: Set<String> = ["overview", "status", "list", "deleted", "catalog-attempts",
-                                         "apps", "app-icon", "bottle-icon", "bottle-resolution",
+                                         "apps", "app-icon", "bottle-icon", "bottle-resolution", "bottle-graphics",
                                          "discover-apps", "steam-games", "logs", "read-log", "prefix-path"]
         if isQuitting, let command = arguments.first,
            command != "quit-all-bottles", !readCommands.contains(command) {
@@ -1621,6 +1633,72 @@ final class CaskrunModel: ObservableObject {
                 bottleResolutions[bottle.id] = result
                 bottleResolutionErrors.removeValue(forKey: bottle.id)
             } catch { message = error.localizedDescription }
+        }
+    }
+
+    func refreshBottleGraphics(in bottle: Bottle) {
+        guard !loadingBottleGraphics.contains(bottle.id) else { return }
+        let requestedWine = wineExecutable
+        loadingBottleGraphics.insert(bottle.id)
+        bottleGraphicsErrors.removeValue(forKey: bottle.id)
+        Task {
+            defer { loadingBottleGraphics.remove(bottle.id) }
+            do {
+                let result = try await callAsync(["bottle-graphics", bottle.id], as: BottleGraphicsStatus.self)
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }) else { return }
+                try validateGraphicsResult(result, for: bottle)
+                bottleGraphics[bottle.id] = result
+            } catch {
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }) else { return }
+                bottleGraphics.removeValue(forKey: bottle.id)
+                bottleGraphicsErrors[bottle.id] = error.localizedDescription
+            }
+        }
+    }
+
+    func setBottleGraphics(in bottle: Bottle, backend: String) {
+        guard !isQuitting && !isManagingBottle && !isLaunching &&
+                !loadingBottleGraphics.contains(bottle.id) else { return }
+        guard ["auto", "wined3d", "dxmt"].contains(backend),
+              let current = bottleGraphics[bottle.id], current.selected_backend != backend,
+              backend != "dxmt" || current.dxmt_available else { return }
+        let requestedWine = wineExecutable
+        isManagingBottle = true
+        bottleOperationLabel = "Updating graphics…"
+        bottleGraphicsErrors.removeValue(forKey: bottle.id)
+        Task {
+            defer {
+                isManagingBottle = false
+                bottleOperationLabel = "Updating bottle…"
+            }
+            do {
+                let result = try await callAsync(["set-bottle-graphics", bottle.id, backend], as: BottleGraphicsStatus.self)
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }) else { return }
+                try validateGraphicsResult(result, for: bottle)
+                bottleGraphics[bottle.id] = result
+            } catch {
+                guard wineExecutable == requestedWine else { return }
+                let detail = error.localizedDescription
+                // Keep the old selection visible unless the core confirms a change.
+                // Reading again also reports a successful rollback after a refusal.
+                let restored = try? await callAsync(["bottle-graphics", bottle.id], as: BottleGraphicsStatus.self)
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }) else { return }
+                if let restored,
+                   (try? validateGraphicsResult(restored, for: bottle)) != nil {
+                    bottleGraphics[bottle.id] = restored
+                }
+                bottleGraphicsErrors[bottle.id] = detail
+                message = detail
+            }
+        }
+    }
+
+    private func validateGraphicsResult(_ result: BottleGraphicsStatus, for bottle: Bottle) throws {
+        guard result.bottle_id == bottle.id,
+              ["auto", "wined3d", "dxmt"].contains(result.selected_backend),
+              result.effective_backend == (result.selected_backend == "dxmt" ? "dxmt" : "wined3d") else {
+            throw NSError(domain: "Caskrun", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Graphics status is unavailable for this bottle."])
         }
     }
 
@@ -3320,7 +3398,10 @@ struct CaskrunApp: App {
         }
         .shadow(color: .black.opacity(0.10), radius: 12, y: 5)
         .task(id: selectedBottle?.id) {
-            if let bottle = selectedBottle { model.refreshBottleResolution(in: bottle) }
+            if let bottle = selectedBottle {
+                model.refreshBottleResolution(in: bottle)
+                model.refreshBottleGraphics(in: bottle)
+            }
         }
     }
 
@@ -3475,7 +3556,7 @@ struct CaskrunApp: App {
             DisclosureGroup(isExpanded: $showBottleDisplay) {
                 VStack(alignment: .leading, spacing: 16) {
                     bottleDisplayPanel(for: bottle)
-                    bottleGraphicsPanel
+                    bottleGraphicsPanel(for: bottle)
                 }
                 .padding(.top, 12)
                 .padding(.bottom, 4)
@@ -3568,18 +3649,54 @@ struct CaskrunApp: App {
         }
     }
 
-    private var bottleGraphicsPanel: some View {
+    private func bottleGraphicsPanel(for bottle: Bottle) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             bottlePanelLabel("GRAPHICS")
-            HStack {
-                Text("Wine (WineD3D)").font(.subheadline.weight(.medium))
-                Spacer()
-                Text("Default").font(.caption).foregroundStyle(.secondary)
-            }
-            Text("Game compatibility varies by app.")
+            if let status = model.bottleGraphics[bottle.id] {
+                Picker("Renderer", selection: Binding(
+                    get: { model.bottleGraphics[bottle.id]?.selected_backend ?? "auto" },
+                    set: { model.setBottleGraphics(in: bottle, backend: $0) }
+                )) {
+                    Text("Automatic (WineD3D)").tag("auto")
+                    Text("WineD3D").tag("wined3d")
+                    Text("DXMT · Experimental").tag("dxmt").disabled(!status.dxmt_available)
+                }
+                .pickerStyle(.menu)
+                .font(.subheadline)
+                .disabled(model.isQuitting || model.isLaunching || model.isManagingBottle ||
+                          model.loadingBottleGraphics.contains(bottle.id) || model.status.wine_path == nil)
+                Text(status.effective_backend == "dxmt"
+                     ? "DXMT translates DirectX 10/11 to Metal. Game compatibility still needs testing."
+                     : "WineD3D is the default. Close this bottle’s apps before changing its renderer.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !status.dxmt_available, let reason = status.unavailable_reason {
+                    Text(reason).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if let warning = status.warning {
+                    Text(warning).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            } else if model.loadingBottleGraphics.contains(bottle.id) {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text("Reading graphics options…")
+                }
                 .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("Graphics options unavailable").font(.subheadline.weight(.medium))
+            }
+            if let error = model.bottleGraphicsErrors[bottle.id] {
+                Text(error).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 6) {
+                Button("Refresh graphics status") { model.refreshBottleGraphics(in: bottle) }
+                    .font(.caption).buttonStyle(.borderless)
+                    .disabled(model.loadingBottleGraphics.contains(bottle.id) || model.isManagingBottle)
+                if model.loadingBottleGraphics.contains(bottle.id), model.bottleGraphics[bottle.id] != nil {
+                    ProgressView().controlSize(.mini).accessibilityLabel("Refreshing graphics status")
+                }
+            }
             DisclosureGroup("Other graphics & sync options") {
-                ForEach(["DXVK", "DXMT", "D3DMetal", "MSync"], id: \.self) { name in
+                ForEach(["DXVK", "D3DMetal", "MSync"], id: \.self) { name in
                     HStack {
                         Text(name)
                         Spacer()

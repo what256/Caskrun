@@ -1,5 +1,6 @@
-//! Reviewed exact-package transitions for Caskrun's installed Steam bottles. Other Wine
-//! changes continue through the exact-match check in `verify_runtime_record`.
+//! Reviewed exact-package transitions for Caskrun bottles. Historical Steam
+//! transitions retain their launcher gates; the native-to-switchable transition
+//! applies to any idle bottle. Other changes retain the ordinary exact match.
 
 use super::*;
 use std::io::Write;
@@ -15,6 +16,9 @@ const STEAM_WINE_11_IDENTITY: &str =
     "sha256:07c5721ad17efa9d4ea89ff61522133407756c4aea8a47866625dcf118e7347c";
 const NATIVE_WINE_11_IDENTITY: &str =
     "sha256:9dcab17f21490998ad03f6ee4f553da0992a1d9234dfe40efd82956b63fd47ce";
+// Complete switchable package measured by the ordinary tree attestation.
+pub(super) const SWITCHABLE_WINE_11_IDENTITY: &str =
+    "sha256:4d82b50b96eb5995a78d848fb67166979577cd98e36d7db72fbb08636f8f44c5";
 const RECORDED_DISPATCH: &str = "Caskrun.app/Contents/Resources/wine-runtime/bin/_dispatch";
 const SELECTED_WINE: &str = "Caskrun.app/Contents/Resources/wine-runtime/bin/wine";
 
@@ -48,8 +52,16 @@ const TLS_TO_NATIVE_POLICY: MigrationPolicy<'static> = MigrationPolicy {
     verify_launcher_pe: true,
 };
 
+const NATIVE_TO_SWITCHABLE_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: NATIVE_WINE_11_IDENTITY,
+    approved: SWITCHABLE_WINE_11_IDENTITY,
+    backup_suffix: "native-to-switchable",
+    verify_launcher_pe: false,
+};
+
 /// Returned only after the old record has been backed up and replaced. The
-/// caller restores it if the ordinary prefix verification then fails.
+/// caller may restore it if prelaunch verification/configuration fails. This
+/// restores only the runtime record, never changes made after Wine starts.
 pub(super) struct RecordRollback {
     record_path: PathBuf,
     backup_path: PathBuf,
@@ -61,13 +73,13 @@ impl RecordRollback {
     pub(super) fn restore(self) -> Result<(), String> {
         if read_record_bytes(&self.backup_path)? != self.original_bytes {
             return Err(format!(
-                "Steam runtime backup changed; restore the bottle from {}",
+                "Bottle runtime backup changed; restore the bottle from {}",
                 self.backup_path.display()
             ));
         }
         if read_record_bytes(&self.record_path)? != self.migrated_bytes {
             return Err(format!(
-                "Steam runtime record changed; review its backup at {}",
+                "Bottle runtime record changed; review its backup at {}",
                 self.backup_path.display()
             ));
         }
@@ -98,6 +110,54 @@ pub(super) fn maybe_migrate_steam_runtime(
     )
 }
 
+/// Called under the bottle lock, before any Wine command. Only the reviewed
+/// complete native package can advance to the reviewed complete successor.
+/// No prefix content is modified, and the returned rollback is record-only.
+pub(super) fn maybe_migrate_bundled_runtime(
+    home: &Path,
+    bottle_id: &str,
+    wine: &Path,
+) -> Result<Option<RecordRollback>, String> {
+    migrate_bundled_with_policy(
+        home,
+        bottle_id,
+        wine,
+        &NATIVE_TO_SWITCHABLE_POLICY,
+        WINE_SERVER_CHECK_TIMEOUT,
+    )
+}
+
+fn migrate_bundled_with_policy(
+    home: &Path,
+    bottle_id: &str,
+    wine: &Path,
+    policy: &MigrationPolicy<'_>,
+    idle_timeout: Duration,
+) -> Result<Option<RecordRollback>, String> {
+    let Some(rollback) = migrate_runtime(home, bottle_id, wine, None, &[policy], idle_timeout)?
+    else {
+        return Ok(None);
+    };
+    // Re-read the installed record and use the same verifier as ordinary
+    // launches. A package changed during the idle check must not be adopted.
+    let verified: Result<(), String> = (|| {
+        let bytes = read_record_bytes(&rollback.record_path)?;
+        let record: PrefixRecord = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("Invalid migrated bottle runtime record: {e}"))?;
+        if !runtime_record_matches(&record, wine)? {
+            return Err("The migrated runtime failed ordinary verification".into());
+        }
+        Ok(())
+    })();
+    if let Err(error) = verified {
+        return match rollback.restore() {
+            Ok(()) => Err(format!("{error}; the original runtime record was restored")),
+            Err(restore_error) => Err(format!("{error}; {restore_error}")),
+        };
+    }
+    Ok(Some(rollback))
+}
+
 fn migrate_with_policies(
     home: &Path,
     bottle_id: &str,
@@ -106,13 +166,38 @@ fn migrate_with_policies(
     policies: &[&MigrationPolicy<'_>],
     idle_timeout: Duration,
 ) -> Result<Option<RecordRollback>, String> {
+    migrate_runtime(
+        home,
+        bottle_id,
+        wine,
+        Some(launcher_path),
+        policies,
+        idle_timeout,
+    )
+}
+
+fn migrate_runtime(
+    home: &Path,
+    bottle_id: &str,
+    wine: &Path,
+    launcher_path: Option<&Path>,
+    policies: &[&MigrationPolicy<'_>],
+    idle_timeout: Duration,
+) -> Result<Option<RecordRollback>, String> {
     let dir = bottle_dir(home, bottle_id)?;
     let prefix = dir.join("prefix");
-    let (prefix_guard, prefix_snapshot) = open_stable_directory(&prefix)?;
     if !path_is_real_file(&prefix.join("system.reg")) {
         return Ok(None);
     }
+    let (prefix_guard, prefix_snapshot) = open_stable_directory(&prefix)?;
     let record_path = dir.join("prefix-record.json");
+    // Imported prefixes can have a registry before Caskrun records an engine.
+    // Their normal initialization path decides how to adopt that prefix.
+    if launcher_path.is_none()
+        && matches!(fs::symlink_metadata(&record_path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(None);
+    }
     let original_bytes = read_record_bytes(&record_path)?;
     let record: PrefixRecord = serde_json::from_slice(&original_bytes)
         .map_err(|e| format!("Invalid bottle runtime record: {e}"))?;
@@ -137,23 +222,26 @@ fn migrate_with_policies(
     {
         return Ok(None);
     }
-    let Some(attempt) = steam_install::catalog_attempt(home, bottle_id)? else {
-        return Ok(None);
-    };
-    if attempt.catalog_id != "steam" || attempt.stage != steam_install::CatalogStage::Installed {
-        return Ok(None);
-    }
-    let launchers = list_launchers(home, bottle_id)?;
-    if !launchers.iter().any(|launcher| {
-        Path::new(&launcher.path)
-            .canonicalize()
-            .is_ok_and(|path| path == launcher_path)
-            && steam_install::is_recipe_steam_launcher(home, bottle_id, launcher)
-    }) {
-        return Ok(None);
+    if let Some(launcher_path) = launcher_path {
+        let Some(attempt) = steam_install::catalog_attempt(home, bottle_id)? else {
+            return Ok(None);
+        };
+        if attempt.catalog_id != "steam" || attempt.stage != steam_install::CatalogStage::Installed
+        {
+            return Ok(None);
+        }
+        let launchers = list_launchers(home, bottle_id)?;
+        if !launchers.iter().any(|launcher| {
+            Path::new(&launcher.path)
+                .canonicalize()
+                .is_ok_and(|path| path == launcher_path)
+                && steam_install::is_recipe_steam_launcher(home, bottle_id, launcher)
+        }) {
+            return Ok(None);
+        }
     }
     if !is_usable_wine(wine) {
-        return Err("The approved Caskrun Steam engine is unavailable".into());
+        return Err("The approved Caskrun Windows engine is unavailable".into());
     }
     // Select by both pinned endpoints after hashing the complete destination.
     // Multiple successors for one predecessor must not cause the first edge
@@ -166,10 +254,12 @@ fn migrate_with_policies(
     let policy = matching
         .into_iter()
         .find(|policy| attestation.identity == policy.approved)
-        .ok_or("The selected Windows engine is not the approved Steam migration package; this bottle was unchanged")?;
+        .ok_or("The selected Windows engine is not the approved migration package; this bottle was unchanged")?;
     // New native transitions additionally validate the installed program's PE
     // content. The established TLS-to-Steam policy retains its original gate.
     let verified_launcher = if policy.verify_launcher_pe {
+        let launcher_path =
+            launcher_path.ok_or("This engine transition requires a Steam launcher")?;
         let before = fs::symlink_metadata(launcher_path)
             .map_err(|e| format!("Could not inspect the installed Steam launcher: {e}"))?;
         if !before.file_type().is_file() {
@@ -185,16 +275,16 @@ fn migrate_with_policies(
         if !same_snapshot(&before, &file.metadata().map_err(|e| e.to_string())?) {
             return Err("The installed Steam launcher changed during verification".into());
         }
-        Some((file, before))
+        Some((launcher_path, file, before))
     } else {
         None
     };
     refuse_running_bottle(&dir)?;
-    wait_for_idle_wineserver(&dir, wine, idle_timeout)?;
+    wait_for_idle_wineserver(&dir, wine, idle_timeout, launcher_path.is_some())?;
     // A server can exit while an orphaned client retains this exact bottle's
     // files. The read-only handle guard never signals an inventoried process.
     prefix_processes::wait_until_idle(&dir, idle_timeout).map_err(|error| {
-        format!("Could not verify this Steam bottle is idle before changing its engine: {error}")
+        format!("Could not verify this bottle is idle before changing its engine: {error}")
     })?;
     refuse_running_bottle(&dir)?;
     if !same_identity(
@@ -204,9 +294,9 @@ fn migrate_with_policies(
         &prefix_snapshot,
         &fs::symlink_metadata(&prefix).map_err(|e| e.to_string())?,
     ) {
-        return Err("Steam bottle prefix changed during engine migration".into());
+        return Err("Bottle prefix changed during engine migration".into());
     }
-    if let Some((file, snapshot)) = verified_launcher {
+    if let Some((launcher_path, file, snapshot)) = verified_launcher {
         if !same_snapshot(&snapshot, &file.metadata().map_err(|e| e.to_string())?)
             || !same_snapshot(
                 &snapshot,
@@ -217,7 +307,7 @@ fn migrate_with_policies(
         }
     }
     if read_record_bytes(&record_path)? != original_bytes {
-        return Err("Steam bottle runtime record changed during migration".into());
+        return Err("Bottle runtime record changed during migration".into());
     }
 
     let backups = real_subdirectory(home, "runtime-migration-backups")?;
@@ -400,13 +490,18 @@ fn replace_record_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     result
 }
 
-fn wait_for_idle_wineserver(dir: &Path, wine: &Path, timeout: Duration) -> Result<(), String> {
+fn wait_for_idle_wineserver(
+    dir: &Path,
+    wine: &Path,
+    timeout: Duration,
+    steam: bool,
+) -> Result<(), String> {
     let wineserver = wine
         .parent()
         .ok_or("Wine path has no parent")?
         .join("wineserver");
     if !is_executable(&wineserver) || !is_independent_runtime(&wineserver) {
-        return Err("Cannot check whether the Steam bottle's Wine server is idle".into());
+        return Err("Cannot check whether the bottle's Wine server is idle".into());
     }
     let prefix = dir.join("prefix");
     let xdg = bottle_xdg::for_bottle(dir)?;
@@ -419,15 +514,17 @@ fn wait_for_idle_wineserver(dir: &Path, wine: &Path, timeout: Duration) -> Resul
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("Could not check this Steam bottle's Wine server: {e}"))?;
+        .map_err(|e| format!("Could not check this bottle's Wine server: {e}"))?;
     let (status, timed_out) = wait_child_bounded_status(&mut probe, timeout)?;
     if timed_out {
-        return Err(
-            "Close Steam and other Windows apps in this bottle before upgrading its engine".into(),
-        );
+        return Err(if steam {
+            "Close Steam and other Windows apps in this bottle before upgrading its engine".into()
+        } else {
+            "Close Windows apps in this bottle before upgrading its engine".into()
+        });
     }
     if !status.success() {
-        return Err("Could not verify that this Steam bottle's Wine server is idle".into());
+        return Err("Could not verify that this bottle's Wine server is idle".into());
     }
     Ok(())
 }
@@ -577,6 +674,36 @@ mod tests {
                 "runtime-migration-backups/{}-tls-to-native-prefix-record.json",
                 self.bottle_id
             ))
+        }
+
+        fn switchable_policy<'a>(&self, approved: &'a str) -> MigrationPolicy<'a> {
+            MigrationPolicy {
+                previous: NATIVE_WINE_11_IDENTITY,
+                approved,
+                backup_suffix: "native-to-switchable",
+                verify_launcher_pe: false,
+            }
+        }
+
+        fn switchable_backup(&self) -> PathBuf {
+            self.home.join(format!(
+                "runtime-migration-backups/{}-native-to-switchable-prefix-record.json",
+                self.bottle_id
+            ))
+        }
+
+        fn migrate_bundled(
+            &self,
+            policy: &MigrationPolicy<'_>,
+        ) -> Result<Option<RecordRollback>, String> {
+            let _lock = lock_bottle(&self.home, &self.bottle_id)?;
+            migrate_bundled_with_policy(
+                &self.home,
+                &self.bottle_id,
+                &self.wine,
+                policy,
+                Duration::from_secs(2),
+            )
         }
     }
 
@@ -1269,5 +1396,196 @@ mod tests {
         rollback.restore().unwrap();
         assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
         assert_eq!(fs::read(fixture.native_backup()).unwrap(), original);
+    }
+
+    #[test]
+    fn bundled_transition_needs_no_catalog_or_launcher_and_preserves_prefix() {
+        let fixture = Fixture::new();
+        fixture.set_predecessor(NATIVE_WINE_11_IDENTITY);
+        let dir = bottle_dir(&fixture.home, &fixture.bottle_id).unwrap();
+        fs::remove_file(dir.join("catalog-attempt.json")).unwrap();
+        fs::remove_file(dir.join("launchers.json")).unwrap();
+        fs::remove_dir_all(fixture.steam.parent().unwrap()).unwrap();
+        rename_bottle(&fixture.home, &fixture.bottle_id, "Custom apps").unwrap();
+        let registry = dir.join("prefix/system.reg");
+        let registry_before = fs::metadata(&registry).unwrap();
+        let original = fs::read(&fixture.record_path).unwrap();
+        let approved = fixture.approved_identity();
+        let policy = fixture.switchable_policy(&approved);
+        let rollback = fixture.migrate_bundled(&policy).unwrap().unwrap();
+        assert_eq!(fs::read(fixture.switchable_backup()).unwrap(), original);
+        assert!(same_snapshot(
+            &registry_before,
+            &fs::metadata(&registry).unwrap()
+        ));
+        assert_eq!(
+            fs::read(dir.join("prefix/keep.txt")).unwrap(),
+            b"prefix data to preserve"
+        );
+        let migrated: PrefixRecord =
+            serde_json::from_slice(&fs::read(&fixture.record_path).unwrap()).unwrap();
+        assert!(runtime_record_matches(&migrated, &fixture.wine).unwrap());
+        assert!(fixture.migrate_bundled(&policy).unwrap().is_none());
+        rollback.restore().unwrap();
+        assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+        assert_eq!(fs::read(fixture.switchable_backup()).unwrap(), original);
+        assert!(same_snapshot(
+            &registry_before,
+            &fs::metadata(&registry).unwrap()
+        ));
+    }
+
+    #[test]
+    fn bundled_transition_keeps_custom_legacy_unknown_and_unbound_records_strict() {
+        for invalid in ["custom", "path-only", "unknown", "unbound"] {
+            let fixture = Fixture::new();
+            fixture.set_predecessor(NATIVE_WINE_11_IDENTITY);
+            let mut record: PrefixRecord =
+                serde_json::from_slice(&fs::read(&fixture.record_path).unwrap()).unwrap();
+            match invalid {
+                "custom" => {
+                    record.wine_path = fixture.home.join("custom-wine").display().to_string()
+                }
+                "path-only" => record.runtime_identity = None,
+                "unknown" => record.runtime_identity = Some("sha256:unknown-predecessor".into()),
+                "unbound" => record.runtime_fingerprint = Some("legacy-fingerprint".into()),
+                _ => unreachable!(),
+            }
+            save_json(&fixture.record_path, &record).unwrap();
+            let original = fs::read(&fixture.record_path).unwrap();
+            let approved = fixture.approved_identity();
+            assert!(
+                fixture
+                    .migrate_bundled(&fixture.switchable_policy(&approved))
+                    .unwrap()
+                    .is_none(),
+                "{invalid}"
+            );
+            assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+            assert!(!fixture.switchable_backup().exists());
+        }
+    }
+
+    #[test]
+    fn bundled_transition_requires_exact_destination_and_app_path() {
+        let fixture = Fixture::new();
+        fixture.set_predecessor(NATIVE_WINE_11_IDENTITY);
+        let original = fs::read(&fixture.record_path).unwrap();
+        assert!(
+            fixture
+                .migrate_bundled(&fixture.switchable_policy("sha256:unapproved-successor"))
+                .is_err()
+        );
+        assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+        assert!(!fixture.switchable_backup().exists());
+        let approved = fixture.approved_identity();
+        let package = fixture.home.join("Caskrun.app");
+        let other = fixture.home.join("Other.app");
+        fs::rename(&package, &other).unwrap();
+        let wine = other.join("Contents/Resources/wine-runtime/bin/wine");
+        let _lock = lock_bottle(&fixture.home, &fixture.bottle_id).unwrap();
+        assert!(
+            migrate_bundled_with_policy(
+                &fixture.home,
+                &fixture.bottle_id,
+                &wine,
+                &fixture.switchable_policy(&approved),
+                Duration::from_secs(2),
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+        assert!(!fixture.switchable_backup().exists());
+    }
+
+    #[test]
+    fn bundled_transition_refuses_busy_bottle_and_conflicting_backup() {
+        let fixture = Fixture::new();
+        fixture.set_predecessor(NATIVE_WINE_11_IDENTITY);
+        let dir = bottle_dir(&fixture.home, &fixture.bottle_id).unwrap();
+        let original = fs::read(&fixture.record_path).unwrap();
+        let approved = fixture.approved_identity();
+        let policy = fixture.switchable_policy(&approved);
+        save_json(
+            &dir.join("active-processes.json"),
+            &vec![std::process::id()],
+        )
+        .unwrap();
+        assert!(fixture.migrate_bundled(&policy).is_err());
+        assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+        assert!(!fixture.switchable_backup().exists());
+        save_json(&dir.join("active-processes.json"), &Vec::<u32>::new()).unwrap();
+        fs::create_dir_all(fixture.switchable_backup().parent().unwrap()).unwrap();
+        fs::write(fixture.switchable_backup(), b"unrelated backup").unwrap();
+        assert!(fixture.migrate_bundled(&policy).is_err());
+        assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+        assert_eq!(
+            fs::read(fixture.switchable_backup()).unwrap(),
+            b"unrelated backup"
+        );
+    }
+
+    #[test]
+    fn bundled_transition_does_not_migrate_an_uninitialized_prefix() {
+        let fixture = Fixture::new();
+        fixture.set_predecessor(NATIVE_WINE_11_IDENTITY);
+        let dir = bottle_dir(&fixture.home, &fixture.bottle_id).unwrap();
+        fs::remove_file(dir.join("prefix/system.reg")).unwrap();
+        let original = fs::read(&fixture.record_path).unwrap();
+        let approved = fixture.approved_identity();
+        assert!(
+            fixture
+                .migrate_bundled(&fixture.switchable_policy(&approved))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+        assert!(!fixture.switchable_backup().exists());
+    }
+
+    #[test]
+    fn bundled_transition_leaves_unrecorded_import_to_normal_initialization() {
+        let fixture = Fixture::new();
+        fs::remove_file(&fixture.record_path).unwrap();
+        let approved = fixture.approved_identity();
+        assert!(
+            fixture
+                .migrate_bundled(&fixture.switchable_policy(&approved))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!fixture.record_path.exists());
+        assert!(!fixture.switchable_backup().exists());
+        fs::write(&fixture.record_path, b"malformed record").unwrap();
+        assert!(
+            fixture
+                .migrate_bundled(&fixture.switchable_policy(&approved))
+                .is_err()
+        );
+        assert_eq!(fs::read(&fixture.record_path).unwrap(), b"malformed record");
+    }
+
+    #[test]
+    fn bundled_transition_restores_record_if_destination_changes_during_idle_check() {
+        let fixture = Fixture::new();
+        fixture.set_predecessor(NATIVE_WINE_11_IDENTITY);
+        fs::write(
+            fixture.wine.parent().unwrap().join("_dispatch"),
+            b"#!/bin/sh\ncase \"${0##*/}\" in wineserver) printf changed >> \"${0%/*}/../runtime/bin/wine\";; *) exit 9;; esac\nexit 0\n",
+        )
+        .unwrap();
+        let original = fs::read(&fixture.record_path).unwrap();
+        let approved = fixture.approved_identity();
+        let error = fixture
+            .migrate_bundled(&fixture.switchable_policy(&approved))
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("original runtime record was restored"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+        assert_eq!(fs::read(fixture.switchable_backup()).unwrap(), original);
     }
 }

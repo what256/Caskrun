@@ -1,8 +1,8 @@
 # Isolated DXMT development candidate
 
-_8 October 2026. This is an original development experiment, separate from the
-included app runtime and existing user bottles. Gameplay and visible screen
-composition are not validated._
+_8 October 2026. The isolated v3 experiment below preceded the optional
+[switchable app integration](DXMT_APP_INTEGRATION.md). Gameplay and visible
+screen composition are not validated._
 
 ## Defect and change
 
@@ -149,11 +149,12 @@ destruction before swap-chain release and continued rendering in the survivor.
 Readback and successful Present calls establish graphics/API interoperability.
 They do not independently measure visible screen pixels, game performance,
 controllers, media playback or publisher-client compatibility. D3D12, NVAPI
-and NVNGX remain disabled. The app still uses its current WineD3D runtime;
-there is no user-bottle migration or selectable DXMT control in this phase.
+and NVNGX remain disabled. In this isolated v3 phase, the app retained its WineD3D runtime and had no
+selectable DXMT control. The subsequent [app integration](DXMT_APP_INTEGRATION.md)
+adds optional selection while preserving the WineD3D default.
 High Resolution remains optional and off by default.
 
-Before promotion: verify visible output and a real game; add exact runtime
-capability reporting and an idle-bottle migration/rollback path; then integrate
-a supported selection in the app. Keep source and binary publication reviews
+Before a compatibility or release claim: verify visible output and a real game.
+The subsequent app phase adds exact capabilities and idle runtime-record
+migration/rollback; those do not establish game compatibility. Keep source and binary publication reviews
 separate from local development validation.

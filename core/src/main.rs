@@ -1,6 +1,7 @@
 mod app_icons;
 mod battle_net_install;
 mod bottle_control;
+mod bottle_graphics;
 mod bottle_resolution;
 mod bottle_xdg;
 mod cancellation;
@@ -1192,6 +1193,7 @@ fn duplicate_bottle_with_runtime(
 ) -> Result<Bottle, String> {
     let _lock = lock_bottle(home, id)?;
     let source = bottle_dir(home, id)?;
+    bottle_graphics::validate_portable_settings(&source)?;
     refuse_running_bottle(&source)?;
     refuse_live_wine_server(&source, WINE_SERVER_CHECK_TIMEOUT, selected_wine)?;
     let xdg = bottle_xdg::for_bottle(&source)?;
@@ -1262,6 +1264,7 @@ fn export_bottle_with_runtime(
 ) -> Result<BackupResult, String> {
     let _lock = lock_bottle(home, id)?;
     let source = bottle_dir(home, id)?;
+    bottle_graphics::validate_portable_settings(&source)?;
     refuse_running_bottle(&source)?;
     refuse_live_wine_server(&source, WINE_SERVER_CHECK_TIMEOUT, selected_wine)?;
     let xdg = bottle_xdg::for_bottle(&source)?;
@@ -1375,6 +1378,7 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
     if !path_is_real_directory(&payload) || !path_is_real_directory(&payload.join("prefix")) {
         return Err("Backup payload is missing its prefix".into());
     }
+    bottle_graphics::validate_portable_settings(&payload)?;
     for reserved in [
         "bottle.json",
         "launchers.json",
@@ -2001,6 +2005,26 @@ fn ensure_prefix_with_wine_timeout(
     wine: &Path,
     timeout: Duration,
 ) -> Result<PrefixResult, String> {
+    let migration = runtime_migration::maybe_migrate_bundled_runtime(home, id, wine)?;
+    let result = ensure_prefix_without_migration(home, id, wine, timeout);
+    if result.is_err()
+        && let Some(backup) = migration
+    {
+        backup.restore().map_err(|error| {
+            format!(
+                "Runtime validation failed and its previous record could not be restored: {error}"
+            )
+        })?;
+    }
+    result
+}
+
+fn ensure_prefix_without_migration(
+    home: &Path,
+    id: &str,
+    wine: &Path,
+    timeout: Duration,
+) -> Result<PrefixResult, String> {
     cancellation::check()?;
     let dir = bottle_dir(home, id)?;
     let prefix = real_subdirectory(&dir, "prefix")?;
@@ -2076,6 +2100,7 @@ fn ensure_prefix_with_wine_timeout(
     let errors = log.try_clone().map_err(|e| e.to_string())?;
     let mut command = Command::new(wineboot);
     xdg.apply(&mut command);
+    bottle_graphics::configure_launch(&mut command, &dir, wine)?;
     native_app_identity::configure_launch(
         &mut command,
         home,
@@ -2338,6 +2363,7 @@ fn start_launch_with_wine_checked(
     let errors: File = log.try_clone().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(wine);
     bottle_xdg::for_bottle(&dir)?.apply(&mut cmd);
+    bottle_graphics::configure_launch(&mut cmd, &dir, wine)?;
     cmd.env_remove("CASKRUN_STEAM_MODE");
     cmd.env_remove("CASKRUN_STEAM_ICON");
     // Only the verified catalog Steam launcher enables Caskrun's Wine Steam
@@ -2492,6 +2518,10 @@ fn run() -> Result<(), String> {
             serde_json::to_value(bottle_control::quit_windows_apps(&home, id)?),
         [command, id] if command == "bottle-resolution" =>
             serde_json::to_value(bottle_resolution::bottle_resolution(&home, id)?),
+        [command, id] if command == "bottle-graphics" =>
+            serde_json::to_value(bottle_graphics::bottle_graphics(&home, id)?),
+        [command, id, backend] if command == "set-bottle-graphics" =>
+            serde_json::to_value(bottle_graphics::set_bottle_graphics(&home, id, bottle_graphics::Backend::parse(backend)?)?),
         [command, id, mode] if command == "set-bottle-resolution" && (mode == "on" || mode == "off") =>
             serde_json::to_value(bottle_resolution::set_bottle_resolution(&home, id, mode == "on")?),
         [command, id] if command == "open-uninstaller" =>

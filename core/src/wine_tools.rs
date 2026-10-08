@@ -3,6 +3,7 @@
 //! These are fixed upstream Wine programs, not an arbitrary command runner.
 
 use super::*;
+use std::cell::Cell;
 use std::io::Write;
 
 const REBOOT_TIMEOUT: Duration = Duration::from_secs(90);
@@ -117,6 +118,30 @@ fn simulate_reboot_with_wine(
     timeout: Duration,
 ) -> Result<RebootResult, String> {
     let _lock = lock_bottle(home, id)?;
+    let migration = runtime_migration::maybe_migrate_bundled_runtime(home, id, wine)?;
+    let started = Cell::new(false);
+    let result = simulate_reboot_locked(home, id, wine, timeout, &started);
+    match result {
+        Err(error) if !started.get() => match migration {
+            Some(backup) => match backup.restore() {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(format!(
+                    "{error}. The previous runtime record could not be restored: {restore_error}"
+                )),
+            },
+            None => Err(error),
+        },
+        result => result,
+    }
+}
+
+fn simulate_reboot_locked(
+    home: &Path,
+    id: &str,
+    wine: &Path,
+    timeout: Duration,
+    started: &Cell<bool>,
+) -> Result<RebootResult, String> {
     let (dir, prefix, _wineserver, prefix_guard, prefix_snapshot) =
         bottle_control::checked_control_paths(home, id, wine)?;
     let wineboot = wine
@@ -145,6 +170,7 @@ fn simulate_reboot_with_wine(
     bottle_control::assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
     let mut command = Command::new(wineboot);
     bottle_xdg::for_bottle(&dir)?.apply(&mut command);
+    bottle_graphics::configure_launch(&mut command, &dir, wine)?;
     native_app_identity::configure_launch(
         &mut command,
         home,
@@ -170,6 +196,7 @@ fn simulate_reboot_with_wine(
         .stderr(Stdio::from(stderr))
         .spawn()
         .map_err(|e| format!("Could not start Wine's simulated reboot: {e}"))?;
+    started.set(true);
     let (status, timed_out) = wait_child_bounded_status(&mut child, timeout)?;
     bottle_control::assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
     if timed_out {
@@ -209,13 +236,8 @@ fn open_tool_with_wine(
     let dir = bottle_dir(home, id)?;
     let prefix = dir.join("prefix");
     require_initialized(&dir, &prefix)?;
-    let record = recorded_runtime_for_prefix(&dir, Some(wine))?
-        .ok_or("This bottle has no recorded Wine runtime")?;
-    if !runtime_record_matches(&record, wine)? {
-        return Err(
-            "This bottle uses a different Windows engine. Select its recorded engine.".into(),
-        );
-    }
+    // The common launch path performs the exact runtime check and any
+    // reviewed idle upgrade while holding this bottle's lock.
     let executable = checked_tool_path(&prefix, tool)?;
     let arguments: Vec<String> = tool
         .arguments()
@@ -497,6 +519,41 @@ mod tests {
                 r"C:\windows\system32\cmd.exe"
             )
         }));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn reboot_distinguishes_spawn_failure_from_started_wine_failure() {
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let bottle = create(&home, "Reboot failure boundaries").unwrap();
+        ensure_prefix_with_wine(&home, &bottle.id, &wine).unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let record = fs::read(dir.join("prefix-record.json")).unwrap();
+        let wineboot = wine.parent().unwrap().join("wineboot");
+        let lock = lock_bottle(&home, &bottle.id).unwrap();
+        for (script, expected_started) in [
+            ("#!/missing-caskrun-test-interpreter\n", false),
+            ("#!/bin/sh\nexit 73\n", true),
+        ] {
+            fs::write(&wineboot, script).unwrap();
+            let started = Cell::new(false);
+            let error =
+                simulate_reboot_locked(&home, &bottle.id, &wine, Duration::from_secs(2), &started)
+                    .err()
+                    .unwrap();
+            assert_eq!(started.get(), expected_started, "{error}");
+            assert!(
+                error.contains(if expected_started {
+                    "could not finish the simulated reboot"
+                } else {
+                    "Could not start Wine's simulated reboot"
+                }),
+                "{error}"
+            );
+            assert_eq!(fs::read(dir.join("prefix-record.json")).unwrap(), record);
+        }
+        drop(lock);
         fs::remove_dir_all(home).unwrap();
     }
 
