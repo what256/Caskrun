@@ -8,6 +8,10 @@ use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::Path;
 use uuid::Uuid;
 
+#[path = "icon_repair.rs"]
+mod icon_repair;
+pub(crate) use icon_repair::repair_bottle_icons;
+
 use crate::{
     O_NOFOLLOW_ANY, bottle_dir, is_independent_runtime, list_launchers, native_app_identity,
     same_snapshot,

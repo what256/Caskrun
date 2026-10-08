@@ -252,6 +252,7 @@ fn open_tool_with_wine(
         LaunchFlags {
             quiet_msi: false,
             steam_mode: false,
+            working_directory: None,
         },
         &arguments,
         |resolved| {

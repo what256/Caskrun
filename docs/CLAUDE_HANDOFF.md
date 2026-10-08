@@ -18,6 +18,14 @@ changing those paths. Visible output and games remain unvalidated.
 High Resolution stays optional and off by default. The user will perform
 manual game testing later.
 
+The subsequent maintenance pass adds checked shortcut working folders, app
+renaming, one-time argument selection, installed-program inventory, recoverable
+icon-cache rebuilding, privacy-limited diagnostics, raw-log export, bottle
+notes, Wine Windows-version control and original compressed backups. Read
+[maintenance workflows](DEMO_MAINTENANCE.md) and the
+[manual checklist](MANUAL_TEST_CHECKLIST.md) before treating older missing-feature
+bullets below as current. Publisher-client failures remain unresolved.
+
 ---
 
 You are continuing **Caskrun**, an original Apple Silicon macOS app that installs and runs Windows x86/x64 software through an independently built Wine runtime. It is a **private demo in active development**. More features are coming. Improve the remaining compatibility and maintenance problems through small, verified changes. Do not promise universal Windows compatibility or CrossOver parity.

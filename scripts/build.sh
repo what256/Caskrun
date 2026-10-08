@@ -74,6 +74,7 @@ cp "$PROJECT_ROOT/core/target/$RUST_TARGET/release/caskrun-core" "$STAGED_APP/Co
 cp "$PROJECT_ROOT/assets/caskrun-icon.png" "$STAGED_APP/Contents/Resources/caskrun-icon.png"
 cp "$PROJECT_ROOT/assets/caskrun-menubar-template.png" "$STAGED_APP/Contents/Resources/caskrun-menubar-template.png"
 cp "$PROJECT_ROOT/LICENSE" "$STAGED_APP/Contents/Resources/LICENSE.txt"
+python3 -B "$PROJECT_ROOT/scripts/package-rust-notices.py" "$STAGED_APP/Contents/Resources/RUST_DEPENDENCIES.txt"
 python3 "$PROJECT_ROOT/catalog/validate.py"
 mkdir -p "$STAGED_APP/Contents/Resources/catalog"
 cp "$PROJECT_ROOT/catalog/apps.json" "$STAGED_APP/Contents/Resources/catalog/apps.json"
@@ -86,7 +87,7 @@ for SIZE in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$STAGED_APP/Contents/Resources/CaskrunIcon.icns"
 swiftc -O -target arm64-apple-macos13.0 -parse-as-library "$PROJECT_ROOT/runtime-patches/native_icon.swift" -o "$STAGED_APP/Contents/MacOS/caskrun-native-icon"
-swiftc -O -target arm64-apple-macos14.0 -parse-as-library -D CASKRUN_ICON_LIBRARY "$PROJECT_ROOT/app/CaskrunApp.swift" "$PROJECT_ROOT/runtime-patches/native_icon.swift" -o "$STAGED_APP/Contents/MacOS/Caskrun"
+swiftc -O -target arm64-apple-macos14.0 -parse-as-library -D CASKRUN_ICON_LIBRARY "$PROJECT_ROOT/app/CaskrunApp.swift" "$PROJECT_ROOT/app/LaunchArguments.swift" "$PROJECT_ROOT/app/BottleMaintenanceViews.swift" "$PROJECT_ROOT/runtime-patches/native_icon.swift" -o "$STAGED_APP/Contents/MacOS/Caskrun"
 for BINARY in "$STAGED_APP/Contents/MacOS/Caskrun" "$STAGED_APP/Contents/MacOS/caskrun-core" "$STAGED_APP/Contents/MacOS/caskrun-native-icon"; do
   if [[ "$(lipo -archs "$BINARY")" != arm64 ]]; then
     print -u2 "Expected an ARM64-only binary: $BINARY"

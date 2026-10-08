@@ -141,3 +141,96 @@ fn ordinary_quit_with_closed_stdin_does_not_opt_into_cancellation() {
     assert_eq!(result["stopped_bottles"], 0);
     assert!(result["failures"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn duplicate_eof_cancels_its_lock_wait_and_ordinary_closed_stdin_still_copies() {
+    let fixture = Fixture::new();
+    let created = fixture
+        .command()
+        .args(["create", "Copy cancellation test"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let bottle: Value = serde_json::from_slice(&created.stdout).unwrap();
+    let id = bottle["id"].as_str().unwrap();
+    let dir = fixture.0.join("bottles").join(id);
+    let record = fs::read(dir.join("bottle.json")).unwrap();
+    fs::write(dir.join("prefix/example.exe"), b"original program").unwrap();
+    let lock_path = dir.join(".caskrun.lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    lock.lock().unwrap();
+
+    let mut command = fixture.command();
+    command
+        .args(["duplicate", id])
+        .env("CASKRUN_CANCEL_STDIN", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut running = RunningCore(Some(command.spawn().unwrap()));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(running.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    drop(running.0.as_mut().unwrap().stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if running.0.as_mut().unwrap().try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Duplicate ignored its opted-in EOF cancellation"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = running.0.take().unwrap().wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("Setup canceled"));
+    assert_eq!(fs::read_dir(fixture.0.join("bottles")).unwrap().count(), 1);
+    assert_eq!(fs::read(dir.join("bottle.json")).unwrap(), record);
+    assert_eq!(
+        fs::read(dir.join("prefix/example.exe")).unwrap(),
+        b"original program"
+    );
+    assert!(!dir.join("prefix-record.json").exists());
+    let second_lock = File::options()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    assert!(matches!(
+        second_lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    drop(second_lock);
+    drop(lock);
+
+    // EOF remains harmless for ordinary command-line callers without opt-in.
+    let ordinary = fixture
+        .command()
+        .args(["duplicate", id])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        ordinary.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ordinary.stderr)
+    );
+    let copied: Value = serde_json::from_slice(&ordinary.stdout).unwrap();
+    let copy = fixture
+        .0
+        .join("bottles")
+        .join(copied["id"].as_str().unwrap());
+    assert_eq!(
+        fs::read(copy.join("prefix/example.exe")).unwrap(),
+        b"original program"
+    );
+    assert_eq!(fs::read_dir(fixture.0.join("bottles")).unwrap().count(), 2);
+    assert!(!copy.join("prefix-record.json").exists());
+}

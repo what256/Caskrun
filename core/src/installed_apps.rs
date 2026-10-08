@@ -48,6 +48,10 @@ pub(crate) struct Candidate {
     /// the difference between "no arguments" and "an older core".
     #[serde(default)]
     pub(crate) arguments: Vec<String>,
+    /// A checked directory relative to the prefix, beginning with drive_c.
+    /// None retains the launcher's existing executable-parent behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) working_directory: Option<String>,
 }
 
 struct Found {
@@ -84,17 +88,13 @@ pub(crate) fn discover(prefix: &Path) -> Result<DiscoveryResult, String> {
     let canonical_drive = drive.canonicalize().map_err(|e| e.to_string())?;
     let mut found = Vec::new();
     let mut examined = 0usize;
-    scan_shortcuts(
+    let shortcut_targets = scan_shortcuts(
         &drive,
         &canonical_drive,
         &mut found,
         &mut examined,
         &mut result.truncated,
     );
-    let shortcut_targets: HashSet<String> = found
-        .iter()
-        .map(|item| item.candidate.path.clone())
-        .collect();
     let represented_products: HashSet<PathBuf> = shortcut_targets
         .iter()
         .filter_map(|target| program_files_product_dir(&canonical_drive, target))
@@ -215,6 +215,7 @@ pub(crate) fn discover(prefix: &Path) -> Result<DiscoveryResult, String> {
                     path: resolved.display().to_string(),
                     source: "program-files",
                     arguments: Vec::new(),
+                    working_directory: None,
                 },
                 rank,
             });
@@ -249,6 +250,7 @@ pub(crate) fn discover(prefix: &Path) -> Result<DiscoveryResult, String> {
         let command = (
             item.candidate.path.clone(),
             item.candidate.arguments.clone(),
+            item.candidate.working_directory.clone(),
         );
         if !seen_commands.insert(command) {
             continue;
@@ -283,7 +285,10 @@ fn scan_shortcuts(
     found: &mut Vec<Found>,
     examined: &mut usize,
     truncated: &mut bool,
-) {
+) -> HashSet<String> {
+    // Even an unsupported complete shortcut suppresses a bare EXE fallback.
+    // Otherwise its requested arguments or working directory would be lost.
+    let mut shortcut_targets = HashSet::new();
     let mut pending = VecDeque::new();
     if let Some(root) = real_directory_chain(
         drive,
@@ -429,12 +434,6 @@ fn scan_shortcuts(
             let Some(shortcut) = read_shortcut(&path, &metadata) else {
                 continue;
             };
-            // Dropping a shortcut's arguments would change what opens, so carry
-            // them with the suggestion. A command this parser cannot read exactly
-            // is skipped rather than offered in a partial form.
-            let Some(arguments) = parse_windows_arguments(&shortcut.arguments) else {
-                continue;
-            };
             let Some(target) = resolve_shortcut_target(
                 drive,
                 canonical_drive,
@@ -443,12 +442,27 @@ fn scan_shortcuts(
             ) else {
                 continue;
             };
+            shortcut_targets.insert(target.display().to_string());
+            // A command this parser cannot reproduce completely is skipped.
+            let Some(arguments) = parse_windows_arguments(&shortcut.arguments) else {
+                continue;
+            };
+            let working_directory = match shortcut.working_directory.as_deref() {
+                None | Some("") => None,
+                Some(working) => {
+                    let Some(value) = checked_shortcut_working_directory(drive, working) else {
+                        continue;
+                    };
+                    Some(value)
+                }
+            };
             found.push(Found {
                 candidate: Candidate {
                     name,
                     path: target.display().to_string(),
                     source: directory.source,
                     arguments,
+                    working_directory,
                 },
                 rank: if directory.source == "start-menu" {
                     0
@@ -463,6 +477,7 @@ fn scan_shortcuts(
             }
         }
     }
+    shortcut_targets
 }
 
 /// Split a shortcut's argument string the way Windows splits a command tail,
@@ -800,15 +815,29 @@ fn resolve_shortcut_target(
         return None;
     }
     let target = targets.into_iter().next()?;
-    if let Some(working) = &shortcut.working_directory
-        && !working.is_empty()
-    {
-        let working_path = map_windows_path(drive, shortcut_parent, working)?;
-        if working_path.canonicalize().ok()?.as_path() != target.parent()? {
-            return None;
-        }
-    }
     Some(target)
+}
+
+fn checked_shortcut_working_directory(drive: &Path, input: &str) -> Option<String> {
+    // Relative paths and environment expansion depend on shell-link execution
+    // context. Offer only an exact absolute C: path that maps to a real folder.
+    let windows = input.replace('\\', "/");
+    if windows.len() < 3
+        || !windows.as_bytes()[0].eq_ignore_ascii_case(&b'c')
+        || windows.as_bytes().get(1..3) != Some(b":/")
+        || windows.contains('%')
+    {
+        return None;
+    }
+    let tail = windows[3..].trim_end_matches('/');
+    let value = if tail.is_empty() {
+        "drive_c".to_owned()
+    } else {
+        format!("drive_c/{tail}")
+    };
+    let prefix = drive.parent()?;
+    crate::checked_working_directory(prefix, &value).ok()?;
+    Some(value)
 }
 
 fn map_windows_path(drive: &Path, shortcut_parent: &Path, input: &str) -> Option<PathBuf> {
@@ -1347,6 +1376,7 @@ pub(crate) mod tests {
             path: "/bottle/Nova.exe".into(),
             source: "program-files",
             arguments: Vec::new(),
+            working_directory: None,
         };
         let encoded = serde_json::to_value(&candidate).unwrap();
         assert_eq!(encoded.get("arguments"), Some(&serde_json::json!([])));
@@ -1428,9 +1458,9 @@ pub(crate) mod tests {
             Some("--name \"unfinished"),
         );
         write_shortcut_with_working(
-            &desktop.join("Wrong Working Dir.lnk"),
+            &desktop.join("External Working Dir.lnk"),
             "C:\\Games\\Nova\\Nova.exe",
-            Some("C:\\Games"),
+            Some("Z:\\external"),
             None,
         );
         write_shortcut(
@@ -1481,6 +1511,95 @@ pub(crate) mod tests {
         assert!(!result.truncated);
         fs::remove_dir_all(prefix).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn shortcut_directories_are_preserved_and_distinguish_complete_commands() {
+        let prefix = test_prefix();
+        let exe = prefix.join("drive_c/Program Files/Atlas/Atlas.exe");
+        fake_pe(&exe);
+        fs::create_dir_all(prefix.join("drive_c/Games/Profile One")).unwrap();
+        fs::create_dir_all(prefix.join("drive_c/Games/Profile Two")).unwrap();
+        let desktop = prefix.join("drive_c/users/Public/Desktop");
+        for (name, working) in [
+            ("Atlas One", "C:\\Games\\Profile One"),
+            ("Atlas Two", "C:\\Games\\Profile Two"),
+            ("Atlas One Duplicate", "C:\\Games\\Profile One"),
+            ("Atlas Default", ""),
+            ("Atlas C Drive", "C:\\"),
+        ] {
+            write_shortcut_with_working(
+                &desktop.join(format!("{name}.lnk")),
+                "C:\\Program Files\\Atlas\\Atlas.exe",
+                Some(working),
+                Some("--profile \"two words\""),
+            );
+        }
+        let result = discover(&prefix).unwrap();
+        assert_eq!(result.candidates.len(), 4);
+        let directories: HashSet<_> = result
+            .candidates
+            .iter()
+            .map(|candidate| candidate.working_directory.as_deref())
+            .collect();
+        assert_eq!(
+            directories,
+            HashSet::from([
+                None,
+                Some("drive_c"),
+                Some("drive_c/Games/Profile One"),
+                Some("drive_c/Games/Profile Two")
+            ])
+        );
+        assert!(result.candidates.iter().all(|candidate| {
+            candidate.path == exe.display().to_string()
+                && candidate.arguments == ["--profile", "two words"]
+        }));
+        fs::remove_dir_all(prefix).unwrap();
+    }
+
+    #[test]
+    fn unsafe_shortcut_directories_never_fall_back_to_bare_program_files_executables() {
+        for working in [
+            "C:\\missing",
+            "D:\\Games",
+            "Z:\\external",
+            "\\\\server\\share",
+            "C:\\Games\\..\\Atlas",
+            "C:\\Games\\.\\Atlas",
+            "..\\Games",
+            "%PROGRAMFILES%\\Atlas",
+            "C:\\Games\\Atlas. ",
+            "C:\\Games\\NUL",
+        ] {
+            let prefix = test_prefix();
+            fake_pe(&prefix.join("drive_c/Program Files/Atlas/Atlas.exe"));
+            fs::create_dir_all(prefix.join("drive_c/Atlas")).unwrap();
+            fs::create_dir_all(prefix.join("drive_c/Games/Atlas")).unwrap();
+            write_shortcut_with_working(
+                &prefix.join("drive_c/users/Public/Desktop/Atlas.lnk"),
+                "C:\\Program Files\\Atlas\\Atlas.exe",
+                Some(working),
+                None,
+            );
+            assert!(
+                discover(&prefix).unwrap().candidates.is_empty(),
+                "{working}"
+            );
+            fs::remove_dir_all(prefix).unwrap();
+        }
+        let prefix = test_prefix();
+        fake_pe(&prefix.join("drive_c/Program Files/Atlas/Atlas.exe"));
+        fs::create_dir_all(prefix.join("drive_c/Real")).unwrap();
+        symlink("Real", prefix.join("drive_c/Linked")).unwrap();
+        write_shortcut_with_working(
+            &prefix.join("drive_c/users/Public/Desktop/Atlas.lnk"),
+            "C:\\Program Files\\Atlas\\Atlas.exe",
+            Some("C:\\Linked"),
+            None,
+        );
+        assert!(discover(&prefix).unwrap().candidates.is_empty());
+        fs::remove_dir_all(prefix).unwrap();
     }
 
     #[test]

@@ -381,12 +381,13 @@ struct DiscoveredProgram: Decodable, Identifiable, Sendable {
     /// A shortcut's own Windows arguments. Two shortcuts can point at one
     /// program and still be different commands, so the identity includes them.
     let arguments: [String]
+    let working_directory: String?
     /// A program and its arguments together: comparing paths alone would treat
     /// two different commands for one program as the same suggestion.
-    var command: String { ([path.lowercased()] + arguments).joined(separator: "\u{0}") }
+    var command: String { ([path.lowercased(), working_directory ?? ""] + arguments).joined(separator: "\u{0}") }
     var id: String { command }
 
-    private enum CodingKeys: String, CodingKey { case name, path, source, arguments }
+    private enum CodingKeys: String, CodingKey { case name, path, source, arguments, working_directory }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -395,6 +396,7 @@ struct DiscoveredProgram: Decodable, Identifiable, Sendable {
         source = try values.decode(String.self, forKey: .source)
         // A program with no arguments may arrive without the key at all.
         arguments = try values.decodeIfPresent([String].self, forKey: .arguments) ?? []
+        working_directory = try values.decodeIfPresent(String.self, forKey: .working_directory)
     }
 }
 
@@ -420,10 +422,11 @@ struct SavedLauncher: Codable, Identifiable, Sendable {
     let hidden_from_home: Bool
     // Older launcher records omit this field; the core treats that as no saved options.
     let saved_arguments: [String]?
+    let working_directory: String?
     /// The same program-and-arguments key a discovered suggestion uses, so an
     /// already-saved command can be matched against a suggestion exactly.
     var command: String {
-        ([path.lowercased()] + (saved_arguments ?? [])).joined(separator: "\u{0}")
+        ([path.lowercased(), working_directory ?? ""] + (saved_arguments ?? [])).joined(separator: "\u{0}")
     }
 }
 
@@ -1007,13 +1010,19 @@ final class CaskrunModel: ObservableObject {
     @Published var bottleOperationLabel = "Updating bottle…"
     @Published var isProbingRuntime = false
     @Published var runtimeProbe: RuntimeProbeResult?
+    @Published var pendingRun: OneTimeProgram?
+    @Published private(set) var bottleWindowsVersions: [String: BottleWindowsVersion] = [:]
+    @Published private(set) var loadingWindowsVersions: Set<String> = []
+    @Published private(set) var windowsVersionErrors: [String: String] = [:]
     private var runtimeProbeGeneration = 0
     private var catalogMonitorGeneration = 0
     private var requestedIcons: Set<String> = []
     private var launcherIconStamps: [String: String] = [:]
     private var bottleIconStamps: [String: String] = [:]
+    private var artworkGenerations: [String: Int] = [:]
     private var activeManualInstaller: CoreInvocationCancellation?
     private var activeCatalogCancellation: CoreInvocationCancellation?
+    private var activeMaintenanceCancellation: CoreInvocationCancellation?
 
     var hasBundledRuntime: Bool { Self.bundledWinePath != nil }
     var usesBundledRuntime: Bool { Self.bundledWinePath == wineExecutable && hasBundledRuntime }
@@ -1025,7 +1034,8 @@ final class CaskrunModel: ObservableObject {
     private func allowCoreCommandDuringShutdown(_ arguments: [String]) throws {
         let readCommands: Set<String> = ["overview", "status", "list", "deleted", "catalog-attempts",
                                          "apps", "app-icon", "bottle-icon", "bottle-resolution", "bottle-graphics",
-                                         "discover-apps", "steam-games", "logs", "read-log", "prefix-path"]
+                                         "discover-apps", "steam-games", "logs", "read-log", "prefix-path",
+                                         "installed-programs", "diagnostics", "bottle-notes", "bottle-windows-version"]
         if isQuitting, let command = arguments.first,
            command != "quit-all-bottles", !readCommands.contains(command) {
             throw NSError(domain: "Caskrun", code: 1,
@@ -1039,6 +1049,7 @@ final class CaskrunModel: ObservableObject {
         CaskrunHomeClickRouter.shared.cancel()
         activeManualInstaller?.cancel()
         activeCatalogCancellation?.cancel()
+        activeMaintenanceCancellation?.cancel()
         do {
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: .seconds(30))
@@ -1110,8 +1121,8 @@ final class CaskrunModel: ObservableObject {
         return "adaptive-v1:\(status.wine_path ?? "none"):\(renderer.map(iconStamp(for:)) ?? "none")"
     }
 
-    private func launcherIconStamp(_ launcher: SavedLauncher) -> String {
-        "\(artworkPolicyStamp()):\(launcher.name):\(iconStamp(for: launcher.path))"
+    private func launcherIconStamp(_ launcher: SavedLauncher, in bottleID: String) -> String {
+        "\(artworkPolicyStamp()):\(artworkGenerations[bottleID, default: 0]):\(launcher.name):\(iconStamp(for: launcher.path))"
     }
 
     private func iconStamp(for path: String) -> String {
@@ -1122,14 +1133,14 @@ final class CaskrunModel: ObservableObject {
     }
 
     private func bottleIconStamp(_ bottle: Bottle) -> String {
-        artworkPolicyStamp() + ":" + (launchers[bottle.id] ?? []).prefix(64).map { launcher in
-            "\(launcher.id):\(launcherIconStamp(launcher))"
+        "\(artworkPolicyStamp()):\(artworkGenerations[bottle.id, default: 0]):" + (launchers[bottle.id] ?? []).prefix(64).map { launcher in
+            "\(launcher.id):\(launcherIconStamp(launcher, in: bottle.id))"
         }.joined(separator: "|")
     }
 
     func loadLauncherIcon(_ launcher: SavedLauncher, in bottle: Bottle) {
         let key = "\(bottle.id):\(launcher.id)"
-        let stamp = launcherIconStamp(launcher)
+        let stamp = launcherIconStamp(launcher, in: bottle.id)
         let requestKey = "app:\(key)"
         guard launcherIcons[key] == nil || launcherIconStamps[key] != stamp else { return }
         guard requestedIcons.insert(requestKey).inserted else { return }
@@ -1137,13 +1148,13 @@ final class CaskrunModel: ObservableObject {
             defer {
                 requestedIcons.remove(requestKey)
                 if let current = launchers[bottle.id]?.first(where: { $0.id == launcher.id }),
-                   launcherIconStamp(current) != stamp {
+                   launcherIconStamp(current, in: bottle.id) != stamp {
                     loadLauncherIcon(current, in: bottle)
                 }
             }
             let result = try? await callAsync(["app-icon", bottle.id, launcher.id], as: AppIconResult.self)
             guard let current = launchers[bottle.id]?.first(where: { $0.id == launcher.id }),
-                  launcherIconStamp(current) == stamp else { return }
+                  launcherIconStamp(current, in: bottle.id) == stamp else { return }
             guard let result, let path = result.path,
                   let icon = NSImage(contentsOfFile: path) else {
                 launcherIcons.removeValue(forKey: key)
@@ -1235,12 +1246,15 @@ final class CaskrunModel: ObservableObject {
     }
 
     func duplicateBottle(_ bottle: Bottle) {
-        guard !isQuitting && !isManagingBottle else { return }
+        guard !isQuitting && !isManagingBottle && !isLaunching else { return }
         isManagingBottle = true
+        bottleOperationLabel = "Duplicating \(bottle.name)…"
+        let cancellation = CoreInvocationCancellation()
+        activeMaintenanceCancellation = cancellation
         Task {
-            defer { isManagingBottle = false }
+            defer { activeMaintenanceCancellation = nil; isManagingBottle = false; bottleOperationLabel = "Updating bottle…" }
             do {
-                let copy = try await callAsync(["duplicate", bottle.id], as: Bottle.self)
+                let copy = try await callAsync(["duplicate", bottle.id], as: Bottle.self, cancellation: cancellation)
                 refresh()
                 selectedBottleID = copy.id
                 message = "Created \(copy.name). Its files and saved apps are separate from \(bottle.name)."
@@ -1296,19 +1310,23 @@ final class CaskrunModel: ObservableObject {
     }
 
     func exportBottle(_ bottle: Bottle) {
-        guard !isQuitting && !isManagingBottle else { return }
+        guard !isQuitting && !isManagingBottle && !isLaunching else { return }
         let panel = NSSavePanel()
-        panel.message = "Save a portable bottle folder. Close Windows apps in this bottle first."
+        panel.message = "Save a new compressed bottle backup. Close Windows apps in this bottle first."
         panel.nameFieldStringValue = bottle.name
             .replacingOccurrences(of: "/", with: "-")
-            .replacingOccurrences(of: ":", with: "-") + ".caskrun-bottle"
+            .replacingOccurrences(of: ":", with: "-") + ".caskrun-backup"
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard !isQuitting && !isManagingBottle && !isLaunching else { return }
         bottleOperationLabel = "Exporting \(bottle.name)…"
         isManagingBottle = true
+        let cancellation = CoreInvocationCancellation()
+        activeMaintenanceCancellation = cancellation
         Task {
-            defer { isManagingBottle = false; bottleOperationLabel = "Updating bottle…" }
+            defer { activeMaintenanceCancellation = nil; isManagingBottle = false; bottleOperationLabel = "Updating bottle…" }
             do {
-                let result = try await callAsync(["export", bottle.id, url.path], as: BottleExportResult.self)
+                let result = try await callAsync(["export-archive", bottle.id, url.path], as: BottleExportResult.self,
+                                                cancellation: cancellation)
                 var note = result.external_launchers == 0 ? "" : " \(result.external_launchers) external saved app path(s) may need to be reselected after restore."
                 if result.host_folders > 0 {
                     // The backup names these folders; it never copies their contents.
@@ -1320,19 +1338,28 @@ final class CaskrunModel: ObservableObject {
     }
 
     func importBottle() {
-        guard !isQuitting && !isManagingBottle else { return }
+        guard !isQuitting && !isManagingBottle && !isLaunching else { return }
         let panel = NSOpenPanel()
-        panel.message = "Choose a .caskrun-bottle backup folder"
-        panel.canChooseFiles = false
+        panel.message = "Choose a .caskrun-backup file or a .caskrun-bottle backup folder"
+        panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard !isQuitting && !isManagingBottle && !isLaunching else { return }
+        let compressed = url.pathExtension.lowercased() == "caskrun-backup"
+        if !compressed && url.pathExtension.lowercased() != "caskrun-bottle" {
+            message = "Choose a Caskrun backup file or backup folder."
+            return
+        }
         bottleOperationLabel = "Importing \(url.lastPathComponent)…"
         isManagingBottle = true
+        let cancellation = CoreInvocationCancellation()
+        activeMaintenanceCancellation = cancellation
         Task {
-            defer { isManagingBottle = false; bottleOperationLabel = "Updating bottle…" }
+            defer { activeMaintenanceCancellation = nil; isManagingBottle = false; bottleOperationLabel = "Updating bottle…" }
             do {
-                let result = try await callAsync(["import", url.path], as: BottleImportResult.self)
+                let result = try await callAsync([compressed ? "import-archive" : "import", url.path], as: BottleImportResult.self,
+                                                cancellation: cancellation)
                 refresh()
                 selectedBottleID = result.bottle.id
                 importedBottleID = result.bottle.id
@@ -1449,6 +1476,9 @@ final class CaskrunModel: ObservableObject {
             // Save the whole command: dropping a shortcut's arguments would start
             // a different program than the shortcut does.
             var command = ["add-app", bottle.id, program.name, program.path]
+            if let directory = program.working_directory {
+                command.append(contentsOf: ["--working-directory", directory])
+            }
             if !program.arguments.isEmpty {
                 command.append("--")
                 command.append(contentsOf: program.arguments)
@@ -1520,19 +1550,26 @@ final class CaskrunModel: ObservableObject {
             return
         }
         let chosenPath = url.resolvingSymlinksInPath().standardizedFileURL.path
-        if let savedLauncher = (launchers[bottle.id] ?? []).first(where: {
+        guard !isQuitting && !isLaunching && !isManagingBottle else { return }
+        let savedLaunchers = (launchers[bottle.id] ?? []).filter {
             URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().standardizedFileURL.path == chosenPath
-        }) {
-            // Saved launchers may carry recipe arguments and runtime behavior,
-            // including Steam's CEF flag and Dock identity.
-            runLauncher(savedLauncher, in: bottle)
+        }
+        pendingRun = OneTimeProgram(bottle: bottle, url: url, savedLaunchers: savedLaunchers)
+    }
+
+    func runOnce(_ program: OneTimeProgram, arguments: [String], launcher: SavedLauncher?) {
+        guard !isQuitting && !isLaunching && !isManagingBottle && status.wine_path != nil else { return }
+        if let saved = launcher {
+            // Preserve saved recipe options, Steam identity and bootstrap routing.
+            runLauncher(saved, in: program.bottle, arguments: arguments)
             return
         }
         isLaunching = true
         Task {
             defer { isLaunching = false }
             do {
-                _ = try await callAsync(["launch", bottle.id, url.path], as: LaunchResult.self)
+                _ = try await callAsync(["launch", program.bottle.id, program.url.path, "--"] + arguments,
+                                        as: LaunchResult.self)
                 CaskrunWindowBridge.shared.hideMainWindow()
             } catch { message = error.localizedDescription }
         }
@@ -1729,6 +1766,101 @@ final class CaskrunModel: ObservableObject {
                          as: SavedLauncher.self)
             refresh()
         } catch { message = error.localizedDescription }
+    }
+
+    func renameLauncher(_ launcher: SavedLauncher, in bottle: Bottle, to name: String) {
+        guard !isQuitting && !isLaunching && !isManagingBottle else { return }
+        do {
+            _ = try call(["rename-app", bottle.id, launcher.id, name], as: SavedLauncher.self)
+            refresh()
+        } catch { message = error.localizedDescription }
+    }
+
+    func repairIcons(in bottle: Bottle) {
+        guard !isQuitting && !isLaunching && !isManagingBottle else { return }
+        isManagingBottle = true
+        bottleOperationLabel = "Rebuilding icons…"
+        Task {
+            defer { isManagingBottle = false; bottleOperationLabel = "Updating bottle…" }
+            do {
+                let result = try await callAsync(["rebuild-icons", bottle.id], as: IconRepairResult.self)
+                guard result.bottle_id == bottle.id else { return }
+                artworkGenerations[bottle.id, default: 0] += 1
+                bottleIcons.removeValue(forKey: bottle.id)
+                bottleIconStamps.removeValue(forKey: bottle.id)
+                for launcher in launchers[bottle.id] ?? [] {
+                    let key = "\(bottle.id):\(launcher.id)"
+                    launcherIcons.removeValue(forKey: key)
+                    launcherIconStamps.removeValue(forKey: key)
+                    loadLauncherIcon(launcher, in: bottle)
+                }
+                loadBottleIcon(bottle)
+                message = result.message
+            } catch { message = error.localizedDescription }
+        }
+    }
+
+    func installedPrograms(in bottle: Bottle) async throws -> ProgramInventory {
+        try await callAsync(["installed-programs", bottle.id], as: ProgramInventory.self)
+    }
+
+    func diagnostics(in bottle: Bottle) async throws -> BottleDiagnosticReport {
+        try await callAsync(["diagnostics", bottle.id], as: BottleDiagnosticReport.self)
+    }
+
+    func notes(in bottle: Bottle) async throws -> BottleNotes {
+        try await callAsync(["bottle-notes", bottle.id], as: BottleNotes.self)
+    }
+
+    func saveNotes(_ notes: String, in bottle: Bottle) async throws {
+        guard !isQuitting && !isLaunching && !isManagingBottle else {
+            throw CocoaError(.userCancelled)
+        }
+        isManagingBottle = true
+        defer { isManagingBottle = false }
+        let result = try await callAsync(["set-bottle-notes", bottle.id, notes], as: BottleNotes.self)
+        guard result.bottle_id == bottle.id else { throw CocoaError(.coderInvalidValue) }
+    }
+
+    func refreshWindowsVersion(in bottle: Bottle) {
+        guard !isQuitting && !loadingWindowsVersions.contains(bottle.id) else { return }
+        loadingWindowsVersions.insert(bottle.id)
+        let wine = wineExecutable
+        Task {
+            defer { loadingWindowsVersions.remove(bottle.id) }
+            do {
+                let result = try await callAsync(["bottle-windows-version", bottle.id], as: BottleWindowsVersion.self)
+                guard result.bottle_id == bottle.id, wineExecutable == wine,
+                      bottles.contains(where: { $0.id == bottle.id }) else { return }
+                bottleWindowsVersions[bottle.id] = result
+                windowsVersionErrors.removeValue(forKey: bottle.id)
+            } catch {
+                guard wineExecutable == wine else { return }
+                windowsVersionErrors[bottle.id] = error.localizedDescription
+            }
+        }
+    }
+
+    func setWindowsVersion(_ version: String, in bottle: Bottle) {
+        guard !isQuitting && !isLaunching && !isManagingBottle && !loadingWindowsVersions.contains(bottle.id) else { return }
+        isManagingBottle = true
+        loadingWindowsVersions.insert(bottle.id)
+        bottleOperationLabel = "Updating Windows version…"
+        let wine = wineExecutable
+        Task {
+            defer { loadingWindowsVersions.remove(bottle.id); isManagingBottle = false; bottleOperationLabel = "Updating bottle…" }
+            do {
+                let result = try await callAsync(["set-bottle-windows-version", bottle.id, version], as: BottleWindowsVersion.self)
+                guard result.bottle_id == bottle.id, wineExecutable == wine else { return }
+                bottleWindowsVersions[bottle.id] = result
+                windowsVersionErrors.removeValue(forKey: bottle.id)
+            } catch {
+                guard wineExecutable == wine else { return }
+                windowsVersionErrors[bottle.id] = error.localizedDescription
+                if let current = try? await callAsync(["bottle-windows-version", bottle.id], as: BottleWindowsVersion.self),
+                   current.bottle_id == bottle.id, wineExecutable == wine { bottleWindowsVersions[bottle.id] = current }
+            }
+        }
     }
 
     func logs(in bottle: Bottle) async throws -> [BottleLog] {
@@ -2160,21 +2292,11 @@ private struct RunWithOptionsSheet: View {
     @State private var argumentLines = ""
 
     private var arguments: [String] {
-        argumentLines.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        LaunchArgumentDraft.parse(argumentLines)
     }
 
     private var validationMessage: String? {
-        let all = (item.launcher.saved_arguments ?? []) + arguments
-        if all.count > 64 { return "Saved and temporary arguments must total at most 64." }
-        if all.contains(where: { $0.utf8.count > 4096 }) {
-            return "Each argument must be 4096 bytes or shorter."
-        }
-        if all.reduce(0, { $0 + $1.utf8.count }) > 16 * 1024 {
-            return "Saved and temporary arguments must total 16 KiB or less."
-        }
-        return nil
+        LaunchArgumentDraft.validation(arguments, saved: item.launcher.saved_arguments ?? [])
     }
 
     var body: some View {
@@ -2230,20 +2352,11 @@ private struct SavedLaunchArgumentsSheet: View {
     }
 
     private var arguments: [String] {
-        argumentLines.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        LaunchArgumentDraft.parse(argumentLines)
     }
 
     private var validationMessage: String? {
-        if arguments.count > 64 { return "Use at most 64 arguments." }
-        if arguments.contains(where: { $0.utf8.count > 4096 }) {
-            return "Each argument must be 4096 bytes or shorter."
-        }
-        if arguments.reduce(0, { $0 + $1.utf8.count }) > 16 * 1024 {
-            return "Arguments must total 16 KiB or less."
-        }
-        return nil
+        LaunchArgumentDraft.validation(arguments)
     }
 
     var body: some View {
@@ -2452,6 +2565,10 @@ struct CaskrunApp: App {
     @State private var logBottle: Bottle?
     @State private var runOptionsItem: SavedProgram?
     @State private var savedArgumentsItem: SavedProgram?
+    @State private var renameLauncherItem: SavedProgram?
+    @State private var inventoryBottle: Bottle?
+    @State private var diagnosticBottle: Bottle?
+    @State private var notesBottle: Bottle?
     @State private var hoveredPage: Page?
     @State private var hoveredInstall = false
     @State private var hoveredCatalogID: String?
@@ -2911,6 +3028,23 @@ struct CaskrunApp: App {
                 SavedLaunchArgumentsSheet(item: item) { arguments in
                     model.setLauncherArguments(item.launcher, in: item.bottle, arguments: arguments)
                 }
+            }
+            .sheet(item: $renameLauncherItem) { item in
+                RenameLauncherSheet(launcher: item.launcher, model: model) { name in
+                    model.renameLauncher(item.launcher, in: item.bottle, to: name)
+                }
+            }
+            .sheet(item: $model.pendingRun) { program in
+                OneTimeRunSheet(program: program, model: model)
+            }
+            .sheet(item: $inventoryBottle) { bottle in
+                InstalledProgramsView(model: model, bottle: bottle)
+            }
+            .sheet(item: $diagnosticBottle) { bottle in
+                BottleDiagnosticsView(model: model, bottle: bottle)
+            }
+            .sheet(item: $notesBottle) { bottle in
+                BottleNotesView(model: model, bottle: bottle)
             }
         }
         .defaultSize(width: 1000, height: 680)
@@ -3458,6 +3592,7 @@ struct CaskrunApp: App {
                     VStack(spacing: 6) {
                         bottleAction("Run with Options…", symbol: "play.circle") { runOptionsItem = item }
                         bottleAction("Edit Saved Arguments…", symbol: "text.alignleft") { savedArgumentsItem = item }
+                        bottleAction("Rename App…", symbol: "pencil") { renameLauncherItem = item }
                         bottleAction(item.launcher.hidden_from_home ? "Show on Home" : "Hide from Home",
                                      symbol: item.launcher.hidden_from_home ? "eye" : "eye.slash") {
                             model.setLauncherVisibility(item.launcher, in: bottle,
@@ -3549,6 +3684,38 @@ struct CaskrunApp: App {
             .foregroundStyle(.secondary)
     }
 
+    private func bottleWindowsVersionPanel(for bottle: Bottle) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let status = model.bottleWindowsVersions[bottle.id] {
+                Picker("Windows version", selection: Binding(
+                    get: { model.bottleWindowsVersions[bottle.id]?.selected_version ?? "default" },
+                    set: { model.setWindowsVersion($0, in: bottle) }
+                )) {
+                    Text("Engine default").tag("default")
+                    Text("Windows 11").tag("win11")
+                    Text("Windows 10").tag("win10")
+                    Text("Windows 8.1").tag("win81")
+                    Text("Windows 8").tag("win8")
+                    Text("Windows 7").tag("win7")
+                    Text("Windows Vista").tag("vista")
+                    Text("Windows XP").tag("winxp")
+                }
+                .disabled(model.isQuitting || model.isManagingBottle || model.isLaunching || model.status.wine_path == nil || model.loadingWindowsVersions.contains(bottle.id))
+                Text("Changes the compatibility version reported to Windows apps. Close them before changing it; app-specific Wine settings take priority.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let warning = status.warning { Text(warning).font(.caption).foregroundStyle(.secondary) }
+            } else if model.loadingWindowsVersions.contains(bottle.id) {
+                ProgressView("Reading Windows version…").controlSize(.small)
+            }
+            if let error = model.windowsVersionErrors[bottle.id] {
+                Text(error).font(.caption).foregroundStyle(.orange)
+                Button("Retry") { model.refreshWindowsVersion(in: bottle) }
+                    .disabled(model.isQuitting || model.isManagingBottle || model.isLaunching)
+            }
+        }
+        .task(id: "\(bottle.id):\(model.wineExecutable)") { model.refreshWindowsVersion(in: bottle) }
+    }
+
     private func bottleActionsPanel(for bottle: Bottle) -> some View {
         let busy = model.isLaunching || model.isManagingBottle
         let runtimeMissing = model.status.wine_path == nil
@@ -3568,6 +3735,8 @@ struct CaskrunApp: App {
             Divider()
             DisclosureGroup(isExpanded: $showBottleTools) {
                 VStack(spacing: 6) {
+                    bottleWindowsVersionPanel(for: bottle)
+                    Divider().padding(.vertical, 6)
                     bottleAction("Wine Configuration", symbol: "slider.horizontal.3") { model.openWineConfiguration(in: bottle) }
                     bottleAction("Game Controllers", symbol: "gamecontroller") { model.openControllerPanel(in: bottle) }
                     bottleAction("Task Manager", symbol: "list.bullet.rectangle") { model.openTaskManager(in: bottle) }
@@ -3593,6 +3762,11 @@ struct CaskrunApp: App {
                     bottleAction("Quit Windows apps…", symbol: "xmark.circle") { quitTarget = bottle }
                         .disabled(busy || runtimeMissing)
                     bottleAction("View Logs", symbol: "doc.text") { logBottle = bottle }
+                    bottleAction("Installed Programs…", symbol: "list.bullet.rectangle") { inventoryBottle = bottle }
+                    bottleAction("Rebuild App Icons", symbol: "arrow.triangle.2.circlepath") { model.repairIcons(in: bottle) }
+                        .disabled(busy)
+                    bottleAction("Diagnostics…", symbol: "stethoscope") { diagnosticBottle = bottle }
+                    bottleAction("Bottle Notes…", symbol: "note.text") { notesBottle = bottle }
                 }
                 .padding(.top, 12)
             } label: {
@@ -4106,6 +4280,7 @@ private struct BottleLogsView: View {
     @State private var contentError: String?
     @State private var isLoadingList = false
     @State private var isLoadingContent = false
+    @State private var exportError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -4135,6 +4310,11 @@ private struct BottleLogsView: View {
         .padding(20)
         .frame(width: 840)
         .task { await loadLogs() }
+        .alert("Could not save log", isPresented: Binding(
+            get: { exportError != nil }, set: { if !$0 { exportError = nil } }
+        )) {
+            Button("OK") { exportError = nil }
+        } message: { Text(exportError ?? "") }
     }
 
     private var logList: some View {
@@ -4197,6 +4377,12 @@ private struct BottleLogsView: View {
                         Button("Copy") {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(selectedContent.content, forType: .string)
+                        }
+                        Button("Save Text…") {
+                            do {
+                                try LocalReportSave.text(selectedContent.content, name: "Caskrun-log.txt",
+                                    message: "Saves the displayed log text, including any local paths or account data it contains.")
+                            } catch { exportError = error.localizedDescription }
                         }
                     }
                     if selectedContent.truncated {

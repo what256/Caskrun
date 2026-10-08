@@ -1,17 +1,21 @@
 mod app_icons;
 mod battle_net_install;
+mod bottle_archive;
 mod bottle_control;
+mod bottle_details;
 mod bottle_graphics;
 mod bottle_resolution;
 mod bottle_xdg;
 mod cancellation;
 mod crossover_import;
+mod diagnostics;
 mod epic_install;
 mod gog_install;
 mod installed_apps;
 mod itch_install;
 mod native_app_identity;
 mod prefix_processes;
+mod program_inventory;
 mod publisher_install;
 mod rockstar_install;
 mod runtime_identity;
@@ -30,7 +34,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -38,6 +42,7 @@ use uuid::Uuid;
 
 unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
+    fn fchdir(fd: i32) -> i32;
     fn renameatx_np(
         from_fd: i32,
         from: *const c_char,
@@ -64,6 +69,8 @@ struct Launcher {
     hidden_from_home: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     saved_arguments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    working_directory: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -227,6 +234,8 @@ struct PortableLauncher {
     hidden_from_home: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     saved_arguments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    working_directory: Option<String>,
     path: PortableLauncherPath,
 }
 
@@ -913,6 +922,94 @@ fn validate_relative_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Working directories have one portable spelling and can only name real
+/// directories inside this prefix's C: drive. Host paths, drive mappings,
+/// traversal, Windows aliases and links are deliberately unsupported.
+fn validate_working_directory_value(value: &str) -> Result<(), String> {
+    if value.len() > 4096
+        || value.chars().any(char::is_control)
+        || value.contains(['\\', ':', '%', '<', '>', '"', '|', '?', '*'])
+        || !value.split('/').enumerate().all(|(index, part)| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.ends_with(['.', ' '])
+                && (index != 0 || part == "drive_c")
+                && !is_windows_device_component(part)
+        })
+    {
+        return Err(
+            "Working directory must be a safe prefix-relative C: folder beginning with drive_c."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn is_windows_device_component(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix).is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        })
+}
+
+struct CheckedWorkingDirectory {
+    path: PathBuf,
+    guard: File,
+    snapshot: fs::Metadata,
+}
+
+impl CheckedWorkingDirectory {
+    fn revalidate(&self) -> Result<(), String> {
+        let (_guard, current) = open_stable_directory(&self.path)
+            .map_err(|_| "Working directory changed or is no longer a real bottle folder")?;
+        if !same_identity(&self.snapshot, &current)
+            || !same_identity(
+                &self.snapshot,
+                &self.guard.metadata().map_err(|e| e.to_string())?,
+            )
+        {
+            return Err("Working directory changed before launch".into());
+        }
+        Ok(())
+    }
+}
+
+fn checked_working_directory(
+    prefix: &Path,
+    value: &str,
+) -> Result<CheckedWorkingDirectory, String> {
+    validate_working_directory_value(value)?;
+    let (_prefix_guard, _) = open_stable_directory(prefix)
+        .map_err(|_| "Working directory requires a real bottle prefix")?;
+    let path = prefix.join(value);
+    let (guard, snapshot) = open_stable_directory(&path)
+        .map_err(|_| "Working directory is missing, external, or contains a link")?;
+    Ok(CheckedWorkingDirectory {
+        path,
+        guard,
+        snapshot,
+    })
+}
+
+fn validate_portable_working_directories(
+    source: &Path,
+    launchers: &[PortableLauncher],
+) -> Result<(), String> {
+    for launcher in launchers {
+        if let Some(value) = &launcher.working_directory {
+            checked_working_directory(&source.join("prefix"), value)?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_backup_symlink(relative: &Path, target: &Path) -> Result<(), String> {
     // Wine's standard Z: drive deliberately maps the host filesystem. Preserve only
     // that well-known absolute link; never follow it while copying a bottle.
@@ -990,9 +1087,10 @@ fn assert_stable_path(path: &Path, snapshot: &fs::Metadata) -> Result<(), String
 }
 
 fn copy_stable_file(from: &Path, to: &Path, before: &fs::Metadata) -> Result<(), String> {
+    cancellation::check()?;
     let mut input = OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW_ANY)
+        .custom_flags(O_NOFOLLOW_ANY | 0x4)
         .open(from)
         .map_err(|e| format!("Could not safely open {}: {e}", from.display()))?;
     let opened = input.metadata().map_err(|e| e.to_string())?;
@@ -1009,7 +1107,8 @@ fn copy_stable_file(from: &Path, to: &Path, before: &fs::Metadata) -> Result<(),
         .custom_flags(O_NOFOLLOW_ANY)
         .open(to)
         .map_err(|e| format!("Could not safely create {}: {e}", to.display()))?;
-    std::io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+    copy_cancellable(&mut input, &mut output)?;
+    cancellation::check()?;
     output
         .set_permissions(before.permissions())
         .map_err(|e| e.to_string())?;
@@ -1022,6 +1121,68 @@ fn copy_stable_file(from: &Path, to: &Path, before: &fs::Metadata) -> Result<(),
     assert_stable_path(from, before)
 }
 
+fn copy_cancellable(input: &mut impl Read, output: &mut impl std::io::Write) -> Result<(), String> {
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        cancellation::check()?;
+        let count = match input.read(&mut buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.map_err(|e| e.to_string())?,
+        };
+        cancellation::check()?;
+        if count == 0 {
+            return Ok(());
+        }
+        output
+            .write_all(&buffer[..count])
+            .map_err(|e| e.to_string())?;
+    }
+}
+
+// A copied directory can already have its original read-only permissions when
+// a later file fails or cancellation arrives. Remove only the newly created
+// destination held by this invocation, and never follow payload links.
+fn remove_owned_copy_directory(path: &Path, guard: &File) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !same_identity(&metadata, &guard.metadata().map_err(|e| e.to_string())?) {
+        return Err("Copy destination changed; cleanup preserved it".into());
+    }
+    guard
+        .set_permissions(fs::Permissions::from_mode(0o700))
+        .map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|e| e.to_string())?;
+        if metadata.file_type().is_dir() {
+            let (child, _) = open_stable_directory(&entry.path())?;
+            remove_owned_copy_directory(&entry.path(), &child)?;
+        } else {
+            fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+        }
+    }
+    if !same_identity(
+        &fs::symlink_metadata(path).map_err(|e| e.to_string())?,
+        &guard.metadata().map_err(|e| e.to_string())?,
+    ) {
+        return Err("Copy destination changed during cleanup; it was preserved".into());
+    }
+    fs::remove_dir(path).map_err(|e| e.to_string())
+}
+
+fn finish_owned_copy<T>(path: &Path, guard: &File, result: Result<T, String>) -> Result<T, String> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => match remove_owned_copy_directory(path, guard) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(format!("{error}. Owned copy cleanup failed: {cleanup}")),
+        },
+    }
+}
+
 fn copy_tree_contents(
     policy: &mut CopyPolicy<'_>,
     source: &Path,
@@ -1029,8 +1190,10 @@ fn copy_tree_contents(
     relative: &Path,
     excluded_at_root: &[&str],
 ) -> Result<(), String> {
+    cancellation::check()?;
     let (_directory_guard, directory_snapshot) = open_stable_directory(source)?;
     for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
+        cancellation::check()?;
         assert_stable_path(source, &directory_snapshot)?;
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name();
@@ -1082,6 +1245,7 @@ fn copy_tree_contents(
             }
             fs::create_dir(&to).map_err(|e| e.to_string())?;
             copy_tree_contents(policy, &from, &to, &child_relative, &[])?;
+            cancellation::check()?;
             fs::set_permissions(&to, before.permissions()).map_err(|e| e.to_string())?;
         } else if kind.is_file() {
             copy_stable_file(&from, &to, &before)?;
@@ -1092,11 +1256,15 @@ fn copy_tree_contents(
             ));
         }
     }
+    cancellation::check()?;
     assert_stable_path(source, &directory_snapshot)?;
     Ok(())
 }
 
-fn portable_launchers(source: &Path, launchers: Vec<Launcher>) -> Vec<PortableLauncher> {
+fn portable_launchers(
+    source: &Path,
+    launchers: Vec<Launcher>,
+) -> Result<Vec<PortableLauncher>, String> {
     let source_prefix = source
         .join("prefix")
         .canonicalize()
@@ -1104,6 +1272,9 @@ fn portable_launchers(source: &Path, launchers: Vec<Launcher>) -> Vec<PortableLa
     launchers
         .into_iter()
         .map(|launcher| {
+            if let Some(value) = &launcher.working_directory {
+                checked_working_directory(&source.join("prefix"), value)?;
+            }
             let path = Path::new(&launcher.path);
             let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
             let portable_path = match resolved.strip_prefix(&source_prefix) {
@@ -1112,14 +1283,15 @@ fn portable_launchers(source: &Path, launchers: Vec<Launcher>) -> Vec<PortableLa
                 }
                 _ => PortableLauncherPath::ExternalAbsolute(launcher.path),
             };
-            PortableLauncher {
+            Ok(PortableLauncher {
                 id: launcher.id,
                 name: launcher.name,
                 created_at: launcher.created_at,
                 hidden_from_home: launcher.hidden_from_home,
                 saved_arguments: launcher.saved_arguments,
+                working_directory: launcher.working_directory,
                 path: portable_path,
-            }
+            })
         })
         .collect()
 }
@@ -1133,6 +1305,9 @@ fn restore_launchers(
         .map(|item| {
             check_name(&item.name)?;
             validate_app_arguments(&item.saved_arguments)?;
+            if let Some(value) = &item.working_directory {
+                checked_working_directory(&destination.join("prefix"), value)?;
+            }
             let path = match &item.path {
                 PortableLauncherPath::PrefixRelative(value) => {
                     let relative = Path::new(value);
@@ -1168,6 +1343,7 @@ fn restore_launchers(
                 created_at: item.created_at,
                 hidden_from_home: item.hidden_from_home,
                 saved_arguments: item.saved_arguments.clone(),
+                working_directory: item.working_directory.clone(),
             })
         })
         .collect()
@@ -1191,11 +1367,14 @@ fn duplicate_bottle_with_runtime(
     name: Option<&str>,
     selected_wine: Option<&Path>,
 ) -> Result<Bottle, String> {
+    cancellation::check()?;
     let _lock = lock_bottle(home, id)?;
     let source = bottle_dir(home, id)?;
     bottle_graphics::validate_portable_settings(&source)?;
+    bottle_details::validate_portable_settings(&source)?;
     refuse_running_bottle(&source)?;
     refuse_live_wine_server(&source, WINE_SERVER_CHECK_TIMEOUT, selected_wine)?;
+    cancellation::check()?;
     let xdg = bottle_xdg::for_bottle(&source)?;
     bottle_xdg::migrate_host_desktop_links(&source.join("prefix"), &xdg)?;
     if !path_is_real_directory(&source.join("prefix")) {
@@ -1209,14 +1388,16 @@ fn duplicate_bottle_with_runtime(
         original.name.chars().take(75).collect::<String>()
     );
     let name = check_name(name.unwrap_or(&default_name))?;
-    let launchers = portable_launchers(&source, list_launchers(home, id)?);
+    let launchers = portable_launchers(&source, list_launchers(home, id)?)?;
     let bottle = Bottle {
         id: Uuid::new_v4().to_string(),
         name: name.to_owned(),
         created_at: now_seconds()?,
     };
     let destination = storage_root(home, true)?.join(&bottle.id);
+    cancellation::check()?;
     fs::create_dir(&destination).map_err(|e| e.to_string())?;
+    let (destination_guard, _) = open_stable_directory(&destination)?;
     let result = (|| {
         let mut policy = CopyPolicy::new(&source);
         copy_tree_contents(
@@ -1230,8 +1411,10 @@ fn duplicate_bottle_with_runtime(
                 ".caskrun.lock",
                 "active-processes.json",
                 "native-apps",
+                "icon-repair-cache",
             ],
         )?;
+        cancellation::check()?;
         bottle_xdg::restore_host_folder_links(
             policy.account_home.as_deref(),
             &destination,
@@ -1240,15 +1423,14 @@ fn duplicate_bottle_with_runtime(
         bottle_xdg::for_bottle(&destination)?;
         let launchers = restore_launchers(&destination, &launchers)?;
         if !launchers.is_empty() {
+            cancellation::check()?;
             save_json(&destination.join("launchers.json"), &launchers)?;
         }
+        cancellation::check()?;
         save_json(&destination.join("bottle.json"), &bottle)?;
         Ok::<(), String>(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(destination);
-    }
-    result.map(|()| bottle)
+    finish_owned_copy(&destination, &destination_guard, result).map(|()| bottle)
 }
 
 fn export_bottle(home: &Path, id: &str, output: &Path) -> Result<BackupResult, String> {
@@ -1262,11 +1444,14 @@ fn export_bottle_with_runtime(
     output: &Path,
     selected_wine: Option<&Path>,
 ) -> Result<BackupResult, String> {
+    cancellation::check()?;
     let _lock = lock_bottle(home, id)?;
     let source = bottle_dir(home, id)?;
     bottle_graphics::validate_portable_settings(&source)?;
+    bottle_details::validate_portable_settings(&source)?;
     refuse_running_bottle(&source)?;
     refuse_live_wine_server(&source, WINE_SERVER_CHECK_TIMEOUT, selected_wine)?;
+    cancellation::check()?;
     let xdg = bottle_xdg::for_bottle(&source)?;
     bottle_xdg::migrate_host_desktop_links(&source.join("prefix"), &xdg)?;
     if !path_is_real_directory(&source.join("prefix")) {
@@ -1294,9 +1479,11 @@ fn export_bottle_with_runtime(
     let bottle: Bottle =
         serde_json::from_slice(&fs::read(source.join("bottle.json")).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-    let launchers = portable_launchers(&source, list_launchers(home, id)?);
+    let launchers = portable_launchers(&source, list_launchers(home, id)?)?;
     let external_launchers = external_launcher_count(&launchers);
+    cancellation::check()?;
     fs::create_dir(output).map_err(|e| e.to_string())?;
+    let (destination_guard, _) = open_stable_directory(output)?;
     let result = (|| {
         let payload = output.join("payload");
         fs::create_dir(&payload).map_err(|e| e.to_string())?;
@@ -1313,8 +1500,10 @@ fn export_bottle_with_runtime(
                 ".caskrun.lock",
                 "active-processes.json",
                 "native-apps",
+                "icon-repair-cache",
             ],
         )?;
+        cancellation::check()?;
         let host_folders = policy.host_folders;
         let recorded = host_folders.len();
         // Name the Windows profile folder so a restore under another account can
@@ -1324,6 +1513,7 @@ fn export_bottle_with_runtime(
             bottle_xdg::account_name().as_deref(),
         );
         // The manifest is written last, so an interrupted export stays unusable.
+        cancellation::check()?;
         save_json(
             &output.join("manifest.json"),
             &BackupManifest {
@@ -1337,19 +1527,19 @@ fn export_bottle_with_runtime(
         )?;
         Ok::<(usize, Option<String>), String>((recorded, profile_account))
     })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(output);
-    }
-    result.map(|(host_folders, profile_account)| BackupResult {
-        path: output.display().to_string(),
-        bottle,
-        external_launchers,
-        host_folders,
-        profile_account,
+    finish_owned_copy(output, &destination_guard, result).map(|(host_folders, profile_account)| {
+        BackupResult {
+            path: output.display().to_string(),
+            bottle,
+            external_launchers,
+            host_folders,
+            profile_account,
+        }
     })
 }
 
 fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<ImportResult, String> {
+    cancellation::check()?;
     if !path_is_real_directory(source) {
         return Err("Choose a .caskrun-bottle backup directory".into());
     }
@@ -1379,6 +1569,9 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
         return Err("Backup payload is missing its prefix".into());
     }
     bottle_graphics::validate_portable_settings(&payload)?;
+    bottle_details::validate_portable_settings(&payload)?;
+    // Reject an invalid requested directory before creating destination storage.
+    validate_portable_working_directories(&payload, &manifest.launchers)?;
     for reserved in [
         "bottle.json",
         "launchers.json",
@@ -1386,6 +1579,7 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
         ".caskrun.lock",
         "active-processes.json",
         "native-apps",
+        "icon-repair-cache",
     ] {
         if fs::symlink_metadata(payload.join(reserved)).is_ok() {
             return Err(format!(
@@ -1398,17 +1592,20 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
         name: name.to_owned(),
         created_at: now_seconds()?,
     };
+    cancellation::check()?;
     let destination = storage_root(home, true)?.join(&bottle.id);
     // Importing a backup from inside the destination would recursively copy it.
     if destination.starts_with(source.canonicalize().map_err(|e| e.to_string())?) {
         return Err("Backup cannot contain the destination bottle".into());
     }
     fs::create_dir(&destination).map_err(|e| e.to_string())?;
+    let (destination_guard, _) = open_stable_directory(&destination)?;
     let result = (|| {
         // A mapping the payload still carries is restored alongside the recorded
         // ones; a path listed twice is refused rather than silently merged.
         let mut policy = CopyPolicy::with_recorded(&payload, manifest.host_folders.clone());
         copy_tree_contents(&mut policy, &payload, &destination, Path::new(""), &[])?;
+        cancellation::check()?;
         let restored = bottle_xdg::restore_host_folder_links(
             policy.account_home.as_deref(),
             &destination,
@@ -1422,26 +1619,27 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
         bottle_xdg::for_bottle(&destination)?;
         let launchers = restore_launchers(&destination, &manifest.launchers)?;
         if !launchers.is_empty() {
+            cancellation::check()?;
             save_json(&destination.join("launchers.json"), &launchers)?;
         }
         // The Wine path from another machine is intentionally not restored. On first
         // launch wineboot will inspect/update the imported prefix with the chosen runtime.
+        cancellation::check()?;
         save_json(&destination.join("bottle.json"), &bottle)?;
         Ok::<(bottle_xdg::HostFolderOutcome, bottle_xdg::ProfileOutcome), String>((
             restored, profile,
         ))
     })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(destination);
-    }
-    result.map(|(restored, profile)| ImportResult {
-        bottle,
-        external_launchers: external_launcher_count(&manifest.launchers),
-        host_folders: restored.linked,
-        private_host_folders: restored.private,
-        profile_account_resolved: profile.resolved(),
-        profile_account_linked: profile.linked(),
-        profile_warning: profile.warning().map(str::to_owned),
+    finish_owned_copy(&destination, &destination_guard, result).map(|(restored, profile)| {
+        ImportResult {
+            bottle,
+            external_launchers: external_launcher_count(&manifest.launchers),
+            host_folders: restored.linked,
+            private_host_folders: restored.private,
+            profile_account_resolved: profile.resolved(),
+            profile_account_linked: profile.linked(),
+            profile_warning: profile.warning().map(str::to_owned),
+        }
     })
 }
 
@@ -1581,9 +1779,23 @@ fn add_launcher_with_arguments(
     exe: &Path,
     saved_arguments: Vec<String>,
 ) -> Result<Launcher, String> {
+    add_launcher_with_command(home, id, name, exe, saved_arguments, None)
+}
+
+fn add_launcher_with_command(
+    home: &Path,
+    id: &str,
+    name: &str,
+    exe: &Path,
+    saved_arguments: Vec<String>,
+    working_directory: Option<String>,
+) -> Result<Launcher, String> {
     let _lock = lock_bottle(home, id)?;
     let name = check_name(name)?;
     validate_app_arguments(&saved_arguments)?;
+    if let Some(value) = &working_directory {
+        checked_working_directory(&bottle_dir(home, id)?.join("prefix"), value)?;
+    }
     let path = exe.canonicalize().map_err(|e| e.to_string())?;
     if !path.is_file() {
         return Err("Choose an existing Windows program".into());
@@ -1607,6 +1819,7 @@ fn add_launcher_with_arguments(
             .as_secs(),
         hidden_from_home: false,
         saved_arguments,
+        working_directory,
     };
     launchers.push(launcher.clone());
     save_json(&bottle_dir(home, id)?.join("launchers.json"), &launchers)?;
@@ -1648,6 +1861,28 @@ fn set_launcher_arguments(
         .find(|item| item.id == launcher_id)
         .ok_or("Launcher not found in this bottle")?;
     launcher.saved_arguments = arguments.to_vec();
+    let updated = launcher.clone();
+    save_json(
+        &bottle_dir(home, bottle_id)?.join("launchers.json"),
+        &launchers,
+    )?;
+    Ok(updated)
+}
+
+fn rename_launcher(
+    home: &Path,
+    bottle_id: &str,
+    launcher_id: &str,
+    name: &str,
+) -> Result<Launcher, String> {
+    let name = check_name(name)?;
+    let _lock = lock_bottle(home, bottle_id)?;
+    let mut launchers = list_launchers(home, bottle_id)?;
+    let launcher = launchers
+        .iter_mut()
+        .find(|item| item.id == launcher_id)
+        .ok_or("Launcher not found in this bottle")?;
+    launcher.name = name.to_owned();
     let updated = launcher.clone();
     save_json(
         &bottle_dir(home, bottle_id)?.join("launchers.json"),
@@ -1715,13 +1950,14 @@ fn run_launcher_with_wine(
         &launcher.saved_arguments,
         user_arguments,
     )?;
-    launch_with_wine_args(
+    launch_with_wine_args_in_directory(
         home,
         bottle_id,
         Path::new(&launcher.path),
         wine,
         &arguments,
         steam_mode,
+        launcher.working_directory.as_deref(),
     )
 }
 
@@ -1763,12 +1999,26 @@ fn parse_run_app_arguments(options: &[String]) -> Result<Vec<String>, String> {
     Ok(arguments.to_vec())
 }
 
+fn parse_add_app_options(options: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+    let (working, tail) = match options {
+        [flag, value, rest @ ..] if flag == "--working-directory" => {
+            validate_working_directory_value(value)?;
+            (Some(value.clone()), rest)
+        }
+        _ => (None, options),
+    };
+    Ok((working, parse_run_app_arguments(tail)?))
+}
+
 fn validate_app_arguments(arguments: &[String]) -> Result<(), String> {
     if arguments.len() > 64 {
         return Err("Use at most 64 app arguments".into());
     }
     let mut total_bytes = 0usize;
     for argument in arguments {
+        if argument.contains('\0') {
+            return Err("App arguments cannot contain a null character".into());
+        }
         if argument.len() > 4096 {
             return Err("An app argument is longer than 4096 bytes".into());
         }
@@ -1782,10 +2032,16 @@ fn validate_app_arguments(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn launch(home: &Path, id: &str, installer: &Path) -> Result<LaunchResult, String> {
+fn launch(
+    home: &Path,
+    id: &str,
+    installer: &Path,
+    arguments: &[String],
+) -> Result<LaunchResult, String> {
+    validate_app_arguments(arguments)?;
     let wine = wine_path()
         .ok_or("Caskrun could not find its included Wine runtime. Reinstall Caskrun.")?;
-    launch_with_wine(home, id, installer, &wine)
+    launch_with_wine_args(home, id, installer, &wine, arguments, false)
 }
 
 fn parse_wait_launch_options(args: &[String]) -> Result<WaitLaunchOptions, String> {
@@ -2198,6 +2454,37 @@ fn launch_with_wine_args(
     })
 }
 
+fn launch_with_wine_args_in_directory(
+    home: &Path,
+    id: &str,
+    installer: &Path,
+    wine: &Path,
+    arguments: &[String],
+    steam_mode: bool,
+    working_directory: Option<&str>,
+) -> Result<LaunchResult, String> {
+    if working_directory.is_none() {
+        return launch_with_wine_args(home, id, installer, wine, arguments, steam_mode);
+    }
+    let (child, log_path) = start_launch_with_wine_checked(
+        home,
+        id,
+        installer,
+        wine,
+        LaunchFlags {
+            quiet_msi: false,
+            steam_mode,
+            working_directory,
+        },
+        arguments,
+        |_| Ok(()),
+    )?;
+    Ok(LaunchResult {
+        pid: child.id(),
+        log_path: log_path.display().to_string(),
+    })
+}
+
 fn launch_wait_with_wine(
     home: &Path,
     id: &str,
@@ -2225,6 +2512,7 @@ fn launch_wait_with_wine_checked(
         LaunchFlags {
             quiet_msi: options.quiet_msi,
             steam_mode: false,
+            working_directory: None,
         },
         &options.arguments,
         pre_spawn,
@@ -2289,6 +2577,7 @@ fn start_launch_with_wine(
         LaunchFlags {
             quiet_msi,
             steam_mode,
+            working_directory: None,
         },
         arguments,
         |_| Ok(()),
@@ -2296,9 +2585,10 @@ fn start_launch_with_wine(
 }
 
 #[derive(Clone, Copy)]
-struct LaunchFlags {
+struct LaunchFlags<'a> {
     quiet_msi: bool,
     steam_mode: bool,
+    working_directory: Option<&'a str>,
 }
 
 fn start_launch_with_wine_checked(
@@ -2306,12 +2596,21 @@ fn start_launch_with_wine_checked(
     id: &str,
     installer: &Path,
     wine: &Path,
-    flags: LaunchFlags,
+    flags: LaunchFlags<'_>,
     arguments: &[String],
     pre_spawn: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(Child, PathBuf), String> {
     cancellation::check()?;
+    // Validate a saved shortcut's directory before taking a write lock or
+    // initializing/migrating Wine. A rejected directory leaves no launch state.
+    let working_directory = flags
+        .working_directory
+        .map(|value| checked_working_directory(&bottle_dir(home, id)?.join("prefix"), value))
+        .transpose()?;
     let _lock = lock_bottle(home, id)?;
+    if let Some(directory) = &working_directory {
+        directory.revalidate()?;
+    }
     let installer = installer.canonicalize().map_err(|e| e.to_string())?;
     if !installer.is_file() {
         return Err("Choose an existing installer file".into());
@@ -2408,6 +2707,22 @@ fn start_launch_with_wine_checked(
     // here, while the same lock used by ordinary launches is still held.
     pre_spawn(&installer)?;
     cancellation::check()?;
+    if let Some(directory) = &working_directory {
+        directory.revalidate()?;
+        let fd = directory.guard.as_raw_fd();
+        // fchdir uses the already-open checked folder, so a pathname swap
+        // between validation and child creation cannot redirect this launch.
+        // Only this syscall runs in the forked child before exec.
+        unsafe {
+            cmd.pre_exec(move || {
+                if fchdir(fd) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Could not launch Wine: {e}"))?;
@@ -2426,7 +2741,15 @@ fn run() -> Result<(), String> {
     if args.first().is_some_and(|command| {
         matches!(
             command.as_str(),
-            "launch-wait" | "install-catalog" | "retry-catalog" | "quit-all-bottles"
+            "launch-wait"
+                | "install-catalog"
+                | "retry-catalog"
+                | "quit-all-bottles"
+                | "duplicate"
+                | "export"
+                | "import"
+                | "export-archive"
+                | "import-archive"
         )
     }) {
         cancellation::activate_from_stdin();
@@ -2501,13 +2824,30 @@ fn run() -> Result<(), String> {
         [command, id] if command == "duplicate" => serde_json::to_value(duplicate_bottle(&home, id, None)?),
         [command, id, name] if command == "duplicate" => serde_json::to_value(duplicate_bottle(&home, id, Some(name))?),
         [command, id, path] if command == "export" => serde_json::to_value(export_bottle(&home, id, Path::new(path))?),
+        [command, id, path] if command == "export-archive" => serde_json::to_value(bottle_archive::export_archive(&home, id, Path::new(path))?),
         [command, path] if command == "import" => serde_json::to_value(import_bottle(&home, Path::new(path), None)?),
         [command, path, name] if command == "import" => serde_json::to_value(import_bottle(&home, Path::new(path), Some(name))?),
+        [command, path] if command == "import-archive" => serde_json::to_value(bottle_archive::import_archive(&home, Path::new(path), None)?),
+        [command, path, name] if command == "import-archive" => serde_json::to_value(bottle_archive::import_archive(&home, Path::new(path), Some(name))?),
         [command, path] if command == "import-crossover" => serde_json::to_value(crossover_import::import(&home, Path::new(path), None)?),
         [command, path, name] if command == "import-crossover" => serde_json::to_value(crossover_import::import(&home, Path::new(path), Some(name))?),
         [command, id] if command == "steam-games" => serde_json::to_value(steam_games(&home, id)?),
         [command, id, app_id] if command == "run-steam-game" => serde_json::to_value(run_steam_game(&home, id, app_id.parse().map_err(|_| "Steam AppID must be an unsigned number")?)?),
         [command, id] if command == "apps" => serde_json::to_value(list_launchers(&home, id)?),
+        [command, id] if command == "installed-programs" =>
+            serde_json::to_value(program_inventory::inventory(&home, id)?),
+        [command, id] if command == "diagnostics" =>
+            serde_json::to_value(diagnostics::bottle_diagnostics(&home, id)?),
+        [command, id] if command == "bottle-notes" =>
+            serde_json::to_value(bottle_details::bottle_notes(&home, id)?),
+        [command, id, notes] if command == "set-bottle-notes" =>
+            serde_json::to_value(bottle_details::set_bottle_notes(&home, id, notes)?),
+        [command, id] if command == "bottle-windows-version" =>
+            serde_json::to_value(bottle_details::bottle_windows_version(&home, id)?),
+        [command, id, version] if command == "set-bottle-windows-version" =>
+            serde_json::to_value(bottle_details::set_bottle_windows_version(&home, id, bottle_details::WindowsVersion::parse(version)?)?),
+        [command, id] if command == "rebuild-icons" =>
+            serde_json::to_value(app_icons::repair_bottle_icons(&home, id)?),
         [command, bottle_id, launcher_id] if command == "app-icon" =>
             serde_json::to_value(app_icons::app_icon(&home, bottle_id, launcher_id)?),
         [command, bottle_id] if command == "bottle-icon" =>
@@ -2545,23 +2885,18 @@ fn run() -> Result<(), String> {
         [command, id, name] if command == "read-log" => serde_json::to_value(read_log(&home, id, name)?),
         [command, id] if command == "initialize" => serde_json::to_value(initialize(&home, id)?),
         [command, id] if command == "prefix-path" => serde_json::to_value(prefix_path(&home, id)?),
-        [command, id, name, path] if command == "add-app" =>
-            serde_json::to_value(add_launcher(&home, id, name, Path::new(path))?),
-        [command, id, name, path, separator, arguments @ ..]
-            if command == "add-app" && separator == "--" =>
-            serde_json::to_value(add_launcher_with_arguments(
-                &home,
-                id,
-                name,
-                Path::new(path),
-                arguments.to_vec(),
-            )?),
+        [command, id, name, path, options @ ..] if command == "add-app" => {
+            let (working, arguments) = parse_add_app_options(options)?;
+            serde_json::to_value(add_launcher_with_command(&home, id, name, Path::new(path), arguments, working)?)
+        },
         [command, bottle_id, launcher_id, visibility]
             if command == "set-app-visibility" && (visibility == "show" || visibility == "hide") =>
             serde_json::to_value(set_launcher_visibility(&home, bottle_id, launcher_id, visibility == "hide")?),
         [command, bottle_id, launcher_id, separator, arguments @ ..]
             if command == "set-app-arguments" && separator == "--" =>
             serde_json::to_value(set_launcher_arguments(&home, bottle_id, launcher_id, arguments)?),
+        [command, bottle_id, launcher_id, name] if command == "rename-app" =>
+            serde_json::to_value(rename_launcher(&home, bottle_id, launcher_id, name)?),
         [command, bottle_id, launcher_id, options @ ..] if command == "run-app" =>
             serde_json::to_value(run_launcher(
                 &home,
@@ -2569,8 +2904,8 @@ fn run() -> Result<(), String> {
                 launcher_id,
                 &parse_run_app_arguments(options)?,
             )?),
-        [command, id, path] if command == "launch" =>
-            serde_json::to_value(launch(&home, id, Path::new(path))?),
+        [command, id, path, options @ ..] if command == "launch" =>
+            serde_json::to_value(launch(&home, id, Path::new(path), &parse_run_app_arguments(options)?)?),
         [command, id, path, options @ ..] if command == "launch-wait" =>
             serde_json::to_value(launch_wait(
                 &home,
@@ -2578,7 +2913,7 @@ fn run() -> Result<(), String> {
                 Path::new(path),
                 parse_wait_launch_options(options)?,
             )?),
-        _ => return Err("Usage: caskrun-core overview | status | probe-runtime | list | deleted | catalog-attempts | create <name> | install-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher | retry-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher <bottle-id> | rename <id> <name> | delete <id> | restore-deleted <id> | duplicate <id> [name] | export <id> <path.caskrun-bottle> | import <path.caskrun-bottle> [name] | import-crossover <bottle-folder> [name] | steam-games <id> | run-steam-game <id> <appid> | initialize <id> | prefix-path <id> | apps <id> | app-icon <bottle-id> <launcher-id> | bottle-icon <bottle-id> | bottle-resolution <id> | set-bottle-resolution <id> on|off | quit-all-bottles | quit-bottle <id> | open-uninstaller <id> | open-winecfg <id> | open-regedit <id> | open-controller-panel <id> | open-taskmgr <id> | open-internet-settings <id> | open-command-prompt <id> | simulate-reboot <id> | discover-apps <id> | logs <id> | read-log <id> <log-file-name> | add-app <id> <name> <file.exe> [-- <program-args...>] | set-app-visibility <id> <app-id> show|hide | set-app-arguments <id> <app-id> -- [arguments...] | run-app <id> <app-id> [-- <program-args...>] | launch <id> <file.exe|file.msi> | launch-wait <id> <file.exe|file.msi> [--quiet-msi] [--timeout-seconds 1..3600] [-- <program-args...>]".into()),
+        _ => return Err("Usage: caskrun-core overview | status | probe-runtime | list | deleted | catalog-attempts | create <name> | install-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher | retry-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher <bottle-id> | rename <id> <name> | delete <id> | restore-deleted <id> | duplicate <id> [name] | export <id> <path.caskrun-bottle> | export-archive <id> <path.caskrun-backup> | import <path.caskrun-bottle> [name] | import-archive <path.caskrun-backup> [name] | import-crossover <bottle-folder> [name] | steam-games <id> | run-steam-game <id> <appid> | initialize <id> | prefix-path <id> | apps <id> | installed-programs <id> | diagnostics <id> | rebuild-icons <id> | app-icon <bottle-id> <launcher-id> | bottle-icon <bottle-id> | bottle-notes <id> | set-bottle-notes <id> <text> | bottle-windows-version <id> | set-bottle-windows-version <id> default|win11|win10|win81|win8|win7|vista|winxp | bottle-resolution <id> | set-bottle-resolution <id> on|off | quit-all-bottles | quit-bottle <id> | open-uninstaller <id> | open-winecfg <id> | open-regedit <id> | open-controller-panel <id> | open-taskmgr <id> | open-internet-settings <id> | open-command-prompt <id> | simulate-reboot <id> | discover-apps <id> | logs <id> | read-log <id> <log-file-name> | add-app <id> <name> <file.exe> [--working-directory <drive_c/folder>] [-- <program-args...>] | set-app-visibility <id> <app-id> show|hide | set-app-arguments <id> <app-id> -- [arguments...] | rename-app <id> <app-id> <name> | run-app <id> <app-id> [-- <program-args...>] | launch <id> <file.exe|file.msi> [-- <program-args...>] | launch-wait <id> <file.exe|file.msi> [--quiet-msi] [--timeout-seconds 1..3600] [-- <program-args...>]".into()),
     }.map_err(|e| e.to_string())?;
     println!(
         "{}",
@@ -3145,6 +3480,10 @@ mod tests {
             set_launcher_arguments(&home, &bottle.id, &launcher.id, &["x".repeat(4097)]).is_err()
         );
         assert!(
+            set_launcher_arguments(&home, &bottle.id, &launcher.id, &["bad\0value".into()])
+                .is_err()
+        );
+        assert!(
             list_launchers(&home, &bottle.id).unwrap()[0]
                 .saved_arguments
                 .is_empty()
@@ -3174,6 +3513,228 @@ mod tests {
         );
         fs::remove_dir_all(home).unwrap();
         fs::remove_dir_all(restored_home).unwrap();
+        fs::remove_dir_all(backup).unwrap();
+    }
+
+    #[test]
+    fn working_directory_options_require_exact_portable_c_drive_paths() {
+        assert_eq!(parse_add_app_options(&[]).unwrap(), (None, Vec::new()));
+        assert_eq!(
+            parse_add_app_options(&[
+                "--working-directory".into(),
+                "drive_c/Games/Profile One".into(),
+                "--".into(),
+                " literal argument ".into(),
+            ])
+            .unwrap(),
+            (
+                Some("drive_c/Games/Profile One".into()),
+                vec![" literal argument ".into()]
+            )
+        );
+        for value in [
+            "",
+            "/host",
+            "C:\\Games",
+            "drive_c/../outside",
+            "drive_c/./Games",
+            "drive_c//Games",
+            "drive_c/Games/",
+            "prefix/drive_c/Games",
+            "drive_c/NUL",
+            "drive_c/COM1.txt",
+            "drive_c/LPT²",
+            "drive_c/Games.",
+            "drive_c/Games ",
+            "drive_c/%TEMP%",
+        ] {
+            assert!(validate_working_directory_value(value).is_err(), "{value}");
+        }
+        assert!(parse_add_app_options(&["--working-directory".into()]).is_err());
+        assert!(
+            parse_add_app_options(&[
+                "--working-directory".into(),
+                "drive_c".into(),
+                "--unknown".into()
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn saved_working_directory_routes_only_its_command_and_survives_backup_and_duplicate() {
+        let home = test_home();
+        let bottle = create(&home, "Working directory fixture").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let cwd = dir.join("prefix/drive_c/Games/Profile One");
+        fs::create_dir_all(&cwd).unwrap();
+        let exe = dir.join("prefix/drive_c/Program Files/Atlas/Atlas.exe");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"fixture program").unwrap();
+        let wine = fake_wait_runtime(
+            &home,
+            b"#!/bin/sh\nprintf 'cwd=%s\\n' \"$PWD\"\nprintf 'arg=%s\\n' \"$@\"\n",
+        );
+        let launcher = add_launcher_with_command(
+            &home,
+            &bottle.id,
+            "Atlas",
+            &exe,
+            vec!["--profile".into(), "two words".into()],
+            Some("drive_c/Games/Profile One".into()),
+        )
+        .unwrap();
+        let result = run_launcher_with_wine(
+            &home,
+            &bottle.id,
+            &launcher.id,
+            &wine,
+            &["temporary".into()],
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut text = String::new();
+        while Instant::now() < deadline {
+            text = fs::read_to_string(&result.log_path).unwrap();
+            if text.contains("arg=temporary") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(text.contains(&format!("cwd={}\n", cwd.display())), "{text}");
+        assert!(text.contains("arg=two words\n"), "{text}");
+        let ordinary = launch_with_wine(&home, &bottle.id, &exe, &wine).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut text = String::new();
+        while Instant::now() < deadline {
+            text = fs::read_to_string(&ordinary.log_path).unwrap();
+            if text.contains("arg=") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            text.contains(&format!("cwd={}\n", exe.parent().unwrap().display())),
+            "{text}"
+        );
+        // Child scripts finish before copying. Remove only their own tracking
+        // records and stub runtime record; no real engine has been started.
+        fs::remove_file(dir.join("active-processes.json")).unwrap();
+        fs::remove_file(dir.join("prefix-record.json")).unwrap();
+        fs::remove_file(dir.join("prefix/system.reg")).unwrap();
+        let backup = home.with_extension("caskrun-bottle");
+        export_bottle_with_runtime(&home, &bottle.id, &backup, None).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(backup.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(
+            manifest["launchers"][0]["working_directory"],
+            "drive_c/Games/Profile One"
+        );
+        assert!(
+            !manifest["launchers"][0]["working_directory"]
+                .as_str()
+                .unwrap()
+                .contains(home.to_str().unwrap())
+        );
+        let restored_home = test_home();
+        let restored = import_bottle(&restored_home, &backup, None).unwrap();
+        assert_eq!(
+            list_launchers(&restored_home, &restored.bottle.id).unwrap()[0].working_directory,
+            launcher.working_directory
+        );
+        let duplicate = duplicate_bottle_with_runtime(&home, &bottle.id, None, None).unwrap();
+        assert_eq!(
+            list_launchers(&home, &duplicate.id).unwrap()[0].working_directory,
+            launcher.working_directory
+        );
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(restored_home).unwrap();
+        fs::remove_dir_all(backup).unwrap();
+    }
+
+    #[test]
+    fn invalid_or_replaced_working_directory_refuses_before_any_launch_mutation() {
+        let home = test_home();
+        let bottle = create(&home, "Refusal fixture").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let cwd = dir.join("prefix/drive_c/Work");
+        fs::create_dir_all(&cwd).unwrap();
+        let exe = home.join("Example.exe");
+        fs::write(&exe, b"fixture").unwrap();
+        let wine = fake_wait_runtime(
+            &home,
+            b"#!/bin/sh\ntouch \"$WINEPREFIX/incorrectly-started\"\n",
+        );
+        let launcher = add_launcher_with_command(
+            &home,
+            &bottle.id,
+            "Example",
+            &exe,
+            Vec::new(),
+            Some("drive_c/Work".into()),
+        )
+        .unwrap();
+        let original = fs::read(dir.join("launchers.json")).unwrap();
+        fs::remove_file(dir.join(".caskrun.lock")).unwrap();
+        fs::remove_dir(&cwd).unwrap();
+        symlink(&home, &cwd).unwrap();
+        assert!(run_launcher_with_wine(&home, &bottle.id, &launcher.id, &wine, &[]).is_err());
+        for name in [
+            ".caskrun.lock",
+            "prefix-record.json",
+            "logs",
+            "active-processes.json",
+            "prefix/system.reg",
+            "prefix/incorrectly-started",
+        ] {
+            assert!(!dir.join(name).exists(), "{name}");
+        }
+        assert_eq!(fs::read(dir.join("launchers.json")).unwrap(), original);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn invalid_backup_working_directories_are_refused_before_storage_creation() {
+        let home = test_home();
+        let bottle = create(&home, "Portable fixture").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        fs::create_dir_all(dir.join("prefix/drive_c/Work")).unwrap();
+        let exe = dir.join("prefix/drive_c/Example.exe");
+        fs::write(&exe, b"fixture").unwrap();
+        add_launcher_with_command(
+            &home,
+            &bottle.id,
+            "Example",
+            &exe,
+            Vec::new(),
+            Some("drive_c/Work".into()),
+        )
+        .unwrap();
+        let backup = home.with_extension("caskrun-bottle");
+        export_bottle_with_runtime(&home, &bottle.id, &backup, None).unwrap();
+        let path = backup.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for working in [
+            "/host",
+            "drive_c/../outside",
+            "drive_c/missing",
+            "drive_c/./Work",
+            "dosdevices/z:/host",
+        ] {
+            manifest["launchers"][0]["working_directory"] = working.into();
+            fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            let refused = test_home();
+            assert!(import_bottle(&refused, &backup, None).is_err(), "{working}");
+            assert!(!refused.exists());
+        }
+        manifest["launchers"][0]["working_directory"] = "drive_c/Linked".into();
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        symlink("Work", backup.join("payload/prefix/drive_c/Linked")).unwrap();
+        let refused = test_home();
+        assert!(import_bottle(&refused, &backup, None).is_err());
+        assert!(!refused.exists());
+        fs::remove_dir_all(home).unwrap();
         fs::remove_dir_all(backup).unwrap();
     }
 
@@ -4057,6 +4618,200 @@ mod tests {
         symlink(&outside, &source).unwrap();
         assert!(copy_stable_file(&source, &home.join("copy.exe"), &snapshot).is_err());
         assert!(!home.join("copy.exe").exists());
+        fs::remove_file(&source).unwrap();
+        assert!(
+            Command::new("/usr/bin/mkfifo")
+                .args(["-m", "600"])
+                .arg(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let started = Instant::now();
+        assert!(copy_stable_file(&source, &home.join("copy.exe"), &snapshot).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!home.join("copy.exe").exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn cancellation_stops_copy_between_chunks_and_before_eof_success() {
+        use std::sync::atomic::Ordering;
+
+        struct CancelingReader {
+            request: cancellation::TestRequest,
+            reads: usize,
+            cancel_at: usize,
+            eof: bool,
+        }
+        impl Read for CancelingReader {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if self.reads == self.cancel_at {
+                    self.request.store(true, Ordering::Release);
+                    if self.eof {
+                        return Ok(0);
+                    }
+                }
+                bytes.fill(0x42);
+                Ok(bytes.len())
+            }
+        }
+        for eof in [false, true] {
+            let (request, _guard) = cancellation::test_request();
+            let mut input = CancelingReader {
+                request,
+                reads: 0,
+                cancel_at: 2,
+                eof,
+            };
+            let mut output = Vec::new();
+            assert_eq!(
+                copy_cancellable(&mut input, &mut output).unwrap_err(),
+                cancellation::ERROR
+            );
+            assert_eq!(input.reads, 2);
+            assert_eq!(output.len(), 64 * 1024);
+            assert!(output.iter().all(|byte| *byte == 0x42));
+        }
+    }
+
+    #[test]
+    fn canceled_copy_cleanup_removes_readonly_owned_tree_without_following_links() {
+        let home = test_home();
+        let destination = home.join("owned");
+        let readonly = destination.join("readonly/nested");
+        let outside = home.join("outside");
+        fs::create_dir_all(&readonly).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(readonly.join("partial"), b"copied data").unwrap();
+        fs::write(outside.join("keep"), b"must remain").unwrap();
+        symlink(&outside, readonly.join("external-link")).unwrap();
+        let (guard, _) = open_stable_directory(&destination).unwrap();
+        for path in [&readonly, &destination.join("readonly"), &destination] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let error = finish_owned_copy::<()>(&destination, &guard, Err(cancellation::ERROR.into()))
+            .unwrap_err();
+        assert_eq!(error, cancellation::ERROR);
+        assert!(!destination.exists());
+        assert_eq!(fs::read(outside.join("keep")).unwrap(), b"must remain");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn failed_copy_cleanup_preserves_a_replaced_destination() {
+        let home = test_home();
+        let destination = home.join("owned");
+        let original = home.join("original-moved");
+        fs::create_dir_all(&destination).unwrap();
+        let (guard, _) = open_stable_directory(&destination).unwrap();
+        fs::rename(&destination, &original).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("keep"), b"replacement data").unwrap();
+        let error = finish_owned_copy::<()>(&destination, &guard, Err(cancellation::ERROR.into()))
+            .unwrap_err();
+        assert!(cancellation::is_error(&error));
+        assert!(error.contains("cleanup preserved it"));
+        assert_eq!(
+            fs::read(destination.join("keep")).unwrap(),
+            b"replacement data"
+        );
+        assert!(original.exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn cancellation_before_folder_operations_creates_no_destination_or_lock() {
+        use std::sync::atomic::Ordering;
+
+        let home = test_home();
+        let bottle = create(&home, "Source").unwrap();
+        let directory = bottle_dir(&home, &bottle.id).unwrap();
+        let source = directory.join("prefix/example.exe");
+        fs::write(&source, b"original program").unwrap();
+        let snapshot = fs::symlink_metadata(&source).unwrap();
+        let copy = home.join("copy.exe");
+        let backup = home.join("example.caskrun-bottle");
+        let restored = home.join("restored");
+        let (request, _guard) = cancellation::test_request();
+        request.store(true, Ordering::Release);
+        assert_eq!(
+            copy_stable_file(&source, &copy, &snapshot).unwrap_err(),
+            cancellation::ERROR
+        );
+        assert_eq!(
+            duplicate_bottle_with_runtime(&home, &bottle.id, None, None).unwrap_err(),
+            cancellation::ERROR
+        );
+        assert_eq!(
+            export_bottle_with_runtime(&home, &bottle.id, &backup, None)
+                .err()
+                .unwrap(),
+            cancellation::ERROR
+        );
+        assert_eq!(
+            import_bottle(&restored, &backup, None).err().unwrap(),
+            cancellation::ERROR
+        );
+        assert!(!copy.exists());
+        assert!(!backup.exists());
+        assert!(!restored.exists());
+        assert!(!directory.join(".caskrun.lock").exists());
+        assert_eq!(list(&home).unwrap().len(), 1);
+        assert_eq!(fs::read(&source).unwrap(), b"original program");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn failed_folder_import_removes_copied_readonly_subtrees() {
+        let home = test_home();
+        let backup = home.join("example.caskrun-bottle");
+        let readonly = backup.join("payload/prefix/drive_c/readonly/nested");
+        fs::create_dir_all(&readonly).unwrap();
+        fs::create_dir_all(backup.join("payload/prefix/drive_c/users/OtherProfile")).unwrap();
+        fs::write(readonly.join("settings.ini"), b"example settings").unwrap();
+        let manifest = BackupManifest {
+            format: BACKUP_FORMAT.into(),
+            version: BACKUP_VERSION,
+            bottle: Bottle {
+                id: Uuid::new_v4().to_string(),
+                name: "Example".into(),
+                created_at: 1,
+            },
+            launchers: Vec::new(),
+            host_folders: Vec::new(),
+            profile_account: Some("MissingProfile".into()),
+        };
+        save_json(&backup.join("manifest.json"), &manifest).unwrap();
+        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(
+            readonly.parent().unwrap(),
+            fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
+        let restored = home.join("restored");
+        let error = import_bottle(&restored, &backup, None).err().unwrap();
+        assert!(
+            error.contains("missing the Windows profile folder"),
+            "{error}"
+        );
+        assert!(
+            fs::read_dir(restored.join("bottles"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert_eq!(
+            fs::read(readonly.join("settings.ini")).unwrap(),
+            b"example settings"
+        );
+        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(
+            readonly.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -4189,6 +4944,8 @@ mod tests {
         fs::create_dir_all(&cache).unwrap();
         fs::write(cache.join("WindowsApp"), b"generated native loader").unwrap();
         symlink("/", source.join("native-apps/untrusted-host-link")).unwrap();
+        fs::create_dir(source.join("icon-repair-cache")).unwrap();
+        symlink("/", source.join("icon-repair-cache/untrusted-host-link")).unwrap();
         let external = home.join("external.exe");
         fs::write(&external, b"external program").unwrap();
         add_launcher(&home, &original.id, "Installed", &installed).unwrap();
@@ -4200,6 +4957,7 @@ mod tests {
         assert_ne!(duplicate.id, original.id);
         let duplicate_dir = bottle_dir(&home, &duplicate.id).unwrap();
         assert!(!duplicate_dir.join("native-apps").exists());
+        assert!(!duplicate_dir.join("icon-repair-cache").exists());
         assert_eq!(
             fs::read(duplicate_dir.join("prefix/drive_c/Game/game.exe")).unwrap(),
             b"installed program"
@@ -4273,6 +5031,7 @@ mod tests {
         assert!(!backup.join("payload/prefix-record.json").exists());
         assert!(!backup.join("payload/bottle.json").exists());
         assert!(!backup.join("payload/native-apps").exists());
+        assert!(!backup.join("payload/icon-repair-cache").exists());
         assert_eq!(
             fs::read(cache.join("WindowsApp")).unwrap(),
             b"generated native loader"
@@ -4286,6 +5045,14 @@ mod tests {
                 .contains("reserved metadata: native-apps")
         );
         fs::remove_dir(backup.join("payload/native-apps")).unwrap();
+        fs::create_dir(backup.join("payload/icon-repair-cache")).unwrap();
+        assert!(
+            import_bottle(&home, &backup, None)
+                .err()
+                .unwrap()
+                .contains("reserved metadata: icon-repair-cache")
+        );
+        fs::remove_dir(backup.join("payload/icon-repair-cache")).unwrap();
         let restored_home = test_home();
         let restored = import_bottle(&restored_home, &backup, Some("Restored game")).unwrap();
         assert_eq!(restored.external_launchers, 1);
@@ -4538,6 +5305,7 @@ mod tests {
             created_at: 0,
             hidden_from_home: false,
             saved_arguments: Vec::new(),
+            working_directory: None,
             path: PortableLauncherPath::PrefixRelative("../escape.exe".into()),
         });
         save_json(&manifest_path, &manifest).unwrap();

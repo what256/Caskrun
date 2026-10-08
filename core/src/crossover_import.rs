@@ -146,6 +146,7 @@ fn import_with_guard(
                         path: steam.display().to_string(),
                         source: "program-files",
                         arguments: Vec::new(),
+                        working_directory: None,
                     });
                 }
             }
@@ -184,6 +185,7 @@ fn import_with_guard(
                 // A discovered shortcut's arguments are part of its command;
                 // dropping them here would import a different program.
                 saved_arguments: candidate.arguments.clone(),
+                working_directory: candidate.working_directory.clone(),
             });
         }
         write_new_file(

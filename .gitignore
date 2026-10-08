@@ -31,6 +31,7 @@
 *.log
 *.dmp
 *.caskrun-bottle/
+*.caskrun-backup
 *.cxarchive
 system.reg
 user.reg

@@ -167,6 +167,7 @@ fn open_uninstaller_with_wine(home: &Path, id: &str, wine: &Path) -> Result<Laun
         LaunchFlags {
             quiet_msi: false,
             steam_mode: false,
+            working_directory: None,
         },
         &[],
         |resolved| {

@@ -10,6 +10,14 @@ The original changes in `runtime-patches/*.patch` are offered under **LGPL-2.1-o
 
 Wine, Wine Mono, Wine Gecko, FreeType, GnuTLS, and their dependencies retain their respective licenses. They are downloaded or built separately; their binaries and source archives are excluded from this Git repository. Rust dependencies retain their own licenses, with versions recorded in `core/Cargo.lock`.
 
+The original compressed-backup format uses pinned [tar 0.4.46](https://docs.rs/tar/0.4.46/tar/)
+and [flate2 1.1.10](https://docs.rs/flate2/1.1.10/flate2/) with its explicitly selected
+Rust `miniz_oxide` backend. Their licences and dependency notices remain separate
+from Caskrun's licence. The build collects the locked ARM64 dependency packages'
+provided licence and notice texts in `Contents/Resources/RUST_DEPENDENCIES.txt`;
+the generated file contains package names, versions and public source links,
+without local registry paths. Runtime notices remain in the runtime package.
+
 A future binary release requires a separate audit of corresponding source, license texts, notices, redistribution obligations, and embedded private build paths. The current local development DMG is not a GitHub release.
 
 ## Publisher software and artwork
