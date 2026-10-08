@@ -104,6 +104,25 @@ The window stayed 700x440 points in both states, so the control sharpens renderi
 
 Authentication, downloads, controllers and gameplay remain untested, as does Direct3D. This round establishes installer, rendering, identity, focus and shutdown behaviour for Steam's unauthenticated client only.
 
+## High resolution beyond Steam: an engine default, and a client-side limit
+
+_8 October 2026; same engine, signed candidate app and isolated session; measured with the same sharpness ratio and removed afterwards._
+
+The Steam result above left one question open: whether 1x rendering is specific to Steam or an engine-wide default. It is engine-wide, and enabling the control is not sufficient on its own.
+
+| Window | Bottle state | Sharpness ratio |
+| --- | --- | --- |
+| Wine Configuration (engine builtin) | default | **0.011** — drawn at 1x, upscaled |
+| Wine Configuration (engine builtin) | high resolution on | **0.994** — matches native Retina applications |
+| Steam sign-in (DPI-aware client) | high resolution on | 0.801 – 0.826 |
+| itch.io Setup (publisher installer) | high resolution on | **0.027** — still drawn at 1x |
+
+Wine's own builtin window is upscaled by default and becomes as sharp as a native application once the control is on, so the blurriness is an engine default rather than a Steam problem. The itch.io installer, however, stayed at 1x in a bottle where the control was on and had just been shown to work. High resolution sets the Mac driver's Retina backing store and a 192 DPI value; a client that does not scale with that DPI value keeps drawing at 1x into the larger backing store and is still upscaled. The control therefore sharpens DPI-aware clients only, which is a property of each client and not something a bottle setting can force.
+
+This strengthens the case for enabling high resolution by default, because the engine's own windows benefit and no client was made worse. It does not settle it: the setting applies to a whole bottle, and no game has been measured at either setting.
+
+The itch.io client itself was not reached. Its setup window rendered under the correct native name "itch.io app Setup", then stayed on its first screen for about nine minutes without progressing, and the attempt was cancelled. An earlier attempt in the same round was cancelled by the test tooling rather than by the installer, so neither attempt is evidence about itch.io's own behaviour. Its bootstrap, versioned child and reported blank window remain unresolved.
+
 ## Bottle copy and backup with Wine's user folders
 
 _7 October 2026; Apple Silicon, independent Wine 11.0 native-identity runtime. No vendor launcher was installed for this check._
