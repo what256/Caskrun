@@ -215,6 +215,11 @@ unchanged and never initialized or launched Wine. The fixture was removed
 after independent zero-file-owner inspection. These are metadata and command
 checks, not publisher account or game compatibility results.
 
+The final packaged core also passed the combined 60 FPS / 1.5× DXMT trial on
+both Windows architectures and the packaged executable-artwork smoke. All
+three owned fixtures were removed after zero-owner checks. The interface-only
+device capability gate preserves the tested core and runtime bytes.
+
 The new Library visual pass remains pending because the Mac was locked. Real
 publisher sign-in, browser gameplay and actual games remain manual tests; see
 [the checklist](MANUAL_TEST_CHECKLIST.md). DXMT rendering evidence and its

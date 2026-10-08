@@ -71,8 +71,12 @@ set-bottle-dxmt-options <bottle-id> <frame-target> <spatial-scale>
 
 The graphics result retains its prior fields and adds `dxmt_frame_rate`,
 `dxmt_spatial_scale` and `dxmt_spatial_available`. Capabilities remain gated by
-the exact reviewed runtime package. The UI must preserve valid nonstandard
-saved frame targets when presenting its common choices.
+the exact reviewed runtime package. The app also checks MetalFX's public
+`supportsDevice` capability before offering a spatial scale on this Mac. A
+missing or unsupported Metal device prevents enabling scaling, while a saved
+scale stays visible and can be reset to Off. The core's availability field
+describes the package capability, not a per-device gameplay guarantee. The UI
+preserves valid nonstandard saved frame targets among its common choices.
 
 ## Reproduction and evidence boundary
 
@@ -138,17 +142,17 @@ runtime logs, executable probes, account paths and timing receipts remain in
 ignored build storage. The runtime component receipt SHA-256 was
 `d9a76ac2188e2dd3cb9bbb17e353680cfe2d373b771754ad86cf47cd2bfeb42e`.
 
+The final packaged core and its bundled runtime also passed a separate combined
+60 FPS / 1.5× trial for both Windows architectures, with the same rendering,
+lifecycle, live-mapping and busy-change gates. Its two disposable bottles were
+removed after scoped shutdown and zero-owner verification. A subsequent
+packaged artwork smoke passed the original executable-icon composition,
+publisher-color preservation, app/bottle cache reuse and no-launch-alias checks;
+its fixture was also removed after a zero-owner check. These checks did not
+modify the app package or any user bottle.
+
 Visible output pixels, image quality, real game performance, fullscreen behavior
 and other Macs still need manual tests. Test both controls off first, then each
 independently; reset both if a game regresses. DXVK, D3DMetal, D3D12, MSync and
 media components remain separate work.
 
-
-### Host device availability
-
-The optional picker additionally calls Apple's public
-`MTLFXSpatialScalerDescriptor.supportsDevice` for the default Metal device.
-A missing or unsupported device cannot enable a new spatial scale. Imported
-preferences remain visible without being overwritten; Off and Reset remain
-available. The core capability flag describes the reviewed runtime package,
-while this interface check describes the current host device.
