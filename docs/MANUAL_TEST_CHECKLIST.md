@@ -70,3 +70,24 @@ repair, persistent Finder shortcuts,
 file associations, storage migration and update delivery remain unfinished.
 Developer ID signing/notarization, a separate-Mac clean-install check and the
 public binary licence/distribution review are release gates.
+
+
+## Library, browser games and optional DXMT controls
+
+- Open Library (Command-4). Refresh, change store filters, search and inspect a
+  title. Confirm the installed games belong to their original bottle; Epic/GOG
+  open their saved store client rather than guessing a game executable.
+- In Discover > Game reports, compare a title with your chip. Confirm source,
+  engine, renderer and date remain visible, and that missing evidence never
+  becomes a claim that Caskrun supports or cannot run the game.
+- Request a Steam game install in an existing Steam bottle, then in a new one.
+  Steam must handle ownership, sign-in, agreements and download confirmation.
+- Add a browser game from Discover or a public HTTPS link. Confirm Home opens
+  one default-browser tab; removing the shortcut preserves browser game data.
+- In an idle DXMT bottle, try the frame target and optional MetalFX spatial
+  scales with a real game. Compare performance, image quality and UI scaling.
+  Reset to application controlled / Off afterwards; existing defaults remain
+  Auto/WineD3D and optional high-resolution mode.
+- Check reduced motion, narrow window layout, keyboard focus, menu-bar reopen
+  and full Quit with the game running. Full Quit must stop only Caskrun-owned
+  Windows processes. Closing the main window keeps the menu-bar app available.

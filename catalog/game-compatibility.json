@@ -1,0 +1,2651 @@
+{
+  "format": "caskrun-game-compatibility",
+  "version": 1,
+  "source": {
+    "name": "Highball community reports",
+    "repository": "https://github.com/gauthierpiarrette/highball-db",
+    "revision": "d8d165834cd0b77613ac0f00300e8fac0b98b143",
+    "license": "CC0-1.0",
+    "license_url": "https://github.com/gauthierpiarrette/highball-db/blob/d8d165834cd0b77613ac0f00300e8fac0b98b143/LICENSE"
+  },
+  "games": [
+    {
+      "steam_app_id": 1966900,
+      "title": "20 Minutes Till Dawn",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M4",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-16",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/92"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 2784470,
+      "title": "9 Kings",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M3",
+          "macos": "15.7.4",
+          "memory_gib": null,
+          "date": "2026-09-16",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/76"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1055540,
+      "title": "A Short Hike",
+      "reports": []
+    },
+    {
+      "steam_app_id": 427410,
+      "title": "Abiotic Factor",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M4 Pro",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-23",
+          "engine": "x64-crossover26.3-r11",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/198"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 320140,
+      "title": "Absolute Drift",
+      "reports": []
+    },
+    {
+      "steam_app_id": 384190,
+      "title": "ABZU",
+      "reports": []
+    },
+    {
+      "steam_app_id": 502500,
+      "title": "ACE COMBAT™ 7: SKIES UNKNOWN",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1422630,
+      "title": "Active Neurons - Wonders Of The World",
+      "reports": []
+    },
+    {
+      "steam_app_id": 221380,
+      "title": "Age of Empires II (2013)",
+      "reports": []
+    },
+    {
+      "steam_app_id": 813780,
+      "title": "Age of Empires II: Definitive Edition",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2772750,
+      "title": "Age of History 3",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1934680,
+      "title": "Age of Mythology: Retold",
+      "reports": []
+    },
+    {
+      "steam_app_id": 214490,
+      "title": "Alien: Isolation",
+      "reports": []
+    },
+    {
+      "steam_app_id": 270880,
+      "title": "American Truck Simulator",
+      "reports": []
+    },
+    {
+      "steam_app_id": 945360,
+      "title": "Among Us",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M4",
+          "macos": "15.8",
+          "memory_gib": null,
+          "date": "2026-09-14",
+          "engine": "x64-sikarugir10.0_6-r1",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/41"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 4126040,
+      "title": "Aniimo",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1902490,
+      "title": "Aperture Desk Job",
+      "reports": [
+        {
+          "rating": 4,
+          "renderer": "dxvk",
+          "chip": "Apple M1 Pro",
+          "macos": "14.6",
+          "memory_gib": null,
+          "date": "2026-08-23",
+          "engine": "x64-sikarugir10.0_6-r0",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/blob/d8d165834cd0b77613ac0f00300e8fac0b98b143/db/reports/aperture-desk-job.jsonl#L1"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1172470,
+      "title": "Apex Legends",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1888160,
+      "title": "Armored Core VI",
+      "reports": []
+    },
+    {
+      "steam_app_id": 550320,
+      "title": "art of rally",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4391380,
+      "title": "Artillery Miner",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M2 Max",
+          "macos": "15.6",
+          "memory_gib": null,
+          "date": "2026-09-13",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/31"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 244210,
+      "title": "Assetto Corsa",
+      "reports": []
+    },
+    {
+      "steam_app_id": 805550,
+      "title": "Assetto Corsa Competizione",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1280930,
+      "title": "Astral Ascent",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2353250,
+      "title": "Astrometica",
+      "reports": []
+    },
+    {
+      "steam_app_id": 484900,
+      "title": "Aven Colony",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2141730,
+      "title": "Backrooms: Escape Together",
+      "reports": []
+    },
+    {
+      "steam_app_id": 688420,
+      "title": "Bad North: Jotunn Edition",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2379780,
+      "title": "Balatro",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1086940,
+      "title": "Baldur's Gate 3",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4557380,
+      "title": "Batomon Showdown",
+      "reports": [
+        {
+          "rating": 4,
+          "renderer": "dxmt",
+          "chip": "Apple M5",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-23",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/191"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1346400,
+      "title": "Battle Engine Aquila",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1025600,
+      "title": "Battle Realms: Zen Edition",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M2 Ultra",
+          "macos": "15.7.7",
+          "memory_gib": null,
+          "date": "2026-09-14",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/43"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 671860,
+      "title": "BattleBit Remastered",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1238840,
+      "title": "Battlefield 1",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1517290,
+      "title": "Battlefield 2042",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2807960,
+      "title": "Battlefield 6",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1238810,
+      "title": "Battlefield V",
+      "reports": []
+    },
+    {
+      "steam_app_id": 284160,
+      "title": "BeamNG.drive",
+      "reports": []
+    },
+    {
+      "steam_app_id": 622650,
+      "title": "Bendy and the Ink Machine",
+      "reports": []
+    },
+    {
+      "steam_app_id": 960990,
+      "title": "Beyond: Two Souls",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1478500,
+      "title": "Big Walk",
+      "reports": []
+    },
+    {
+      "steam_app_id": 203750,
+      "title": "Binary Domain",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1201240,
+      "title": "BLEACH Brave Souls",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1016950,
+      "title": "Blood Bowl 3",
+      "reports": [
+        {
+          "rating": 4,
+          "renderer": null,
+          "chip": "Apple M3",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-25",
+          "engine": "x64-sikarugir10.0_6-r8",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/214"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 3649940,
+      "title": "Bloodbreaker: Labyrinth of the Witch Demo",
+      "reports": []
+    },
+    {
+      "steam_app_id": 992300,
+      "title": "Bloody Spell",
+      "reports": []
+    },
+    {
+      "steam_app_id": 960090,
+      "title": "Bloons TD 6",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2406770,
+      "title": "Bodycam",
+      "reports": []
+    },
+    {
+      "steam_app_id": 291550,
+      "title": "Brawlhalla",
+      "reports": []
+    },
+    {
+      "steam_app_id": 225080,
+      "title": "Brothers - A Tale of Two Sons",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1588550,
+      "title": "Cairn",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1938090,
+      "title": "Call of Duty (MW/Warzone)",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3606480,
+      "title": "Call of Duty: Black Ops 7",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1582650,
+      "title": "Caravan SandWitch",
+      "reports": []
+    },
+    {
+      "steam_app_id": 5000760,
+      "title": "Castlevania: Belmont's Curse Demo",
+      "reports": []
+    },
+    {
+      "steam_app_id": 613830,
+      "title": "CHRONO TRIGGER",
+      "reports": []
+    },
+    {
+      "steam_app_id": 255710,
+      "title": "Cities: Skylines",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1386780,
+      "title": "City of Gangsters",
+      "reports": []
+    },
+    {
+      "steam_app_id": 289070,
+      "title": "Civilization VI",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1903340,
+      "title": "Clair Obscur: Expedition 33",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1710820,
+      "title": "Cleared Hot",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M3",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-26",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/219"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 3314790,
+      "title": "CloverPit",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2281730,
+      "title": "Combat Master",
+      "reports": []
+    },
+    {
+      "steam_app_id": 24790,
+      "title": "Command & Conquer 3: Tiberium Wars",
+      "reports": []
+    },
+    {
+      "steam_app_id": 231430,
+      "title": "Company of Heroes 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1677280,
+      "title": "Company of Heroes 3",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2698780,
+      "title": "ContractVille",
+      "reports": []
+    },
+    {
+      "steam_app_id": 870780,
+      "title": "Control",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1158160,
+      "title": "Coral Island",
+      "reports": []
+    },
+    {
+      "steam_app_id": 10,
+      "title": "Counter-Strike",
+      "reports": []
+    },
+    {
+      "steam_app_id": 730,
+      "title": "Counter-Strike 2",
+      "reports": [
+        {
+          "rating": 4,
+          "renderer": "d3dmetal",
+          "chip": null,
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-25",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/215"
+        },
+        {
+          "rating": 4,
+          "renderer": null,
+          "chip": "Apple M5",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-23",
+          "engine": "x64-sikarugir10.0_6-r5",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/193"
+        },
+        {
+          "rating": 4,
+          "renderer": null,
+          "chip": "Apple M4 Pro",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-13",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/24"
+        },
+        {
+          "rating": 4,
+          "renderer": "dxmt",
+          "chip": "Apple M1 Pro",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-04",
+          "engine": "x64-sikarugir10.0_6-r1",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/blob/d8d165834cd0b77613ac0f00300e8fac0b98b143/db/reports/counter-strike-2.jsonl#L1"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 4465480,
+      "title": "Counter-Strike: Global Offensive (Legacy)",
+      "reports": []
+    },
+    {
+      "steam_app_id": 774801,
+      "title": "Crab Champions",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M4 Pro",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-13",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/27"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1028630,
+      "title": "Cricket 19",
+      "reports": [
+        {
+          "rating": 4,
+          "renderer": null,
+          "chip": "Apple M1 Pro",
+          "macos": "26.5",
+          "memory_gib": null,
+          "date": "2026-09-13",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/25"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1158310,
+      "title": "Crusader Kings III",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1091500,
+      "title": "Cyberpunk 2077",
+      "reports": []
+    },
+    {
+      "steam_app_id": 374320,
+      "title": "Dark Souls III",
+      "reports": []
+    },
+    {
+      "steam_app_id": 570940,
+      "title": "Dark Souls: Remastered",
+      "reports": []
+    },
+    {
+      "steam_app_id": 262060,
+      "title": "Darkest Dungeon",
+      "reports": []
+    },
+    {
+      "steam_app_id": 381210,
+      "title": "Dead by Daylight",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1422450,
+      "title": "Deadlock",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1190460,
+      "title": "Death Stranding",
+      "reports": []
+    },
+    {
+      "steam_app_id": 894020,
+      "title": "Death's Door",
+      "reports": []
+    },
+    {
+      "steam_app_id": 548430,
+      "title": "Deep Rock Galactic",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2524850,
+      "title": "Denshattack!",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4623570,
+      "title": "Deskrawl",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1085660,
+      "title": "Destiny 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1222140,
+      "title": "Detroit: Become Human",
+      "reports": []
+    },
+    {
+      "steam_app_id": 329050,
+      "title": "Devil May Cry 4 Special Edition",
+      "reports": []
+    },
+    {
+      "steam_app_id": 601150,
+      "title": "Devil May Cry 5",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3904950,
+      "title": "Dice Dice Baby",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2402680,
+      "title": "Dimraeth",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M4",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-26",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/224"
+        },
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M1 Pro",
+          "macos": "26.5.1",
+          "memory_gib": null,
+          "date": "2026-09-16",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/81"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 690790,
+      "title": "DiRT Rally 2.0",
+      "reports": []
+    },
+    {
+      "steam_app_id": 632470,
+      "title": "Disco Elysium - The Final Cut",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M1",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-23",
+          "engine": "x64-sikarugir10.0_6-r5",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/186"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 205100,
+      "title": "Dishonored",
+      "reports": []
+    },
+    {
+      "steam_app_id": 403640,
+      "title": "Dishonored 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 960170,
+      "title": "DJMAX RESPECT V",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2338140,
+      "title": "Dokapon Kingdom: Connect",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2019300,
+      "title": "Dokimon Quest",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1148590,
+      "title": "DOOM 64",
+      "reports": []
+    },
+    {
+      "steam_app_id": 782330,
+      "title": "DOOM Eternal",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2893570,
+      "title": "DRAGON QUEST I & II HD-2D Remake",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M4 Pro",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-25",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/208"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 2499860,
+      "title": "DRAGON QUEST VII Reimagined",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2525310,
+      "title": "Drop Duchy",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M4",
+          "macos": "15.3.1",
+          "memory_gib": null,
+          "date": "2026-09-15",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/49"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1605220,
+      "title": "Dune: Spice Wars",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2669320,
+      "title": "EA SPORTS FC™ 25",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1811260,
+      "title": "EA SPORTS™ FIFA 23",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2140330,
+      "title": "EA SPORTS™ Madden NFL 24",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3230400,
+      "title": "EA SPORTS™ Madden NFL 26",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1849250,
+      "title": "EA SPORTS™ WRC 24",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1665460,
+      "title": "eFootball",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M5 Pro",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-13",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/26"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1245620,
+      "title": "Elden Ring",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2622380,
+      "title": "ELDEN RING NIGHTREIGN",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1113940,
+      "title": "Electronic Super Joy 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2643980,
+      "title": "Emberward",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1943950,
+      "title": "Escape the Backrooms",
+      "reports": []
+    },
+    {
+      "steam_app_id": 227300,
+      "title": "Euro Truck Simulator 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3450310,
+      "title": "Europa Universalis 5",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1477590,
+      "title": "EZ2ON REBOOT : R",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2488620,
+      "title": "F1® 24",
+      "reports": []
+    },
+    {
+      "steam_app_id": 427520,
+      "title": "Factorio",
+      "reports": []
+    },
+    {
+      "steam_app_id": 377160,
+      "title": "Fallout 4",
+      "reports": []
+    },
+    {
+      "steam_app_id": 22380,
+      "title": "Fallout: New Vegas",
+      "reports": [
+        {
+          "rating": 2,
+          "renderer": "dxvk",
+          "chip": "Apple M3 Pro",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-25",
+          "engine": null,
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/211"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1044720,
+      "title": "Farthest Frontier",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1462040,
+      "title": "FINAL FANTASY VII REMAKE INTERGRADE",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M1",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-23",
+          "engine": null,
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/188"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 292120,
+      "title": "FINAL FANTASY XIII",
+      "reports": []
+    },
+    {
+      "steam_app_id": 319510,
+      "title": "Five Nights at Freddy's",
+      "reports": []
+    },
+    {
+      "steam_app_id": 332800,
+      "title": "Five Nights at Freddy's 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 388090,
+      "title": "Five Nights at Freddy's 4",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2638370,
+      "title": "Five Nights at Freddy's: Into the Pit",
+      "reports": []
+    },
+    {
+      "steam_app_id": 751780,
+      "title": "Forager",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1590910,
+      "title": "Forgive Me Father",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1551360,
+      "title": "Forza Horizon 5",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2483190,
+      "title": "Forza Horizon 6",
+      "reports": []
+    },
+    {
+      "steam_app_id": 323190,
+      "title": "Frostpunk",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1920430,
+      "title": "FUMES",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4000,
+      "title": "Garry's Mod",
+      "reports": []
+    },
+    {
+      "steam_app_id": 322170,
+      "title": "Geometry Dash",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1139900,
+      "title": "Ghostrunner",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2144740,
+      "title": "Ghostrunner 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1593500,
+      "title": "God of War",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3626940,
+      "title": "Gold Mining Simulator 2 Demo",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2437570,
+      "title": "Golden Chambers",
+      "reports": []
+    },
+    {
+      "steam_app_id": 12210,
+      "title": "Grand Theft Auto IV: The Complete Edition",
+      "reports": []
+    },
+    {
+      "steam_app_id": 271590,
+      "title": "Grand Theft Auto V (Legacy)",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3240220,
+      "title": "Grand Theft Auto V Enhanced",
+      "reports": []
+    },
+    {
+      "steam_app_id": 12120,
+      "title": "Grand Theft Auto: San Andreas",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4358690,
+      "title": "Graveyard Keeper 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 815370,
+      "title": "Green Hell",
+      "reports": []
+    },
+    {
+      "steam_app_id": 601840,
+      "title": "Griftlands",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1284210,
+      "title": "Guild Wars 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1101120,
+      "title": "Gunsmith Simulator",
+      "reports": [
+        {
+          "rating": 3,
+          "renderer": "d3dmetal",
+          "chip": "Apple M3",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-26",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/221"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1145350,
+      "title": "Hades II",
+      "reports": []
+    },
+    {
+      "steam_app_id": 70,
+      "title": "Half-Life",
+      "reports": []
+    },
+    {
+      "steam_app_id": 220,
+      "title": "Half-Life 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2218750,
+      "title": "Halls of Torment",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1240440,
+      "title": "Halo Infinite",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4025700,
+      "title": "Heartopia",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1782460,
+      "title": "Hell Clock",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M4 Pro",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-24",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/201"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 553850,
+      "title": "HELLDIVERS 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1948980,
+      "title": "Hero's Adventure: Road to Passion",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3105440,
+      "title": "Heroes of Might and Magic: Olden Era",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M5",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-16",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/82"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 990080,
+      "title": "Hogwarts Legacy",
+      "reports": []
+    },
+    {
+      "steam_app_id": 367520,
+      "title": "Hollow Knight",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2420510,
+      "title": "HoloCure - Save the Fans!",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M2 Pro",
+          "macos": "26.5.2",
+          "memory_gib": null,
+          "date": "2026-09-17",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/98"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1151640,
+      "title": "Horizon Zero Dawn",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1271700,
+      "title": "HOT WHEELS UNLEASHED",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4001890,
+      "title": "How to Fish",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3676940,
+      "title": "Hubert Demo",
+      "reports": []
+    },
+    {
+      "steam_app_id": 383270,
+      "title": "Hue",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1766060,
+      "title": "HumanitZ",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4173620,
+      "title": "I Know a Guy: Shady Life Simulator",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3320,
+      "title": "Insaniquarium Deluxe",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M3",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-16",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/85"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 304430,
+      "title": "INSIDE",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2239710,
+      "title": "Into the Dead: Our Darkest Days",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M3",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-26",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/220"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 3226450,
+      "title": "iRacing Arcade",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4300500,
+      "title": "IRON NEST: Heavy Turret Simulator Demo",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M1",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-15",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/50"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1426210,
+      "title": "It Takes Two",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1244460,
+      "title": "Jurassic World Evolution 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 701160,
+      "title": "Kingdom Two Crowns",
+      "reports": []
+    },
+    {
+      "steam_app_id": 496300,
+      "title": "Kingdom: New Lands",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1221540,
+      "title": "KUUKIYOMI: Consider It",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4317790,
+      "title": "Last Pirates: Die Together",
+      "reports": []
+    },
+    {
+      "steam_app_id": 500,
+      "title": "Left 4 Dead",
+      "reports": []
+    },
+    {
+      "steam_app_id": 550,
+      "title": "Left 4 Dead 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 920210,
+      "title": "LEGO Star Wars: The Skywalker Saga",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1966720,
+      "title": "Lethal Company",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1265920,
+      "title": "Life is Strange Remastered",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1265930,
+      "title": "Life is Strange: Before the Storm Remastered",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1973530,
+      "title": "Limbus Company",
+      "reports": []
+    },
+    {
+      "steam_app_id": 233150,
+      "title": "LUFTRAUSERS",
+      "reports": []
+    },
+    {
+      "steam_app_id": 629820,
+      "title": "Maneater",
+      "reports": []
+    },
+    {
+      "steam_app_id": 473950,
+      "title": "Manifold Garden",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1363080,
+      "title": "Manor Lords",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1789480,
+      "title": "Marauders",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1088850,
+      "title": "Marvel's Guardians of the Galaxy",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1817070,
+      "title": "Marvel's Spider-Man Remastered",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M5 Pro",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-17",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/99"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 4704690,
+      "title": "MECCHA CHAMELEON",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3405340,
+      "title": "Megabonk",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1585220,
+      "title": "Melatonin",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M5",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-15",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/52"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 2679460,
+      "title": "Metaphor: ReFantazio",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2537590,
+      "title": "Microsoft Flight Simulator 2024",
+      "reports": [
+        {
+          "rating": 1,
+          "renderer": "d3dmetal",
+          "chip": "Apple M4",
+          "macos": "26.5.2",
+          "memory_gib": null,
+          "date": "2026-08-30",
+          "engine": "x64-sikarugir10.0_6-r0",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/6"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 356190,
+      "title": "Middle-earth: Shadow of War",
+      "reports": []
+    },
+    {
+      "steam_app_id": 5029110,
+      "title": "MineMergeMatic Demo",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M2 Pro",
+          "macos": "26.5.1",
+          "memory_gib": null,
+          "date": "2026-09-26",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/227"
+        },
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M2 Max",
+          "macos": "15.6",
+          "memory_gib": null,
+          "date": "2026-09-13",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/28"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1233570,
+      "title": "Mirror's Edge Catalyst",
+      "reports": []
+    },
+    {
+      "steam_app_id": 582010,
+      "title": "Monster Hunter: World",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1927720,
+      "title": "Monument Valley",
+      "reports": []
+    },
+    {
+      "steam_app_id": 261550,
+      "title": "Mount & Blade II: Bannerlord",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2416450,
+      "title": "MOUSE: P.I. For Hire",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M4 Pro",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-15",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/58"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 675010,
+      "title": "MudRunner",
+      "reports": []
+    },
+    {
+      "steam_app_id": 516750,
+      "title": "My Summer Car",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M4",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-26",
+          "engine": "x64-sikarugir10.0_6-r5",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/225"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 349040,
+      "title": "NARUTO SHIPPUDEN: Ultimate Ninja STORM 4",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1732430,
+      "title": "Neighbors: Suburban Warfare",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1406990,
+      "title": "NEKOPARA Vol. 4",
+      "reports": []
+    },
+    {
+      "steam_app_id": 589370,
+      "title": "Ni no Kuni II: Revenant Kingdom",
+      "reports": []
+    },
+    {
+      "steam_app_id": 589360,
+      "title": "Ni no Kuni: Wrath of the White Witch",
+      "reports": []
+    },
+    {
+      "steam_app_id": 524220,
+      "title": "NieR: Automata",
+      "reports": []
+    },
+    {
+      "steam_app_id": 12830,
+      "title": "Operation Flashpoint: Dragon Rising",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1057090,
+      "title": "Ori and the Will of the Wisps",
+      "reports": []
+    },
+    {
+      "steam_app_id": 690040,
+      "title": "Outcast: A New Beginning",
+      "reports": []
+    },
+    {
+      "steam_app_id": 753640,
+      "title": "Outer Wilds",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2357570,
+      "title": "Overwatch 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2707930,
+      "title": "Palia",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1623730,
+      "title": "Palworld",
+      "reports": []
+    },
+    {
+      "steam_app_id": 710700,
+      "title": "Paperback: The Game",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2694490,
+      "title": "Path of Exile 2",
+      "reports": [
+        {
+          "rating": 3,
+          "renderer": null,
+          "chip": "Apple M5",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-15",
+          "engine": "x64-crossover26.3-r8",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/53"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 3527290,
+      "title": "PEAK",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2161700,
+      "title": "Persona 3 Reload",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1687950,
+      "title": "Persona 5 Royal",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M5",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-12",
+          "engine": "x64-crossover26.3-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/22"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 553540,
+      "title": "Phantom Brigade",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1733240,
+      "title": "Phantom Fury",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M3",
+          "macos": "27.2",
+          "memory_gib": null,
+          "date": "2026-09-23",
+          "engine": "x64-sikarugir10.0_6-r5",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/194"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 739630,
+      "title": "Phasmophobia",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxvk",
+          "chip": "Apple M4",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-17",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/96"
+        },
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M4",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-16",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/95"
+        },
+        {
+          "rating": 4,
+          "renderer": "dxvk",
+          "chip": "Apple M3",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-15",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/55"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 461040,
+      "title": "PICO PARK:Classic Edition",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2688950,
+      "title": "Planet Coaster 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1262240,
+      "title": "Plants vs. Zombies: Battle for Neighborville",
+      "reports": []
+    },
+    {
+      "steam_app_id": 400,
+      "title": "Portal",
+      "reports": []
+    },
+    {
+      "steam_app_id": 620,
+      "title": "Portal 2",
+      "reports": [
+        {
+          "rating": 3,
+          "renderer": "dxmt",
+          "chip": null,
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-16",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/94"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1210320,
+      "title": "Potion Craft: Alchemist Simulator",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4003800,
+      "title": "PRAGMATA Sketchbook (Demo)",
+      "reports": []
+    },
+    {
+      "steam_app_id": 480490,
+      "title": "Prey (2017)",
+      "reports": []
+    },
+    {
+      "steam_app_id": 233450,
+      "title": "Prison Architect",
+      "reports": []
+    },
+    {
+      "steam_app_id": 578080,
+      "title": "PUBG: Battlegrounds",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3241660,
+      "title": "R.E.P.O.",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M5",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-15",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/47"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 211500,
+      "title": "RaceRoom Racing Experience",
+      "reports": [
+        {
+          "rating": 3,
+          "renderer": "dxvk",
+          "chip": "Apple M3",
+          "macos": "15.8",
+          "memory_gib": null,
+          "date": "2026-09-15",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/60"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 312520,
+      "title": "Rain World",
+      "reports": []
+    },
+    {
+      "steam_app_id": 359550,
+      "title": "Rainbow Six Siege",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1174180,
+      "title": "Red Dead Redemption 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 304240,
+      "title": "Resident Evil",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2050650,
+      "title": "Resident Evil 4",
+      "reports": []
+    },
+    {
+      "steam_app_id": 229950,
+      "title": "Resident Evil 6 Benchmark Tool",
+      "reports": []
+    },
+    {
+      "steam_app_id": 952070,
+      "title": "Resident Evil Resistance",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1196590,
+      "title": "Resident Evil Village",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3812600,
+      "title": "ReStory: Chill Electronics Repairs",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3552140,
+      "title": "Retro Rewind: Video Store Simulator",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M1 Pro",
+          "macos": "26.5.1",
+          "memory_gib": null,
+          "date": "2026-09-14",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/32"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 4758450,
+      "title": "RippleLoop Demo",
+      "reports": []
+    },
+    {
+      "steam_app_id": 632360,
+      "title": "Risk of Rain 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 383980,
+      "title": "Rivals of Aether",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2104890,
+      "title": "RoadCraft",
+      "reports": [
+        {
+          "rating": 4,
+          "renderer": null,
+          "chip": "Apple M4 Pro",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-13",
+          "engine": "x64-crossover26.3-r8",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/30"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 252950,
+      "title": "Rocket League",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1805320,
+      "title": "Romestead",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1374490,
+      "title": "RuneScape: Dragonwilds",
+      "reports": []
+    },
+    {
+      "steam_app_id": 252490,
+      "title": "Rust",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3949040,
+      "title": "RV There Yet?",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4500,
+      "title": "S.T.A.L.K.E.R.: Shadow of Chernobyl",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4894830,
+      "title": "Sandcastle",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M3",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-26",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/223"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 526870,
+      "title": "Satisfactory",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M5",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-23",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/190"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1122720,
+      "title": "Sayonara Wild Hearts",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M4 Pro",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-14",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/45"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 3164500,
+      "title": "Schedule I",
+      "reports": []
+    },
+    {
+      "steam_app_id": 814380,
+      "title": "Sekiro: Shadows Die Twice",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3576350,
+      "title": "Sex, Secrets & Used Tech",
+      "reports": []
+    },
+    {
+      "steam_app_id": 750920,
+      "title": "Shadow of the Tomb Raider",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2178480,
+      "title": "Shiren the Wanderer: The Mystery Dungeon of Serpentcoil Island",
+      "reports": []
+    },
+    {
+      "steam_app_id": 632950,
+      "title": "SiN Reloaded",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M2",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-26",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/226"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 646570,
+      "title": "Slay the Spire",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2868840,
+      "title": "Slay the Spire 2",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M2 Pro",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-16",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/84"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 584400,
+      "title": "Sonic Mania",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2475460,
+      "title": "SOS OPS!",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1602080,
+      "title": "Soulstice",
+      "reports": []
+    },
+    {
+      "steam_app_id": 213670,
+      "title": "South Park: The Stick of Truth",
+      "reports": []
+    },
+    {
+      "steam_app_id": 107200,
+      "title": "Space Pirates and Zombies",
+      "reports": []
+    },
+    {
+      "steam_app_id": 418530,
+      "title": "Spelunky 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3767850,
+      "title": "SpiritVale",
+      "reports": []
+    },
+    {
+      "steam_app_id": 376680,
+      "title": "Splendor",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M1",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-23",
+          "engine": "x64-sikarugir10.0.6-r5",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/187"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 115110,
+      "title": "Stacking",
+      "reports": []
+    },
+    {
+      "steam_app_id": 32470,
+      "title": "STAR WARS Empire at War: Gold Pack",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3489700,
+      "title": "Stellar Blade",
+      "reports": []
+    },
+    {
+      "steam_app_id": 281990,
+      "title": "Stellaris",
+      "reports": []
+    },
+    {
+      "steam_app_id": 978780,
+      "title": "STORY OF SEASONS: Friends of Mineral Town",
+      "reports": [
+        {
+          "rating": 4,
+          "renderer": "dxmt",
+          "chip": null,
+          "macos": "26.5",
+          "memory_gib": null,
+          "date": "2026-09-14",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/42"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1332010,
+      "title": "Stray",
+      "reports": []
+    },
+    {
+      "steam_app_id": 310950,
+      "title": "Street Fighter V",
+      "reports": []
+    },
+    {
+      "steam_app_id": 985890,
+      "title": "Streets of Rage 4",
+      "reports": []
+    },
+    {
+      "steam_app_id": 264710,
+      "title": "Subnautica",
+      "reports": []
+    },
+    {
+      "steam_app_id": 40800,
+      "title": "Super Meat Boy",
+      "reports": []
+    },
+    {
+      "steam_app_id": 377530,
+      "title": "Tale of Wuxia",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1566200,
+      "title": "Tape to Tape",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M1 Pro",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-14",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/34"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 3070070,
+      "title": "TCG Card Shop Simulator",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M1 Pro",
+          "macos": "26.5.1",
+          "memory_gib": null,
+          "date": "2026-09-14",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/33"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 440,
+      "title": "Team Fortress 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 389730,
+      "title": "TEKKEN 7",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1180660,
+      "title": "Tell Me Why",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1593030,
+      "title": "Terra Nil",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1601570,
+      "title": "The Alters",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2837600,
+      "title": "The Alto Collection",
+      "reports": []
+    },
+    {
+      "steam_app_id": 250900,
+      "title": "The Binding of Isaac: Rebirth (Repentance+)",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3751260,
+      "title": "The Blood of Dawnwalker",
+      "reports": []
+    },
+    {
+      "steam_app_id": 489830,
+      "title": "The Elder Scrolls V: Skyrim Special Edition",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2060160,
+      "title": "The Farmer Was Replaced",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2073850,
+      "title": "THE FINALS",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1783560,
+      "title": "The Last Caretaker",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1830970,
+      "title": "The Last Flame",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1295920,
+      "title": "The Mortuary Assistant",
+      "reports": []
+    },
+    {
+      "steam_app_id": 578650,
+      "title": "The Outer Worlds",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1577120,
+      "title": "The Quarry",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3314070,
+      "title": "The Sims 2 Legacy Collection",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1222670,
+      "title": "The Sims 4",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3314060,
+      "title": "The Sims Legacy Collection",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M4",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-14",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/36"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 378540,
+      "title": "The Surge",
+      "reports": []
+    },
+    {
+      "steam_app_id": 835960,
+      "title": "The Talos Principle 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 292030,
+      "title": "The Witcher 3: Wild Hunt",
+      "reports": [
+        {
+          "rating": 3,
+          "renderer": "dxmt",
+          "chip": "Apple M4 Max",
+          "macos": "15.7.7",
+          "memory_gib": null,
+          "date": "2026-09-14",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/38"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 250320,
+      "title": "The Wolf Among Us",
+      "reports": []
+    },
+    {
+      "steam_app_id": 282070,
+      "title": "This War of Mine",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1237970,
+      "title": "Titanfall 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2925280,
+      "title": "Tlatoani: Aztec Cities Demo",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2634950,
+      "title": "Tokyo Xtreme Racer",
+      "reports": []
+    },
+    {
+      "steam_app_id": 365590,
+      "title": "Tom Clancy's The Division",
+      "reports": [
+        {
+          "rating": 3,
+          "renderer": "d3dmetal",
+          "chip": "Apple M5",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-22",
+          "engine": "x64-sikarugir10.0_6-r5",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/183"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 2221490,
+      "title": "Tom Clancy's The Division 2",
+      "reports": [
+        {
+          "rating": 3,
+          "renderer": "dxmt",
+          "chip": "Apple M5",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-23",
+          "engine": "x64-sikarugir10.0_6-r5",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/199"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 2379390,
+      "title": "Tom Clancy’s Rainbow Six® Extraction",
+      "reports": []
+    },
+    {
+      "steam_app_id": 203160,
+      "title": "Tomb Raider Game of the Year Edition",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2525380,
+      "title": "Tomb Raider IV-VI Remastered",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1827180,
+      "title": "Toram Online",
+      "reports": [
+        {
+          "rating": 4,
+          "renderer": "dxvk",
+          "chip": "Apple M1 Pro",
+          "macos": "26.5.2",
+          "memory_gib": null,
+          "date": "2026-09-24",
+          "engine": "x64-crossover26.3-r8",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/206"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1142710,
+      "title": "Total War: WARHAMMER III",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2225070,
+      "title": "Trackmania",
+      "reports": []
+    },
+    {
+      "steam_app_id": 585420,
+      "title": "Trailmakers",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1282590,
+      "title": "Train Sim World 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3656800,
+      "title": "Train Sim World 6",
+      "reports": []
+    },
+    {
+      "steam_app_id": 24010,
+      "title": "Train Simulator Classic",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": null,
+          "macos": "27",
+          "memory_gib": null,
+          "date": "2026-09-15",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/51"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1850510,
+      "title": "TRIANGLE STRATEGY",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "dxmt",
+          "chip": "Apple M4 Max",
+          "macos": "27.2",
+          "memory_gib": null,
+          "date": "2026-09-25",
+          "engine": "x64-crossover26.3-r9",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/212"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 871720,
+      "title": "Ultimate Custom Night",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1229490,
+      "title": "ULTRAKILL",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3224770,
+      "title": "Umamusume: Pretty Derby",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1659420,
+      "title": "UNCHARTED: Legacy of Thieves Collection",
+      "reports": []
+    },
+    {
+      "steam_app_id": 391540,
+      "title": "Undertale",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "wined3d",
+          "chip": "Apple M5 Pro",
+          "macos": "26.3.1",
+          "memory_gib": null,
+          "date": "2026-09-24",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/200"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 3606890,
+      "title": "Upload Labs",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1794680,
+      "title": "Vampire Survivors",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1382070,
+      "title": "Viewfinder",
+      "reports": []
+    },
+    {
+      "steam_app_id": 212160,
+      "title": "Vindictus",
+      "reports": []
+    },
+    {
+      "steam_app_id": 438100,
+      "title": "VRChat",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1876890,
+      "title": "Wandering Sword",
+      "reports": []
+    },
+    {
+      "steam_app_id": 767560,
+      "title": "War Robots",
+      "reports": []
+    },
+    {
+      "steam_app_id": 230410,
+      "title": "Warframe",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M3 Pro",
+          "macos": "26.6.2",
+          "memory_gib": null,
+          "date": "2026-09-16",
+          "engine": "x64-sikarugir10.0_6-r3",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/83"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 2005010,
+      "title": "Warhammer 40,000: Boltgun",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4280860,
+      "title": "Warhammer: Dark Omen (Classic)",
+      "reports": []
+    },
+    {
+      "steam_app_id": 447040,
+      "title": "Watch_Dogs® 2",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3699590,
+      "title": "Well Dweller",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M4 Pro",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-26",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/222"
+        },
+        {
+          "rating": 5,
+          "renderer": null,
+          "chip": "Apple M4 Pro",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-22",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/185"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 2823140,
+      "title": "WHERE SAFETY ENDS *Remake*",
+      "reports": []
+    },
+    {
+      "steam_app_id": 3564740,
+      "title": "Where Winds Meet",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1115050,
+      "title": "Will You Snail?",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M3",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-15",
+          "engine": "x64-sikarugir10.0_6-r2",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/54"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1211020,
+      "title": "Wobbly Life",
+      "reports": []
+    },
+    {
+      "steam_app_id": 4072240,
+      "title": "Woman Simulator",
+      "reports": []
+    },
+    {
+      "steam_app_id": 5149020,
+      "title": "Word Link",
+      "reports": []
+    },
+    {
+      "steam_app_id": 784150,
+      "title": "Workers & Resources: Soviet Republic",
+      "reports": []
+    },
+    {
+      "steam_app_id": 552990,
+      "title": "World of Warships",
+      "reports": []
+    },
+    {
+      "steam_app_id": 217200,
+      "title": "Worms Armageddon",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2988580,
+      "title": "Yakuza 0 Director's Cut",
+      "reports": []
+    },
+    {
+      "steam_app_id": 579180,
+      "title": "Ys VIII: Lacrimosa of Dana",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1449850,
+      "title": "Yu-Gi-Oh! Master Duel",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1359090,
+      "title": "Zero Hour",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1782120,
+      "title": "ZERO Sievert",
+      "reports": [
+        {
+          "rating": 5,
+          "renderer": "d3dmetal",
+          "chip": "Apple M3",
+          "macos": "27.0",
+          "memory_gib": null,
+          "date": "2026-09-26",
+          "engine": "x64-sikarugir10.0_6-r7",
+          "source_url": "https://github.com/gauthierpiarrette/highball-db/issues/218"
+        }
+      ]
+    },
+    {
+      "steam_app_id": 1159090,
+      "title": "Zoria: Age of Shattering",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2340650,
+      "title": "古龙风云录",
+      "reports": []
+    },
+    {
+      "steam_app_id": 952860,
+      "title": "河洛群俠傳 (Ho Tu Lo Shu ： The Books of Dragon)",
+      "reports": []
+    },
+    {
+      "steam_app_id": 2098790,
+      "title": "群侠传，启动！",
+      "reports": []
+    },
+    {
+      "steam_app_id": 1189490,
+      "title": "觅长生",
+      "reports": []
+    }
+  ]
+}

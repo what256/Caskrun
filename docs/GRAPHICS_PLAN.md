@@ -1,8 +1,8 @@
 # Graphics compatibility path
 
-_Research snapshot: 23 September 2026. This is an implementation plan, not a claim that a Windows game renders in Caskrun._
+_Research began 23 September 2026; later gates and app integration are recorded below. This is an implementation/evidence record, not a claim that a Windows game renders in Caskrun._
 
-Caskrun currently bundles independently built Wine 11.0 and uses Wine's default graphics path. Local Wine logs report missing Vulkan support; no D3D game, controller, frame rate, or graphics switch has passed a Caskrun game test. A successful Steam updater does not establish graphics compatibility.
+Caskrun's default remains WineD3D in its independently built Wine 11.0 engine. The current demo additionally exposes verified, optional DXMT and its frame target and MetalFX spatial scaling controls. Original x64/x86 API matrices passed; no real game, displayed frame rate, controller or image-quality result has been established. See [app integration](DXMT_APP_INTEGRATION.md) and [optional-control evidence](DXMT_OPTIONS.md). The older Vulkan experiments below remain separate from the bundled path.
 
 An [isolated full Wine/Vulkan candidate](VULKAN_CANDIDATE.md) has since passed fresh-bottle x64 and x86 Vulkan device enumeration after relocation and removal of its build tree. It remains outside the app and DMG. Direct3D translation and game rendering remain unverified, so the current bundled WineD3D path is unchanged.
 
@@ -28,7 +28,7 @@ The traces, executables, self-authored C probes, build logs, wrapper snapshot, a
 2. Put `libvulkan.1.dylib`, `libMoltenVK.dylib`, and its unchanged portability ICD JSON inside the runtime. Resolve their absolute paths from the runtime's own location when launching, then set `DYLD_FALLBACK_LIBRARY_PATH` and `VK_DRIVER_FILES` only inside the Wine entrypoint. The successful probe used no caller graphics environment overrides. Verify Mach-O architectures, deployment target, linkage, relocation, signatures, hashes, and license notices after packaging.
 3. Choose a renderer only after a self-authored Direct3D test creates a device, draws a frame, and produces a visible result in a fresh bottle. Verify x64 and x86 separately; record which DLL actually loaded and its renderer log. Then test a real game through install, launch, play, exit, and relaunch before assigning a default for that title. Leave the ordinary Install → Play flow free of Wine/Vulkan choices.
 
-Existing initialized bottles are bound to the exact bundled runtime-tree digest in `core/src/main.rs`. The only current migration path in `core/src/runtime_migration.rs` is a narrowly approved transition for an idle, verified Steam bottle. A Vulkan candidate must therefore use fresh disposable bottles first; changing the development DMG alone would not make it safe to switch existing bottles. Before enabling per-bottle renderer selection for existing users, add a general idle-bottle migration with an exact source/destination identity check and a verified rollback path.
+At the initial Vulkan snapshot, initialized bottles were bound to the bundled runtime-tree digest and the only reviewed migration was an idle, verified Steam transition. The later [DXMT app integration](DXMT_APP_INTEGRATION.md) adds a reviewed exact native-runtime transition with idle checks and rollback. A different Vulkan candidate still needs fresh disposable bottles and its own approved source/destination identities before existing bottles can use it; replacing the DMG alone does not approve a migration.
 
 The separate [DXMT upstream build guide](https://github.com/3Shain/dxmt/blob/main/docs/DEVELOPMENT.md) is a plausible next D3D10/11 experiment because it targets Metal directly and avoids this Vulkan device limit. Its documented Wine cross-build requires **Meson 1.3+**, **LLVM 15 exactly with x86_64 headers and static libraries**, Xcode 16+, Wine 8+ build files, and a Windows cross-compiler. At that initial review, the Meson/Ninja/LLVM toolchain and DXMT probes were not staged; the later gates below record their completed build and API tests. The separately published [DXMT license](https://github.com/3Shain/dxmt/blob/main/LICENSE) is LGPL-2.1-or-later and credits Feifan He **for CodeWeavers**. Review that upstream provenance against the project's no-CrossOver-code requirement before including it. If approved, pin a DXMT source revision and toolchain, build x64 PE DLLs plus its x64 Unix library in ignored `.build/`, and run the same device/frame/visual tests; 32-bit PE DLLs are a separate build and depend on the x64 Unix library.
 
@@ -162,3 +162,20 @@ shutdown proofs and pre-Wine record rollback are bottle-scoped. See
 [app integration](DXMT_APP_INTEGRATION.md). Visible output and real games remain
 unvalidated; other backends and synchronization remain unavailable. High
 Resolution remains optional and off by default.
+
+### Optional DXMT presentation controls
+
+The bottle inspector also provides an application-controlled/default frame
+target or a bounded FPS target and optional 1.25×, 1.5× or 2× MetalFX spatial
+output scale. Both controls default off and require verified DXMT, a capable
+device where relevant, and stopped bottle apps before changes. They preserve
+the default renderer and require no new runtime bytes.
+
+The original live matrix passed all five tested control combinations under both
+Windows x64 and x86, including drawing/readback, two-window resize/recreation,
+runtime ownership, configuration precedence, refused edits while running and
+owned cleanup. API-submission timing does not measure displayed game FPS.
+Visible composition, image quality, fullscreen behavior, performance and games
+remain manual gates. DLSS, temporal reconstruction, frame generation, DXVK,
+D3DMetal, D3D12 and MSync are not supplied by these controls. See
+[DXMT options](DXMT_OPTIONS.md) for exact settings and reproduction.

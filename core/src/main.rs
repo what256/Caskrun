@@ -6,6 +6,7 @@ mod bottle_details;
 mod bottle_graphics;
 mod bottle_resolution;
 mod bottle_xdg;
+mod browser_games;
 mod cancellation;
 mod crossover_import;
 mod diagnostics;
@@ -17,6 +18,7 @@ mod native_app_identity;
 mod prefix_processes;
 mod program_inventory;
 mod publisher_install;
+mod publisher_library;
 mod rockstar_install;
 mod runtime_identity;
 mod runtime_migration;
@@ -87,6 +89,44 @@ struct Overview {
     launchers: BTreeMap<String, Vec<Launcher>>,
     catalog_attempts: Vec<steam_install::CatalogAttempt>,
     catalog_attempts_error: Option<String>,
+    steam_clients: Vec<SteamClient>,
+}
+
+#[derive(Serialize)]
+struct SteamClient {
+    bottle_id: String,
+    launcher_id: String,
+}
+
+// Library actions need the client itself, not a saved game, shutdown or other
+// Steam operation. Keep arbitrary saved arguments intact on their own shortcut.
+fn is_plain_steam_client(launcher: &Launcher) -> bool {
+    launcher
+        .saved_arguments
+        .iter()
+        .all(|argument| argument == steam_install::STEAM_CEF_SOFTWARE_FLAG || argument == "-silent")
+}
+
+fn saved_steam_clients(home: &Path, bottle: &Bottle, launchers: &[Launcher]) -> Vec<SteamClient> {
+    let Ok(dir) = bottle_dir(home, &bottle.id) else {
+        return Vec::new();
+    };
+    let Ok(clients) = steam_library::client_paths(&dir.join("prefix")) else {
+        return Vec::new();
+    };
+    launchers
+        .iter()
+        .filter(|launcher| {
+            is_plain_steam_client(launcher)
+                && Path::new(&launcher.path)
+                    .canonicalize()
+                    .is_ok_and(|actual| clients.contains(&actual))
+        })
+        .map(|launcher| SteamClient {
+            bottle_id: bottle.id.clone(),
+            launcher_id: launcher.id.clone(),
+        })
+        .collect()
 }
 
 fn overview(home: &Path) -> Result<Overview, String> {
@@ -95,8 +135,11 @@ fn overview(home: &Path) -> Result<Overview, String> {
     let mut launchers = BTreeMap::new();
     let mut catalog_attempts = Vec::new();
     let mut catalog_attempts_error = None;
+    let mut steam_clients = Vec::new();
     for bottle in &bottles {
-        launchers.insert(bottle.id.clone(), list_launchers(home, &bottle.id)?);
+        let apps = list_launchers(home, &bottle.id)?;
+        steam_clients.extend(saved_steam_clients(home, bottle, &apps));
+        launchers.insert(bottle.id.clone(), apps);
         match steam_install::catalog_attempt(home, &bottle.id) {
             Ok(Some(attempt)) => catalog_attempts.push(attempt),
             Ok(None) => {}
@@ -119,6 +162,7 @@ fn overview(home: &Path) -> Result<Overview, String> {
         launchers,
         catalog_attempts,
         catalog_attempts_error,
+        steam_clients,
     })
 }
 
@@ -1896,6 +1940,13 @@ fn steam_games(home: &Path, bottle_id: &str) -> Result<steam_library::SteamLibra
     steam_library::discover(&prefix)
 }
 
+fn publisher_games(
+    home: &Path,
+    bottle_id: &str,
+) -> Result<publisher_library::PublisherLibrary, String> {
+    publisher_library::discover(&bottle_dir(home, bottle_id)?.join("prefix"))
+}
+
 fn steam_game_launcher(
     home: &Path,
     bottle_id: &str,
@@ -1909,7 +1960,8 @@ fn steam_game_launcher(
     let launcher = list_launchers(home, bottle_id)?
         .into_iter()
         .find(|launcher| {
-            Path::new(&launcher.path).canonicalize().ok().as_ref() == Some(&steam_path)
+            is_plain_steam_client(launcher)
+                && Path::new(&launcher.path).canonicalize().ok().as_ref() == Some(&steam_path)
         })
         .ok_or("Save the Steam app in this bottle before opening its games")?;
     Ok((launcher, game))
@@ -1918,6 +1970,36 @@ fn steam_game_launcher(
 fn run_steam_game(home: &Path, bottle_id: &str, app_id: u32) -> Result<LaunchResult, String> {
     let (launcher, game) = steam_game_launcher(home, bottle_id, app_id)?;
     run_launcher(home, bottle_id, &launcher.id, &game.launch_arguments())
+}
+
+// Hand the request to the saved Windows Steam client in the chosen bottle.
+// Steam, rather than Caskrun, decides ownership, sign-in and installation.
+fn steam_install_request(
+    home: &Path,
+    bottle_id: &str,
+    app_id: u32,
+) -> Result<(Launcher, Vec<String>), String> {
+    if app_id == 0 {
+        return Err("Steam AppID must be greater than zero".into());
+    }
+    let clients = steam_library::client_paths(&bottle_dir(home, bottle_id)?.join("prefix"))?;
+    let launcher = list_launchers(home, bottle_id)?
+        .into_iter()
+        .find(|launcher| is_plain_steam_client(launcher) && Path::new(&launcher.path).canonicalize().is_ok_and(|actual| clients.contains(&actual)))
+        .ok_or("Save the Steam client without game or custom arguments in this bottle before requesting a game install")?;
+    // A typed AppID can only produce this one Steam operation, never an
+    // arbitrary URL or a native-macOS Steam dispatch.
+    let mut arguments = Vec::new();
+    if !steam_install::is_recipe_steam_launcher(home, bottle_id, &launcher) {
+        arguments.push(steam_install::STEAM_CEF_SOFTWARE_FLAG.into());
+    }
+    arguments.push(format!("steam://install/{app_id}"));
+    Ok((launcher, arguments))
+}
+
+fn install_steam_game(home: &Path, bottle_id: &str, app_id: u32) -> Result<LaunchResult, String> {
+    let (launcher, arguments) = steam_install_request(home, bottle_id, app_id)?;
+    run_launcher(home, bottle_id, &launcher.id, &arguments)
 }
 
 fn run_launcher(
@@ -2750,6 +2832,8 @@ fn run() -> Result<(), String> {
                 | "import"
                 | "export-archive"
                 | "import-archive"
+                | "steam-games"
+                | "publisher-games"
         )
     }) {
         cancellation::activate_from_stdin();
@@ -2832,7 +2916,13 @@ fn run() -> Result<(), String> {
         [command, path] if command == "import-crossover" => serde_json::to_value(crossover_import::import(&home, Path::new(path), None)?),
         [command, path, name] if command == "import-crossover" => serde_json::to_value(crossover_import::import(&home, Path::new(path), Some(name))?),
         [command, id] if command == "steam-games" => serde_json::to_value(steam_games(&home, id)?),
+        [command, id] if command == "publisher-games" => serde_json::to_value(publisher_games(&home, id)?),
         [command, id, app_id] if command == "run-steam-game" => serde_json::to_value(run_steam_game(&home, id, app_id.parse().map_err(|_| "Steam AppID must be an unsigned number")?)?),
+        [command, id, app_id] if command == "install-steam-game" => serde_json::to_value(install_steam_game(&home, id, app_id.parse().map_err(|_| "Steam AppID must be an unsigned number")?)?),
+        [command] if command == "browser-games" => serde_json::to_value(browser_games::list(&home)?),
+        [command, name, url] if command == "add-browser-game" => serde_json::to_value(browser_games::add(&home, name, url)?),
+        [command, id] if command == "remove-browser-game" => serde_json::to_value(browser_games::remove(&home, id)?),
+        [command, id, name] if command == "rename-browser-game" => serde_json::to_value(browser_games::rename(&home, id, name)?),
         [command, id] if command == "apps" => serde_json::to_value(list_launchers(&home, id)?),
         [command, id] if command == "installed-programs" =>
             serde_json::to_value(program_inventory::inventory(&home, id)?),
@@ -2862,6 +2952,10 @@ fn run() -> Result<(), String> {
             serde_json::to_value(bottle_graphics::bottle_graphics(&home, id)?),
         [command, id, backend] if command == "set-bottle-graphics" =>
             serde_json::to_value(bottle_graphics::set_bottle_graphics(&home, id, bottle_graphics::Backend::parse(backend)?)?),
+        [command, id, rate, scale] if command == "set-bottle-dxmt-options" =>
+            serde_json::to_value(bottle_graphics::set_bottle_dxmt_options(&home, id,
+                rate.parse::<u16>().map_err(|_| "Frame rate must be a number")?,
+                scale.parse::<u16>().map_err(|_| "Spatial scale must be a number")?)?),
         [command, id, mode] if command == "set-bottle-resolution" && (mode == "on" || mode == "off") =>
             serde_json::to_value(bottle_resolution::set_bottle_resolution(&home, id, mode == "on")?),
         [command, id] if command == "open-uninstaller" =>
@@ -2913,7 +3007,7 @@ fn run() -> Result<(), String> {
                 Path::new(path),
                 parse_wait_launch_options(options)?,
             )?),
-        _ => return Err("Usage: caskrun-core overview | status | probe-runtime | list | deleted | catalog-attempts | create <name> | install-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher | retry-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher <bottle-id> | rename <id> <name> | delete <id> | restore-deleted <id> | duplicate <id> [name] | export <id> <path.caskrun-bottle> | export-archive <id> <path.caskrun-backup> | import <path.caskrun-bottle> [name] | import-archive <path.caskrun-backup> [name] | import-crossover <bottle-folder> [name] | steam-games <id> | run-steam-game <id> <appid> | initialize <id> | prefix-path <id> | apps <id> | installed-programs <id> | diagnostics <id> | rebuild-icons <id> | app-icon <bottle-id> <launcher-id> | bottle-icon <bottle-id> | bottle-notes <id> | set-bottle-notes <id> <text> | bottle-windows-version <id> | set-bottle-windows-version <id> default|win11|win10|win81|win8|win7|vista|winxp | bottle-resolution <id> | set-bottle-resolution <id> on|off | quit-all-bottles | quit-bottle <id> | open-uninstaller <id> | open-winecfg <id> | open-regedit <id> | open-controller-panel <id> | open-taskmgr <id> | open-internet-settings <id> | open-command-prompt <id> | simulate-reboot <id> | discover-apps <id> | logs <id> | read-log <id> <log-file-name> | add-app <id> <name> <file.exe> [--working-directory <drive_c/folder>] [-- <program-args...>] | set-app-visibility <id> <app-id> show|hide | set-app-arguments <id> <app-id> -- [arguments...] | rename-app <id> <app-id> <name> | run-app <id> <app-id> [-- <program-args...>] | launch <id> <file.exe|file.msi> [-- <program-args...>] | launch-wait <id> <file.exe|file.msi> [--quiet-msi] [--timeout-seconds 1..3600] [-- <program-args...>]".into()),
+        _ => return Err("Usage: caskrun-core overview | status | probe-runtime | list | deleted | catalog-attempts | create <name> | install-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher | retry-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher <bottle-id> | rename <id> <name> | delete <id> | restore-deleted <id> | duplicate <id> [name] | export <id> <path.caskrun-bottle> | export-archive <id> <path.caskrun-backup> | import <path.caskrun-bottle> [name] | import-archive <path.caskrun-backup> [name] | import-crossover <bottle-folder> [name] | browser-games | add-browser-game <name> <https-url> | remove-browser-game <id> | rename-browser-game <id> <name> | publisher-games <id> | install-steam-game <id> <appid> | set-bottle-dxmt-options <id> <frame-rate> <spatial-scale> | steam-games <id> | run-steam-game <id> <appid> | initialize <id> | prefix-path <id> | apps <id> | installed-programs <id> | diagnostics <id> | rebuild-icons <id> | app-icon <bottle-id> <launcher-id> | bottle-icon <bottle-id> | bottle-notes <id> | set-bottle-notes <id> <text> | bottle-windows-version <id> | set-bottle-windows-version <id> default|win11|win10|win81|win8|win7|vista|winxp | bottle-resolution <id> | set-bottle-resolution <id> on|off | quit-all-bottles | quit-bottle <id> | open-uninstaller <id> | open-winecfg <id> | open-regedit <id> | open-controller-panel <id> | open-taskmgr <id> | open-internet-settings <id> | open-command-prompt <id> | simulate-reboot <id> | discover-apps <id> | logs <id> | read-log <id> <log-file-name> | add-app <id> <name> <file.exe> [--working-directory <drive_c/folder>] [-- <program-args...>] | set-app-visibility <id> <app-id> show|hide | set-app-arguments <id> <app-id> -- [arguments...] | rename-app <id> <app-id> <name> | run-app <id> <app-id> [-- <program-args...>] | launch <id> <file.exe|file.msi> [-- <program-args...>] | launch-wait <id> <file.exe|file.msi> [--quiet-msi] [--timeout-seconds 1..3600] [-- <program-args...>]".into()),
     }.map_err(|e| e.to_string())?;
     println!(
         "{}",
@@ -2968,6 +3062,100 @@ mod tests {
         );
         assert_eq!(list(&home).unwrap().len(), 2);
         assert!(bottle_dir(&home, "../../CrossOver").is_err());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn steam_install_requests_stay_with_the_saved_client_and_bottle() {
+        let home = test_home();
+        let first = create(&home, "Steam space").unwrap();
+        let second = create(&home, "Other space").unwrap();
+        let dir = bottle_dir(&home, &first.id).unwrap();
+        let client = dir.join("prefix/drive_c/Program Files (x86)/Steam/steam.exe");
+        fs::create_dir_all(client.parent().unwrap()).unwrap();
+        fs::write(&client, b"saved client fixture").unwrap();
+        let saved = add_launcher(&home, &first.id, "My Steam", &client).unwrap();
+        let (launcher, arguments) = steam_install_request(&home, &first.id, 480).unwrap();
+        assert_eq!(launcher.id, saved.id);
+        assert_eq!(
+            arguments,
+            [
+                steam_install::STEAM_CEF_SOFTWARE_FLAG,
+                "steam://install/480"
+            ]
+        );
+        assert!(steam_install_request(&home, &second.id, 480).is_err());
+        assert!(steam_install_request(&home, &first.id, 0).is_err());
+        let mut receipt = steam_install::CatalogAttempt::new(
+            &first.id,
+            "steam",
+            "0".repeat(64),
+            "https://cdn.fastly.steamstatic.com/client/installer/SteamSetup.exe".into(),
+        )
+        .unwrap();
+        receipt.set_stage(steam_install::CatalogStage::Installed);
+        steam_install::save_catalog_attempt(&home, &receipt).unwrap();
+        let (_, arguments) = steam_install_request(&home, &first.id, u32::MAX).unwrap();
+        let final_arguments = launcher_arguments(true, false, &[], &arguments).unwrap();
+        assert_eq!(
+            final_arguments,
+            [
+                steam_install::STEAM_CEF_SOFTWARE_FLAG,
+                "steam://install/4294967295"
+            ]
+        );
+        let snapshot = overview(&home).unwrap();
+        assert_eq!(snapshot.steam_clients.len(), 1);
+        assert_eq!(snapshot.steam_clients[0].bottle_id, first.id);
+        assert!(!dir.join("active-processes.json").exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn steam_library_actions_do_not_reuse_a_saved_game_dispatch() {
+        let home = test_home();
+        let bottle = create(&home, "Steam client selection").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let client = dir.join("prefix/drive_c/Program Files/Steam/Steam.exe");
+        fs::create_dir_all(client.parent().unwrap()).unwrap();
+        fs::write(&client, b"client fixture").unwrap();
+        let game = add_launcher_with_arguments(
+            &home,
+            &bottle.id,
+            "Saved game",
+            &client,
+            vec!["-applaunch".into(), "620".into()],
+        )
+        .unwrap();
+        assert!(steam_install_request(&home, &bottle.id, 480).is_err());
+        assert!(overview(&home).unwrap().steam_clients.is_empty());
+        for action in ["steam://run/620", "-shutdown", "-login"] {
+            set_launcher_arguments(&home, &bottle.id, &game.id, &[action.into()]).unwrap();
+            assert!(steam_install_request(&home, &bottle.id, 480).is_err());
+        }
+        let saved = add_launcher(&home, &bottle.id, "Steam client", &client).unwrap();
+        let (chosen, arguments) = steam_install_request(&home, &bottle.id, 480).unwrap();
+        assert_eq!(chosen.id, saved.id);
+        assert_eq!(arguments.last().unwrap(), "steam://install/480");
+        assert_eq!(overview(&home).unwrap().steam_clients.len(), 1);
+        assert!(!dir.join("active-processes.json").exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn steam_install_refuses_a_client_symlink_and_creates_no_prefix() {
+        let home = test_home();
+        let bottle = create(&home, "Checked Steam").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let root = dir.join("prefix/drive_c/Program Files/Steam");
+        fs::create_dir_all(&root).unwrap();
+        let outside = home.join("program.exe");
+        fs::write(&outside, b"outside fixture").unwrap();
+        add_launcher(&home, &bottle.id, "Steam", &outside).unwrap();
+        symlink(&outside, root.join("Steam.exe")).unwrap();
+        assert!(steam_install_request(&home, &bottle.id, 480).is_err());
+        assert!(overview(&home).unwrap().steam_clients.is_empty());
+        assert!(!dir.join("prefix/system.reg").exists());
         fs::remove_dir_all(home).unwrap();
     }
 

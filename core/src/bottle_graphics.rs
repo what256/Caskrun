@@ -7,6 +7,10 @@ const SETTINGS: &str = "graphics.json";
 const SETTINGS_LIMIT: u64 = 4096;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 const DXMT_ROOT: &str = "components/dxmt/runtime";
+// Original x64/x86 lifecycle and all three spatial-scale gates pass with the
+// exact reviewed package. This does not establish game or image-quality support.
+// See docs/DXMT_OPTIONS.md for the reproducible evidence boundary.
+const SPATIAL_VALIDATED: bool = true;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -49,6 +53,42 @@ impl Backend {
 struct Settings {
     version: u32,
     backend: Backend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dxmt_frame_rate: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dxmt_spatial_scale: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Preferences {
+    backend: Backend,
+    frame_rate: u16,
+    spatial_scale: u16,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            backend: Backend::Auto,
+            frame_rate: 0,
+            spatial_scale: 100,
+        }
+    }
+}
+
+fn validate_options(frame_rate: u16, spatial_scale: u16) -> Result<(), String> {
+    if frame_rate > 240 {
+        return Err(
+            "Choose an application-controlled frame rate (0), or a target from 1 to 240 FPS".into(),
+        );
+    }
+    if ![100, 125, 150, 200].contains(&spatial_scale) {
+        return Err("Choose MetalFX off (100), 1.25× (125), 1.5× (150), or 2× (200)".into());
+    }
+    if spatial_scale != 100 && !SPATIAL_VALIDATED {
+        return Err("MetalFX spatial scaling has not passed this engine's validation gates".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -57,18 +97,21 @@ pub(super) struct GraphicsResult {
     selected_backend: Backend,
     effective_backend: Backend,
     dxmt_available: bool,
+    dxmt_frame_rate: u16,
+    dxmt_spatial_scale: u16,
+    dxmt_spatial_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     unavailable_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     warning: Option<String>,
 }
 
-fn read_settings(dir: &Path) -> Result<(Backend, Option<Vec<u8>>), String> {
+fn read_settings(dir: &Path) -> Result<(Preferences, Option<Vec<u8>>), String> {
     let path = dir.join(SETTINGS);
     let before = match fs::symlink_metadata(&path) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((Backend::Auto, None));
+            return Ok((Preferences::default(), None));
         }
         Err(error) => return Err(format!("Could not inspect bottle graphics: {error}")),
     };
@@ -99,10 +142,37 @@ fn read_settings(dir: &Path) -> Result<(Backend, Option<Vec<u8>>), String> {
     }
     let settings: Settings = serde_json::from_slice(&bytes)
         .map_err(|error| format!("Invalid bottle graphics preference: {error}"))?;
-    if settings.version != 1 {
-        return Err("Unsupported bottle graphics preference version".into());
-    }
-    Ok((settings.backend, Some(bytes)))
+    let preferences = match settings.version {
+        1 => {
+            // A legacy record predates these fields. Even a null claim is not
+            // a version-1 setting; reject it before copy/import creates storage.
+            let value: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            if value.get("dxmt_frame_rate").is_some() || value.get("dxmt_spatial_scale").is_some() {
+                return Err("Version-1 graphics preferences cannot contain DXMT options".into());
+            }
+            Preferences {
+                backend: settings.backend,
+                ..Preferences::default()
+            }
+        }
+        2 => {
+            let frame_rate = settings
+                .dxmt_frame_rate
+                .ok_or("Graphics preferences are missing their DXMT frame target")?;
+            let spatial_scale = settings
+                .dxmt_spatial_scale
+                .ok_or("Graphics preferences are missing their MetalFX setting")?;
+            validate_options(frame_rate, spatial_scale)?;
+            Preferences {
+                backend: settings.backend,
+                frame_rate,
+                spatial_scale,
+            }
+        }
+        _ => return Err("Unsupported bottle graphics preference version".into()),
+    };
+    Ok((preferences, Some(bytes)))
 }
 
 // The complete reviewed package identity covers both renderer views, the
@@ -170,7 +240,8 @@ fn validate_receipt(receipt: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
-fn result(dir: &Path, id: &str, selected: Backend, wine: Option<&Path>) -> GraphicsResult {
+fn result(dir: &Path, id: &str, preferences: Preferences, wine: Option<&Path>) -> GraphicsResult {
+    let selected = preferences.backend;
     let support = wine
         .ok_or_else(|| "The Windows engine is unavailable".to_owned())
         .and_then(|wine| dxmt_support(dir, wine));
@@ -180,6 +251,9 @@ fn result(dir: &Path, id: &str, selected: Backend, wine: Option<&Path>) -> Graph
         selected_backend: selected,
         effective_backend: selected.effective(),
         dxmt_available: available,
+        dxmt_frame_rate: preferences.frame_rate,
+        dxmt_spatial_scale: preferences.spatial_scale,
+        dxmt_spatial_available: available && SPATIAL_VALIDATED,
         unavailable_reason: support.err(),
         warning: if selected == Backend::Dxmt {
             Some(if available {
@@ -195,8 +269,14 @@ fn result(dir: &Path, id: &str, selected: Backend, wine: Option<&Path>) -> Graph
 
 pub(super) fn bottle_graphics(home: &Path, id: &str) -> Result<GraphicsResult, String> {
     let dir = bottle_dir(home, id)?;
-    let (backend, _) = read_settings(&dir)?;
-    Ok(result(&dir, id, backend, wine_path().as_deref()))
+    let (preferences, _) = read_settings(&dir)?;
+    Ok(result(&dir, id, preferences, wine_path().as_deref()))
+}
+
+/// Pure, bounded preference read shared with privacy-safe diagnostics. It does
+/// not attest, initialize or start Wine, and emits only the closed backend enum.
+pub(super) fn selected_backend(dir: &Path) -> Result<Backend, String> {
+    read_settings(dir).map(|(preferences, _)| preferences.backend)
 }
 
 pub(super) fn validate_portable_settings(dir: &Path) -> Result<(), String> {
@@ -220,7 +300,11 @@ fn set_with_wine(
 ) -> Result<GraphicsResult, String> {
     let _lock = lock_bottle(home, id)?;
     let migration = runtime_migration::maybe_migrate_bundled_runtime(home, id, wine)?;
-    let result = set_locked(home, id, backend, wine);
+    let result = (|| {
+        let (mut preferences, original) = read_settings(&bottle_dir(home, id)?)?;
+        preferences.backend = backend;
+        set_locked(home, id, preferences, original, wine)
+    })();
     if result.is_err()
         && let Some(backup) = migration
     {
@@ -229,17 +313,61 @@ fn set_with_wine(
     result
 }
 
+pub(super) fn set_bottle_dxmt_options(
+    home: &Path,
+    id: &str,
+    frame_rate: u16,
+    spatial_scale: u16,
+) -> Result<GraphicsResult, String> {
+    validate_options(frame_rate, spatial_scale)?;
+    let wine = wine_path().ok_or("The Windows engine is unavailable")?;
+    set_options_with_wine(home, id, frame_rate, spatial_scale, &wine)
+}
+
+fn set_options_with_wine(
+    home: &Path,
+    id: &str,
+    frame_rate: u16,
+    spatial_scale: u16,
+    wine: &Path,
+) -> Result<GraphicsResult, String> {
+    validate_options(frame_rate, spatial_scale)?;
+    let _lock = lock_bottle(home, id)?;
+    let dir = bottle_dir(home, id)?;
+    let (mut preferences, original) = read_settings(&dir)?;
+    if preferences.backend != Backend::Dxmt {
+        return Err("Choose DXMT before changing its frame pacing or MetalFX options".into());
+    }
+    let migration = runtime_migration::maybe_migrate_bundled_runtime(home, id, wine)?;
+    let result = (|| {
+        dxmt_support(&dir, wine)?;
+        preferences.frame_rate = frame_rate;
+        preferences.spatial_scale = spatial_scale;
+        set_locked(home, id, preferences, original, wine)
+    })();
+    if result.is_err()
+        && let Some(backup) = migration
+    {
+        backup.restore().map_err(|error| format!("Graphics options update failed and its previous runtime record could not be restored: {error}"))?;
+    }
+    result
+}
+
 fn set_locked(
     home: &Path,
     id: &str,
-    backend: Backend,
+    preferences: Preferences,
+    expected_original: Option<Vec<u8>>,
     wine: &Path,
 ) -> Result<GraphicsResult, String> {
     let dir = bottle_dir(home, id)?;
     let prefix = dir.join("prefix");
     let (guard, snapshot) = open_stable_directory(&prefix)?;
     let (_, original) = read_settings(&dir)?;
-    if backend == Backend::Dxmt {
+    if original != expected_original {
+        return Err("Bottle graphics changed before this update; refresh and try again".into());
+    }
+    if preferences.backend == Backend::Dxmt {
         dxmt_support(&dir, wine)?;
     }
     refuse_running_bottle(&dir)?;
@@ -252,12 +380,14 @@ fn set_locked(
     }
     cancellation::check()?;
     let updated = serde_json::to_vec_pretty(&Settings {
-        version: 1,
-        backend,
+        version: 2,
+        backend: preferences.backend,
+        dxmt_frame_rate: Some(preferences.frame_rate),
+        dxmt_spatial_scale: Some(preferences.spatial_scale),
     })
     .map_err(|e| e.to_string())?;
     write_preference(&dir.join(SETTINGS), &updated)?;
-    if !read_settings(&dir).is_ok_and(|value| value.0 == backend) {
+    if !read_settings(&dir).is_ok_and(|value| value.0 == preferences) {
         // Roll back only our exact write. An independent editor's later write
         // must not be silently replaced by a stale value.
         if fs::read(dir.join(SETTINGS)).is_ok_and(|bytes| bytes == updated) {
@@ -273,7 +403,7 @@ fn set_locked(
                 .into(),
         );
     }
-    Ok(result(&dir, id, backend, Some(wine)))
+    Ok(result(&dir, id, preferences, Some(wine)))
 }
 
 fn write_preference(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -302,7 +432,7 @@ pub(super) fn selected_runtime_root(dir: &Path, wine: &Path) -> Result<PathBuf, 
         .parent()
         .and_then(Path::parent)
         .ok_or("The Windows engine has no package directory")?;
-    match read_settings(dir)?.0 {
+    match read_settings(dir)?.0.backend {
         Backend::Dxmt => {
             dxmt_support(dir, wine)?;
             Ok(package.join(DXMT_ROOT))
@@ -318,7 +448,8 @@ pub(super) fn configure_launch(
     dir: &Path,
     wine: &Path,
 ) -> Result<(), String> {
-    let (backend, _) = read_settings(dir)?;
+    let (preferences, _) = read_settings(dir)?;
+    let backend = preferences.backend;
     command.env("CASKRUN_GRAPHICS_BACKEND", backend.effective().value());
     if backend == Backend::Dxmt {
         dxmt_support(dir, wine)?;
@@ -351,8 +482,39 @@ pub(super) fn configure_launch(
         // launch. Preserve unrelated environment overrides and all registry /
         // application-local DLL files so switching back is lossless.
         command.env("WINEDLLOVERRIDES", overrides);
+        configure_dxmt_options(command, preferences);
     }
     Ok(())
+}
+
+// NUL is Wine's empty device, so a trailing app-local config section cannot
+// accidentally disable managed options. Existing config files stay untouched.
+// Caskrun supplies bounded, typed values; inherited DXMT settings cannot turn a
+// saved Off setting back on or inject extra translation options into this run.
+fn configure_dxmt_options(command: &mut Command, preferences: Preferences) {
+    // With both controls off preserve the reviewed baseline, including any
+    // explicit user/environment or app-local DXMT configuration.
+    if preferences.frame_rate == 0 && preferences.spatial_scale == 100 {
+        return;
+    }
+    command.env("DXMT_CONFIG_FILE", "NUL");
+    command.env(
+        "DXMT_CONFIG",
+        format!(
+            "d3d11.preferredMaxFrameRate={};d3d11.metalSpatialUpscaleFactor={}.{:02};",
+            preferences.frame_rate,
+            preferences.spatial_scale / 100,
+            preferences.spatial_scale % 100
+        ),
+    );
+    command.env(
+        "DXMT_METALFX_SPATIAL_SWAPCHAIN",
+        if preferences.spatial_scale > 100 {
+            "1"
+        } else {
+            "0"
+        },
+    );
 }
 
 /// Older approved prefixes predate winemetal. Add only missing bootstrap
@@ -468,7 +630,7 @@ mod tests {
     #[test]
     fn missing_preference_defaults_to_wined3d_without_writing() {
         let dir = fixture();
-        assert_eq!(read_settings(&dir).unwrap(), (Backend::Auto, None));
+        assert_eq!(read_settings(&dir).unwrap(), (Preferences::default(), None));
         assert_eq!(Backend::Auto.effective(), Backend::Wined3d);
         assert!(!dir.join(SETTINGS).exists());
         fs::remove_dir_all(dir).unwrap();
@@ -497,7 +659,15 @@ mod tests {
     #[test]
     fn dxmt_preference_does_not_silently_fallback_when_unavailable() {
         let dir = fixture();
-        let status = result(&dir, "example", Backend::Dxmt, None);
+        let status = result(
+            &dir,
+            "example",
+            Preferences {
+                backend: Backend::Dxmt,
+                ..Preferences::default()
+            },
+            None,
+        );
         assert!(!status.dxmt_available);
         assert_eq!(status.effective_backend, Backend::Dxmt);
         assert!(status.warning.is_some());
@@ -540,7 +710,8 @@ mod tests {
         assert_eq!(
             read_settings(&bottle_dir(&home, &second.id).unwrap())
                 .unwrap()
-                .0,
+                .0
+                .backend,
             Backend::Auto
         );
         fs::remove_dir_all(home).unwrap();
@@ -626,6 +797,8 @@ mod tests {
             &Settings {
                 version: 1,
                 backend: Backend::Dxmt,
+                dxmt_frame_rate: None,
+                dxmt_spatial_scale: None,
             },
         )
         .unwrap();
@@ -633,7 +806,8 @@ mod tests {
         assert_eq!(
             read_settings(&bottle_dir(&home, &duplicated.id).unwrap())
                 .unwrap()
-                .0,
+                .0
+                .backend,
             Backend::Dxmt
         );
         let backup = home.join("graphics.caskrun-bottle");
@@ -642,9 +816,250 @@ mod tests {
         assert_eq!(
             read_settings(&bottle_dir(&home, &imported.bottle.id).unwrap())
                 .unwrap()
-                .0,
+                .0
+                .backend,
             Backend::Dxmt
         );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn legacy_preferences_default_options_and_reject_claimed_new_fields() {
+        let dir = fixture();
+        fs::write(dir.join(SETTINGS), r#"{"version":1,"backend":"dxmt"}"#).unwrap();
+        assert_eq!(
+            read_settings(&dir).unwrap().0,
+            Preferences {
+                backend: Backend::Dxmt,
+                ..Preferences::default()
+            }
+        );
+        for field in ["dxmt_frame_rate", "dxmt_spatial_scale"] {
+            for value in ["null", "0", "100"] {
+                fs::write(
+                    dir.join(SETTINGS),
+                    format!(r#"{{"version":1,"backend":"dxmt","{field}":{value}}}"#),
+                )
+                .unwrap();
+                assert!(validate_portable_settings(&dir).is_err());
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn version_two_options_are_typed_complete_bounded_and_closed() {
+        let dir = fixture();
+        for value in [
+            serde_json::json!({"version":2,"backend":"dxmt","dxmt_frame_rate":30,"dxmt_spatial_scale":100}),
+            serde_json::json!({"version":2,"backend":"auto","dxmt_frame_rate":240,"dxmt_spatial_scale":100}),
+        ] {
+            fs::write(dir.join(SETTINGS), serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(validate_portable_settings(&dir).is_ok());
+        }
+        for value in [
+            serde_json::json!({"version":2,"backend":"dxmt","dxmt_frame_rate":241,"dxmt_spatial_scale":100}),
+            serde_json::json!({"version":2,"backend":"dxmt","dxmt_frame_rate":-1,"dxmt_spatial_scale":100}),
+            serde_json::json!({"version":2,"backend":"dxmt","dxmt_frame_rate":"30","dxmt_spatial_scale":100}),
+            serde_json::json!({"version":2,"backend":"dxmt","dxmt_frame_rate":30,"dxmt_spatial_scale":101}),
+            serde_json::json!({"version":2,"backend":"dxmt","dxmt_frame_rate":30,"dxmt_spatial_scale":null}),
+            serde_json::json!({"version":2,"backend":"dxmt","dxmt_frame_rate":30}),
+            serde_json::json!({"version":2,"backend":"dxmt","dxmt_frame_rate":30,"dxmt_spatial_scale":100,"extra":true}),
+            serde_json::json!({"version":3,"backend":"auto","dxmt_frame_rate":0,"dxmt_spatial_scale":100}),
+        ] {
+            fs::write(dir.join(SETTINGS), serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(validate_portable_settings(&dir).is_err());
+        }
+        fs::write(dir.join(SETTINGS), br#"{"version":2,"backend":"dxmt","dxmt_frame_rate":30,"dxmt_frame_rate":60,"dxmt_spatial_scale":100}"#).unwrap();
+        assert!(validate_portable_settings(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn launch_options_replace_inherited_managed_values_without_a_shell_or_file_write() {
+        let mut command = Command::new("unused-fixture");
+        command.env(
+            "DXMT_CONFIG",
+            "d3d11.preferredMaxFrameRate=999;untrusted.key=True;",
+        );
+        command.env("DXMT_CONFIG_FILE", "untrusted-file");
+        command.env("DXMT_METALFX_SPATIAL_SWAPCHAIN", "1");
+        configure_dxmt_options(
+            &mut command,
+            Preferences {
+                backend: Backend::Dxmt,
+                frame_rate: 30,
+                spatial_scale: 100,
+            },
+        );
+        let values: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.unwrap().to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            values["DXMT_CONFIG"],
+            "d3d11.preferredMaxFrameRate=30;d3d11.metalSpatialUpscaleFactor=1.00;"
+        );
+        assert_eq!(values["DXMT_CONFIG_FILE"], "NUL");
+        assert_eq!(values["DXMT_METALFX_SPATIAL_SWAPCHAIN"], "0");
+        configure_dxmt_options(
+            &mut command,
+            Preferences {
+                backend: Backend::Dxmt,
+                frame_rate: 0,
+                spatial_scale: 150,
+            },
+        );
+        let values: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.unwrap().to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            values["DXMT_CONFIG"],
+            "d3d11.preferredMaxFrameRate=0;d3d11.metalSpatialUpscaleFactor=1.50;"
+        );
+        assert_eq!(values["DXMT_METALFX_SPATIAL_SWAPCHAIN"], "1");
+    }
+
+    #[test]
+    fn default_options_preserve_existing_dxmt_configuration_exactly() {
+        let mut command = Command::new("unused-fixture");
+        command.env("DXMT_CONFIG_FILE", "existing-local-config");
+        command.env("DXMT_CONFIG", "dxgi.forceSDR=True;");
+        command.env("DXMT_METALFX_SPATIAL_SWAPCHAIN", "custom-value");
+        let before: Vec<_> = command
+            .get_envs()
+            .map(|(k, v)| (k.to_owned(), v.map(|s| s.to_owned())))
+            .collect();
+        configure_dxmt_options(
+            &mut command,
+            Preferences {
+                backend: Backend::Dxmt,
+                ..Preferences::default()
+            },
+        );
+        let after: Vec<_> = command
+            .get_envs()
+            .map(|(k, v)| (k.to_owned(), v.map(|s| s.to_owned())))
+            .collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn changing_renderer_and_portable_copies_preserve_dxmt_options() {
+        let home = fixture();
+        let bottle = create(&home, "Portable graphics options").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        fs::write(
+            dir.join(SETTINGS),
+            br#"{"version":2,"backend":"auto","dxmt_frame_rate":40,"dxmt_spatial_scale":100}"#,
+        )
+        .unwrap();
+        let wine = home.join("wine");
+        fs::write(&wine, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&wine, fs::Permissions::from_mode(0o755)).unwrap();
+        let status = set_with_wine(&home, &bottle.id, Backend::Wined3d, &wine).unwrap();
+        assert_eq!(
+            (status.dxmt_frame_rate, status.dxmt_spatial_scale),
+            (40, 100)
+        );
+        let duplicated = duplicate_bottle_with_runtime(&home, &bottle.id, None, None).unwrap();
+        assert_eq!(
+            read_settings(&bottle_dir(&home, &duplicated.id).unwrap())
+                .unwrap()
+                .0,
+            Preferences {
+                backend: Backend::Wined3d,
+                frame_rate: 40,
+                spatial_scale: 100
+            }
+        );
+        let backup = home.join("options.caskrun-bottle");
+        export_bottle_with_runtime(&home, &bottle.id, &backup, None).unwrap();
+        let imported = import_bottle(&home, &backup, None).unwrap();
+        assert_eq!(
+            read_settings(&bottle_dir(&home, &imported.bottle.id).unwrap())
+                .unwrap()
+                .0,
+            Preferences {
+                backend: Backend::Wined3d,
+                frame_rate: 40,
+                spatial_scale: 100
+            }
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn invalid_options_or_non_dxmt_engine_preserve_exact_preference() {
+        let home = fixture();
+        let bottle = create(&home, "Refused graphics options").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let original = br#"{"version":1,"backend":"auto"}"#;
+        fs::write(dir.join(SETTINGS), original).unwrap();
+        assert!(set_options_with_wine(&home, &bottle.id, 241, 100, &home.join("wine")).is_err());
+        assert!(set_options_with_wine(&home, &bottle.id, 30, 101, &home.join("wine")).is_err());
+        assert!(set_options_with_wine(&home, &bottle.id, 30, 100, &home.join("wine")).is_err());
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), original);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn stale_options_do_not_replace_an_independent_preference_edit() {
+        let home = fixture();
+        let bottle = create(&home, "Concurrent graphics preference").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let current =
+            br#"{"version":2,"backend":"auto","dxmt_frame_rate":40,"dxmt_spatial_scale":100}"#;
+        fs::write(dir.join(SETTINGS), current).unwrap();
+        let stale = Some(br#"{"version":1,"backend":"auto"}"#.to_vec());
+        let error = set_locked(
+            &home,
+            &bottle.id,
+            Preferences::default(),
+            stale,
+            &home.join("wine"),
+        )
+        .unwrap_err();
+        assert!(error.contains("changed before this update"));
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), current);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn tampered_portable_options_are_refused_before_creating_bottle_storage() {
+        let home = fixture();
+        let bottle = create(&home, "Graphics import boundary").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        fs::write(
+            dir.join(SETTINGS),
+            br#"{"version":2,"backend":"auto","dxmt_frame_rate":40,"dxmt_spatial_scale":100}"#,
+        )
+        .unwrap();
+        let backup = home.join("invalid-options.caskrun-bottle");
+        export_bottle_with_runtime(&home, &bottle.id, &backup, None).unwrap();
+        let count_before = fs::read_dir(home.join("bottles")).unwrap().count();
+        fs::write(
+            backup.join("payload").join(SETTINGS),
+            br#"{"version":1,"backend":"dxmt","dxmt_frame_rate":30}"#,
+        )
+        .unwrap();
+        assert!(import_bottle(&home, &backup, None).is_err());
+        assert_eq!(
+            fs::read_dir(home.join("bottles")).unwrap().count(),
+            count_before
+        );
+        assert_eq!(read_settings(&dir).unwrap().0.frame_rate, 40);
         fs::remove_dir_all(home).unwrap();
     }
 

@@ -12,7 +12,9 @@ use std::ops::Deref;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 
-use crate::{O_DIRECTORY, O_NOFOLLOW_ANY, open_stable_directory, same_identity, same_snapshot};
+use crate::{
+    O_DIRECTORY, O_NOFOLLOW_ANY, cancellation, open_stable_directory, same_identity, same_snapshot,
+};
 
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_TOTAL_READ_BYTES: u64 = 32 * 1024 * 1024;
@@ -23,6 +25,8 @@ const MAX_LIBRARIES: usize = 64;
 const MAX_SCAN_ENTRIES: usize = 32_768;
 const MAX_GAMES: usize = 4_096;
 const FULLY_INSTALLED: u32 = 4;
+// Darwin O_NONBLOCK prevents a regular-file-to-FIFO race from waiting in open.
+const O_NONBLOCK: i32 = 0x0000_0004;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct SteamLibrary {
@@ -124,7 +128,43 @@ pub(crate) fn discover(prefix: &Path) -> Result<SteamLibrary, String> {
     discover_with_budget(prefix, MAX_TOTAL_READ_BYTES)
 }
 
+/// Checked standard client locations, independent of account data and whether
+/// this client has downloaded a game yet. Used to route a typed install URI.
+pub(crate) fn client_paths(prefix: &Path) -> Result<Vec<PathBuf>, String> {
+    cancellation::check()?;
+    let path = prefix.join("drive_c");
+    if !path.try_exists().map_err(|error| error.to_string())? {
+        return Ok(Vec::new());
+    }
+    let drive = CheckedDrive::open(&path)?;
+    let mut clients = Vec::new();
+    for location in ["Program Files (x86)/Steam", "Program Files/Steam"] {
+        cancellation::check()?;
+        let Some(root) = checked_directory(&drive, &drive.join(location)) else {
+            continue;
+        };
+        for name in ["steam.exe", "Steam.exe"] {
+            let path = root.join(name);
+            if checked_regular_file(&drive, &path) {
+                let canonical = path.canonicalize().map_err(|error| error.to_string())?;
+                if drive.is_current()
+                    && canonical.starts_with(&drive.path)
+                    && !clients.contains(&canonical)
+                {
+                    clients.push(canonical);
+                }
+            }
+        }
+    }
+    cancellation::check()?;
+    if !drive.is_current() {
+        return Err("Bottle C: drive changed while finding Steam".into());
+    }
+    Ok(clients)
+}
+
 fn discover_with_budget(prefix: &Path, max_read_bytes: u64) -> Result<SteamLibrary, String> {
+    cancellation::check()?;
     let mut result = SteamLibrary {
         games: Vec::new(),
         truncated: false,
@@ -148,6 +188,7 @@ fn discover_with_budget(prefix: &Path, max_read_bytes: u64) -> Result<SteamLibra
     let mut scanned = BTreeSet::new();
 
     for location in ["Program Files (x86)/Steam", "Program Files/Steam"] {
+        cancellation::check()?;
         let Some(steam_root) = checked_directory(&drive, &drive.join(location)) else {
             continue;
         };
@@ -164,6 +205,7 @@ fn discover_with_budget(prefix: &Path, max_read_bytes: u64) -> Result<SteamLibra
         let mut libraries = BTreeSet::from([steam_root.clone()]);
         // Steam has used both locations, and both flat and nested entries.
         for relative in ["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
+            cancellation::check()?;
             let path = steam_root.join(relative);
             if let Some(text) = read_checked_text(&drive, &path, &mut read_budget) {
                 let Some(document) = parse_key_values(&text) else {
@@ -173,6 +215,7 @@ fn discover_with_budget(prefix: &Path, max_read_bytes: u64) -> Result<SteamLibra
                     continue;
                 };
                 for (key, value) in folders {
+                    cancellation::check()?;
                     if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_digit()) {
                         continue;
                     }
@@ -196,6 +239,7 @@ fn discover_with_budget(prefix: &Path, max_read_bytes: u64) -> Result<SteamLibra
         let libraries = std::iter::once(steam_root.clone())
             .chain(libraries.into_iter().filter(|path| path != &steam_root));
         for library in libraries {
+            cancellation::check()?;
             if !scanned.insert(library.clone()) {
                 continue;
             }
@@ -208,11 +252,13 @@ fn discover_with_budget(prefix: &Path, max_read_bytes: u64) -> Result<SteamLibra
                 &mut result.truncated,
                 &mut read_budget,
             );
+            cancellation::check()?;
             if examined >= MAX_SCAN_ENTRIES || games.len() >= MAX_GAMES || read_budget.exhausted {
                 break;
             }
         }
     }
+    cancellation::check()?;
     if !drive.is_current() {
         return Err("Bottle C: drive changed while reading its Steam library".into());
     }
@@ -253,6 +299,9 @@ fn scan_library(
     };
     let mut manifests = Vec::new();
     for entry in entries {
+        if cancellation::is_requested() {
+            return;
+        }
         if *examined >= MAX_SCAN_ENTRIES {
             *truncated = true;
             break;
@@ -274,6 +323,9 @@ fn scan_library(
     }
     manifests.sort();
     for (expected_app_id, path) in manifests {
+        if cancellation::is_requested() {
+            return;
+        }
         if games.contains_key(&expected_app_id) {
             continue;
         }
@@ -422,17 +474,26 @@ fn checked_regular_file(drive: &CheckedDrive, path: &Path) -> bool {
     if !before.file_type().is_file() {
         return false;
     }
-    let Ok(file) = OpenOptions::new()
-        .read(true)
-        .custom_flags(O_NOFOLLOW_ANY)
-        .open(path)
-    else {
+    let Some(file) = open_regular_library_file(path, &before) else {
         return false;
     };
     drive.is_current()
         && file
             .metadata()
             .is_ok_and(|metadata| same_snapshot(&before, &metadata))
+}
+
+fn open_regular_library_file(path: &Path, before: &fs::Metadata) -> Option<File> {
+    if !before.is_file() {
+        return None;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW_ANY | O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let opened = file.metadata().ok()?;
+    (opened.is_file() && same_snapshot(before, &opened)).then_some(file)
 }
 
 fn cached_icon_path(drive: &CheckedDrive, steam_path: &Path, app_id: u32) -> Option<String> {
@@ -452,12 +513,10 @@ fn cached_icon_path(drive: &CheckedDrive, steam_path: &Path, app_id: u32) -> Opt
 }
 
 fn read_checked_text(drive: &CheckedDrive, path: &Path, budget: &mut ReadBudget) -> Option<String> {
-    if budget.exhausted {
+    if budget.exhausted || cancellation::is_requested() {
         return None;
     }
-    if checked_directory(drive, path.parent()?).is_none() {
-        return None;
-    }
+    checked_directory(drive, path.parent()?)?;
     let before = fs::symlink_metadata(path).ok()?;
     if !before.file_type().is_file() || before.len() > MAX_FILE_BYTES {
         return None;
@@ -466,22 +525,19 @@ fn read_checked_text(drive: &CheckedDrive, path: &Path, budget: &mut ReadBudget)
         budget.exhausted = true;
         return None;
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(O_NOFOLLOW_ANY)
-        .open(path)
-        .ok()?;
-    if !same_snapshot(&before, &file.metadata().ok()?) {
-        return None;
-    }
+    let mut file = open_regular_library_file(path, &before)?;
     let mut bytes = Vec::new();
     let limit = MAX_FILE_BYTES.min(budget.remaining);
-    (&mut file).take(limit + 1).read_to_end(&mut bytes).ok()?;
+    // Charge actual bytes even if a read fails part way through. The shared
+    // copier observes cancellation between chunks and immediately before EOF.
+    let read_result = crate::copy_cancellable(&mut (&mut file).take(limit + 1), &mut bytes);
     if bytes.len() as u64 > budget.remaining {
         budget.exhausted = true;
     }
     budget.remaining = budget.remaining.saturating_sub(bytes.len() as u64);
-    if bytes.len() as u64 > limit
+    if read_result.is_err()
+        || cancellation::is_requested()
+        || bytes.len() as u64 > limit
         || !drive.is_current()
         || !same_snapshot(&before, &file.metadata().ok()?)
         || !same_snapshot(&before, &fs::symlink_metadata(path).ok()?)
@@ -640,7 +696,7 @@ fn tokenize(text: &str) -> Option<Vec<Token>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{FileTypeExt, symlink};
     use uuid::Uuid;
 
     struct Fixture {
@@ -860,6 +916,78 @@ mod tests {
         assert!(result.truncated);
         assert_eq!(result.games.len(), 1);
         assert_eq!(result.games[0].app_id, 480);
+    }
+
+    #[test]
+    fn cancellation_refuses_discovery_and_client_lookup_without_storage() {
+        let fixture = Fixture::new();
+        fixture.game(480, "Spacewar", "Spacewar");
+        let (request, _guard) = cancellation::test_request();
+        request.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(discover(&fixture.prefix).unwrap_err(), cancellation::ERROR);
+        assert_eq!(
+            client_paths(&fixture.prefix).unwrap_err(),
+            cancellation::ERROR
+        );
+        assert_eq!(
+            discover(&fixture.root.join("missing")).unwrap_err(),
+            cancellation::ERROR
+        );
+        assert!(!fixture.root.join("missing").exists());
+        assert!(!fixture.prefix.join("launchers.json").exists());
+    }
+
+    #[test]
+    fn cancellation_aborts_manifest_reader_without_spending_its_budget() {
+        let fixture = Fixture::new();
+        fixture.game(480, "Spacewar", "Spacewar");
+        let drive = CheckedDrive::open(&fixture.prefix.join("drive_c")).unwrap();
+        let mut budget = ReadBudget {
+            remaining: 4096,
+            exhausted: false,
+        };
+        let (request, _guard) = cancellation::test_request();
+        request.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            read_checked_text(
+                &drive,
+                &fixture.steam.join("steamapps/appmanifest_480.acf"),
+                &mut budget
+            )
+            .is_none()
+        );
+        assert_eq!(budget.remaining, 4096);
+        assert!(!budget.exhausted);
+    }
+
+    #[test]
+    fn a_regular_file_replaced_with_a_fifo_never_blocks_the_checked_open() {
+        let fixture = Fixture::new();
+        let path = fixture.steam.join("steamapps/appmanifest_480.acf");
+        fs::write(&path, b"original manifest").unwrap();
+        let before = fs::symlink_metadata(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(
+            std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
+        // Deterministically places the FIFO in the metadata-to-open race window.
+        // A worker lets a regression fail within a bound instead of hanging CI.
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            send.send(open_regular_library_file(&path, &before).is_none())
+                .unwrap();
+        });
+        assert!(
+            receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("checked open blocked on a FIFO without a writer")
+        );
+        worker.join().unwrap();
     }
 
     #[test]

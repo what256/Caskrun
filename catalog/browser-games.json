@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "id": "moon-zombies",
+      "name": "Moon Zombies",
+      "detail": "Community browser shooter. Opens on the developer's website.",
+      "url": "https://moon-zombies.pages.dev/",
+      "sourceURL": "https://moon-zombies.pages.dev/",
+      "symbol": "moon.stars.fill",
+      "requiresOwnFiles": false
+    },
+    {
+      "id": "surfd",
+      "name": "Surfd",
+      "detail": "Browser surfing game with keyboard and mouse controls.",
+      "url": "https://surfd.net/",
+      "sourceURL": "https://surfd.net/",
+      "symbol": "wind",
+      "requiresOwnFiles": false
+    },
+    {
+      "id": "vice-city-community-port",
+      "name": "Vice City · community port",
+      "detail": "Bring your own game files. This community port is unaffiliated with Rockstar Games.",
+      "url": "https://joncodeofficial.github.io/gta-vice-city-wasm/",
+      "sourceURL": "https://joncodeofficial.github.io/gta-vice-city-wasm/",
+      "symbol": "car.fill",
+      "requiresOwnFiles": true
+    },
+    {
+      "id": "hextris",
+      "name": "Hextris",
+      "detail": "Fast puzzle game from the original Hextris developers.",
+      "url": "https://hextris.io/",
+      "sourceURL": "https://github.com/Hextris/hextris",
+      "symbol": "hexagon.fill",
+      "requiresOwnFiles": false
+    },
+    {
+      "id": "2048",
+      "name": "2048",
+      "detail": "The tile puzzle on its original creator's website.",
+      "url": "https://play2048.co/",
+      "sourceURL": "https://play2048.co/about",
+      "symbol": "square.grid.2x2.fill",
+      "requiresOwnFiles": false
+    }
+  ]
+}

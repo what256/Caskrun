@@ -80,6 +80,26 @@ private enum MacAppArtwork {
     }
 }
 
+// Decode only visible library artwork, with two bounded readers at a time.
+private actor SteamArtworkReader {
+    static let shared = SteamArtworkReader()
+    private var active = 0
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    func read(_ path: String) async -> Data? {
+        if active >= 2 { await withCheckedContinuation { waiting.append($0) } }
+        else { active += 1 }
+        defer {
+            if waiting.isEmpty { active -= 1 }
+            else { waiting.removeFirst().resume() }
+        }
+        guard !Task.isCancelled else { return nil }
+        return await Task.detached(priority: .utility) {
+            guard let bytes = MacAppArtwork.read(path, maximum: 8 * 1024 * 1024) else { return nil as Data? }
+            return MacAppArtwork.png(bytes)
+        }.value
+    }
+}
+
 private struct CatalogArtworkSource: Sendable {
     enum Format: Sendable {
         case png, icon, svg
@@ -275,6 +295,19 @@ struct SteamLibrary: Decodable, Sendable {
     let truncated: Bool
 }
 
+struct PublisherGame: Decodable, Identifiable, Sendable {
+    let id: String
+    let store: String
+    let store_id: String
+    let name: String
+    let install_path: String
+}
+
+struct PublisherLibrary: Decodable, Sendable {
+    let games: [PublisherGame]
+    let truncated: Bool
+}
+
 struct PrefixPathResult: Decodable {
     let path: String
 }
@@ -315,6 +348,9 @@ struct BottleGraphicsStatus: Decodable, Sendable {
     let dxmt_available: Bool
     let unavailable_reason: String?
     let warning: String?
+    let dxmt_frame_rate: UInt16
+    let dxmt_spatial_scale: UInt16
+    let dxmt_spatial_available: Bool
 }
 
 struct WaitLaunchResult: Decodable, Sendable {
@@ -357,7 +393,10 @@ struct CoreOverview: Decodable {
     let launchers: [String: [SavedLauncher]]
     let catalog_attempts: [CatalogAttempt]
     let catalog_attempts_error: String?
+    let steam_clients: [SavedSteamClient]
 }
+
+struct SavedSteamClient: Decodable { let bottle_id: String; let launcher_id: String }
 
 struct InstallHandoff {
     let entryID: String
@@ -484,10 +523,10 @@ private enum CatalogSource {
     }()
 }
 
-enum Page: Hashable { case home, discover }
+enum Page: Hashable { case home, library, discover }
 
 private enum CaskrunMenuCommand {
-    case open, home, discover, manageBottles, install
+    case open, home, library, discover, manageBottles, install
 }
 
 @MainActor
@@ -703,6 +742,9 @@ private struct CaskrunStatusBridge: View {
                 case .discover:
                     pageBinding.wrappedValue = .discover
                     initialPageBinding.wrappedValue = true
+                case .library:
+                    pageBinding.wrappedValue = .library
+                    initialPageBinding.wrappedValue = true
                 case .manageBottles:
                     pageBinding.wrappedValue = .home
                     folderBinding.wrappedValue = model.bottles.first(where: { $0.id == model.selectedBottleID })?.id
@@ -827,6 +869,7 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(item("Home", action: #selector(home)))
+        menu.addItem(item("Library", action: #selector(library)))
         menu.addItem(item("Discover", action: #selector(discover)))
         menu.addItem(item("Manage Bottles…", action: #selector(bottles)))
         menu.addItem(.separator())
@@ -857,6 +900,7 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func open() { handleMenuCommand?(.open) }
     @objc private func home() { handleMenuCommand?(.home) }
+    @objc private func library() { handleMenuCommand?(.library) }
     @objc private func discover() { handleMenuCommand?(.discover) }
     @objc private func bottles() { handleMenuCommand?(.manageBottles) }
     @objc private func installFromFile() { handleMenuCommand?(.install) }
@@ -975,6 +1019,17 @@ final class CaskrunModel: ObservableObject {
     @Published var deletedBottles: [Bottle] = []
     @Published var launchers: [String: [SavedLauncher]] = [:]
     @Published private(set) var steamGames: [String: [SteamGame]] = [:]
+    private var steamArtworkRevisions: [String: UInt64] = [:]
+    @Published private(set) var publisherGames: [String: [PublisherGame]] = [:]
+    @Published private(set) var publisherGameErrors: [String: String] = [:]
+    @Published private(set) var loadingPublisherGames: Set<String> = []
+    @Published private(set) var truncatedPublisherLibraries: Set<String> = []
+    @Published private(set) var savedSteamClients: [SavedSteamClient] = []
+    @Published private(set) var browserGames: [BrowserGame] = []
+    @Published private(set) var browserGamesError: String?
+    @Published private(set) var loadingGameLibrary = false
+    @Published private(set) var editingBrowserGames = false
+    @Published private(set) var gameIcons: [String: NSImage] = [:]
     @Published private(set) var steamGameErrors: [String: String] = [:]
     @Published private(set) var loadingSteamGames: Set<String> = []
     @Published private(set) var truncatedSteamLibraries: Set<String> = []
@@ -1020,6 +1075,8 @@ final class CaskrunModel: ObservableObject {
     private var launcherIconStamps: [String: String] = [:]
     private var bottleIconStamps: [String: String] = [:]
     private var artworkGenerations: [String: Int] = [:]
+    private var gameIconStamps: [String: String] = [:]
+    private var gameIconOrder: [String] = []
     private var activeManualInstaller: CoreInvocationCancellation?
     private var activeCatalogCancellation: CoreInvocationCancellation?
     private var activeMaintenanceCancellation: CoreInvocationCancellation?
@@ -1035,7 +1092,7 @@ final class CaskrunModel: ObservableObject {
         let readCommands: Set<String> = ["overview", "status", "list", "deleted", "catalog-attempts",
                                          "apps", "app-icon", "bottle-icon", "bottle-resolution", "bottle-graphics",
                                          "discover-apps", "steam-games", "logs", "read-log", "prefix-path",
-                                         "installed-programs", "diagnostics", "bottle-notes", "bottle-windows-version"]
+                                         "installed-programs", "diagnostics", "bottle-notes", "bottle-windows-version", "browser-games", "publisher-games"]
         if isQuitting, let command = arguments.first,
            command != "quit-all-bottles", !readCommands.contains(command) {
             throw NSError(domain: "Caskrun", code: 1,
@@ -1053,7 +1110,7 @@ final class CaskrunModel: ObservableObject {
         do {
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: .seconds(30))
-            while isLaunching || isManagingBottle || isProbingRuntime {
+            while isLaunching || isManagingBottle || isProbingRuntime || editingBrowserGames {
                 guard clock.now < deadline else {
                     throw NSError(domain: "Caskrun", code: 1,
                                   userInfo: [NSLocalizedDescriptionKey: "A setup or bottle operation is still finishing. Wait for it to finish, then choose Quit Caskrun again."])
@@ -1201,6 +1258,11 @@ final class CaskrunModel: ObservableObject {
             launchers = snapshot.launchers
             catalogAttempts = snapshot.catalog_attempts
             catalogAttemptLoadError = snapshot.catalog_attempts_error
+            savedSteamClients = snapshot.steam_clients
+            do {
+                browserGames = try call(["browser-games"], as: BrowserGames.self).games
+                browserGamesError = nil
+            } catch { browserGamesError = error.localizedDescription }
             for bottle in bottles {
                 let launcherCount = launchers[bottle.id]?.count ?? 0
                 if launcherCount > 0 && launcherCount != (previousLauncherCounts[bottle.id] ?? 0) {
@@ -1413,14 +1475,37 @@ final class CaskrunModel: ObservableObject {
         loadingSteamGames.insert(bottle.id)
         defer { loadingSteamGames.remove(bottle.id) }
         do {
-            let library = try await callAsync(["steam-games", bottle.id], as: SteamLibrary.self)
-            guard bottles.contains(where: { $0.id == bottle.id }) else { return }
+            let cancellation = CoreInvocationCancellation()
+            let library = try await withTaskCancellationHandler {
+                try await callAsync(["steam-games", bottle.id], as: SteamLibrary.self, cancellation: cancellation)
+            } onCancel: { cancellation.cancel() }
+            guard !Task.isCancelled, bottles.contains(where: { $0.id == bottle.id }) else { return }
+            steamArtworkRevisions[bottle.id, default: 0] &+= 1
             steamGames[bottle.id] = library.games
             steamGameErrors[bottle.id] = nil
             if library.truncated { truncatedSteamLibraries.insert(bottle.id) }
             else { truncatedSteamLibraries.remove(bottle.id) }
         } catch {
             if !Task.isCancelled { steamGameErrors[bottle.id] = error.localizedDescription }
+        }
+    }
+
+    func refreshPublisherGames(in bottle: Bottle) async {
+        guard !loadingPublisherGames.contains(bottle.id), !isManagingBottle, !isQuitting else { return }
+        loadingPublisherGames.insert(bottle.id)
+        defer { loadingPublisherGames.remove(bottle.id) }
+        do {
+            let cancellation = CoreInvocationCancellation()
+            let library = try await withTaskCancellationHandler {
+                try await callAsync(["publisher-games", bottle.id], as: PublisherLibrary.self, cancellation: cancellation)
+            } onCancel: { cancellation.cancel() }
+            guard !Task.isCancelled, bottles.contains(where: { $0.id == bottle.id }) else { return }
+            publisherGames[bottle.id] = library.games
+            publisherGameErrors[bottle.id] = nil
+            if library.truncated { truncatedPublisherLibraries.insert(bottle.id) }
+            else { truncatedPublisherLibraries.remove(bottle.id) }
+        } catch {
+            if !Task.isCancelled { publisherGameErrors[bottle.id] = error.localizedDescription }
         }
     }
 
@@ -1431,6 +1516,103 @@ final class CaskrunModel: ObservableObject {
             defer { isLaunching = false }
             do {
                 _ = try await callAsync(["run-steam-game", bottle.id, String(game.app_id)], as: LaunchResult.self)
+                CaskrunWindowBridge.shared.hideMainWindow()
+            } catch { message = error.localizedDescription }
+        }
+    }
+
+    func refreshGameLibrary() async {
+        guard !loadingGameLibrary, !isQuitting else { return }
+        loadingGameLibrary = true
+        defer { loadingGameLibrary = false }
+        // Two local readers at a time; cancellation belongs to the Library view.
+        let snapshot = Array(bottles.prefix(128))
+        for start in stride(from: 0, to: snapshot.count, by: 2) {
+            guard !Task.isCancelled else { return }
+            await withTaskGroup(of: Void.self) { group in
+                for bottle in snapshot[start..<min(start + 2, snapshot.count)] {
+                    group.addTask {
+                        await self.refreshSteamGames(in: bottle)
+                        if !Task.isCancelled { await self.refreshPublisherGames(in: bottle) }
+                    }
+                }
+            }
+        }
+        let active = Set(bottles.map(\.id))
+        steamGames = steamGames.filter { active.contains($0.key) }
+        steamArtworkRevisions = steamArtworkRevisions.filter { active.contains($0.key) }
+        steamGameErrors = steamGameErrors.filter { active.contains($0.key) }
+        publisherGames = publisherGames.filter { active.contains($0.key) }
+        publisherGameErrors = publisherGameErrors.filter { active.contains($0.key) }
+        truncatedSteamLibraries.formIntersection(active)
+        truncatedPublisherLibraries.formIntersection(active)
+    }
+
+    func addBrowserGame(name: String, url: String) async throws {
+        guard !isQuitting, !editingBrowserGames else {
+            throw NSError(domain: "Caskrun", code: 1, userInfo: [NSLocalizedDescriptionKey: "Wait for the current edit to finish."])
+        }
+        editingBrowserGames = true
+        defer { editingBrowserGames = false }
+        let game = try await callAsync(["add-browser-game", name, url], as: BrowserGame.self)
+        browserGames.removeAll { $0.id == game.id }
+        browserGames.insert(game, at: 0)
+        browserGamesError = nil
+    }
+
+    func removeBrowserGame(_ game: BrowserGame) {
+        guard !isQuitting, !editingBrowserGames else { return }
+        editingBrowserGames = true
+        Task {
+            defer { editingBrowserGames = false }
+            do { browserGames = try await callAsync(["remove-browser-game", game.id], as: BrowserGames.self).games }
+            catch { message = error.localizedDescription }
+        }
+    }
+
+    func openBrowserGame(_ game: BrowserGame) {
+        guard !isQuitting, let url = BrowserGame.checkedURL(game.url) else {
+            if !isQuitting { message = "This browser game needs a valid public HTTPS address." }
+            return
+        }
+        if !NSWorkspace.shared.open(url) { message = "macOS could not open your default browser." }
+    }
+
+    func loadGameIcon(_ game: SteamGame, in bottle: Bottle) {
+        let key = "\(bottle.id):\(game.id)"
+        guard let path = game.icon_path else { gameIcons[key] = nil; gameIconStamps[key] = nil; return }
+        let stamp = gameArtworkRevision(game, in: bottle)
+        guard gameIcons[key] == nil || gameIconStamps[key] != stamp,
+              requestedIcons.insert("game:\(key)").inserted else { return }
+        Task {
+            defer { requestedIcons.remove("game:\(key)") }
+            let data = await SteamArtworkReader.shared.read(path)
+            guard !Task.isCancelled, bottles.contains(where: { $0.id == bottle.id }),
+                  steamGames[bottle.id]?.contains(where: { $0.id == game.id && $0.icon_path == path }) == true,
+                  gameArtworkRevision(game, in: bottle) == stamp else { return }
+            guard let data else { gameIcons[key] = nil; gameIconStamps[key] = nil; return }
+            gameIcons[key] = NSImage(data: data)
+            gameIconStamps[key] = stamp
+            gameIconOrder.removeAll { $0 == key }
+            gameIconOrder.append(key)
+            while gameIconOrder.count > 256 {
+                let oldest = gameIconOrder.removeFirst()
+                gameIcons[oldest] = nil; gameIconStamps[oldest] = nil
+            }
+        }
+    }
+
+    func gameArtworkRevision(_ game: SteamGame, in bottle: Bottle) -> String {
+        "\(artworkGenerations[bottle.id, default: 0]):\(steamArtworkRevisions[bottle.id, default: 0]):\(game.icon_path ?? "none")"
+    }
+
+    func requestSteamInstall(appID: UInt32, in bottle: Bottle) {
+        guard appID > 0, !isQuitting, !isLaunching, !isManagingBottle, status.wine_path != nil else { return }
+        isLaunching = true
+        Task {
+            defer { isLaunching = false }
+            do {
+                _ = try await callAsync(["install-steam-game", bottle.id, String(appID)], as: LaunchResult.self)
                 CaskrunWindowBridge.shared.hideMainWindow()
             } catch { message = error.localizedDescription }
         }
@@ -1733,9 +1915,36 @@ final class CaskrunModel: ObservableObject {
     private func validateGraphicsResult(_ result: BottleGraphicsStatus, for bottle: Bottle) throws {
         guard result.bottle_id == bottle.id,
               ["auto", "wined3d", "dxmt"].contains(result.selected_backend),
-              result.effective_backend == (result.selected_backend == "dxmt" ? "dxmt" : "wined3d") else {
+              result.effective_backend == (result.selected_backend == "dxmt" ? "dxmt" : "wined3d"),
+              result.dxmt_frame_rate <= 240, [100, 125, 150, 200].contains(result.dxmt_spatial_scale) else {
             throw NSError(domain: "Caskrun", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Graphics status is unavailable for this bottle."])
+        }
+    }
+
+    func setDXMTOptions(in bottle: Bottle, frameRate: UInt16, spatialScale: UInt16) {
+        guard !isQuitting, !isLaunching, !isManagingBottle,
+              let current = bottleGraphics[bottle.id], current.selected_backend == "dxmt",
+              current.dxmt_available, frameRate <= 240,
+              [100, 125, 150, 200].contains(spatialScale),
+              spatialScale == 100 || current.dxmt_spatial_available else { return }
+        isManagingBottle = true
+        bottleOperationLabel = "Updating DXMT options…"
+        let requestedWine = wineExecutable
+        Task {
+            defer { isManagingBottle = false; bottleOperationLabel = "Updating bottle…" }
+            do {
+                let result = try await callAsync(["set-bottle-dxmt-options", bottle.id, String(frameRate), String(spatialScale)], as: BottleGraphicsStatus.self)
+                guard requestedWine == wineExecutable, bottles.contains(where: { $0.id == bottle.id }) else { return }
+                try validateGraphicsResult(result, for: bottle)
+                bottleGraphics[bottle.id] = result
+                bottleGraphicsErrors[bottle.id] = nil
+            } catch {
+                guard requestedWine == wineExecutable else { return }
+                bottleGraphicsErrors[bottle.id] = error.localizedDescription
+                message = error.localizedDescription
+                refreshBottleGraphics(in: bottle)
+            }
         }
     }
 
@@ -2031,7 +2240,7 @@ final class CaskrunModel: ObservableObject {
         }
     }
 
-    func installCatalog(_ entry: CatalogEntry) {
+    func installCatalog(_ entry: CatalogEntry, thenInstallSteamAppID: UInt32? = nil) {
         guard entry.installMode == "automatic" else { return }
         guard status.wine_path != nil else {
             message = "The included Windows engine is unavailable. Reinstall a complete Caskrun build."
@@ -2080,6 +2289,15 @@ final class CaskrunModel: ObservableObject {
                                                 bottle: result.bottle,
                                                 launcher: result.launcher,
                                                 setupNote: result.setup_note)
+                if entry.id == "steam", let appID = thenInstallSteamAppID, appID > 0,
+                   !isQuitting, !cancellation.isCancelRequested {
+                    do {
+                        _ = try await callAsync(["install-steam-game", result.bottle.id, String(appID)], as: LaunchResult.self)
+                    } catch {
+                        message = "Steam is set up, but the game install request needs another try: \(error.localizedDescription)"
+                        return
+                    }
+                }
                 CaskrunWindowBridge.shared.hideMainWindow()
             } catch {
                 canCancelCatalogInstall = false
@@ -2557,6 +2775,10 @@ struct CaskrunApp: App {
     @State private var renameText = ""
     @State private var librarySearch = ""
     @State private var catalogSearch = ""
+    @State private var discoverScope: DiscoverScope = .stores
+    @State private var browserGameRequest: AddBrowserGameRequest?
+    @State private var steamInstallRequest: SteamGameInstallRequest?
+    private let compatibilityDevice = CompatibilityDevice.current()
     @State private var selectedCatalogEntry: CatalogEntry?
     @State private var catalogBottleID = ""
     @State private var catalogUseExistingBottle = false
@@ -2857,10 +3079,12 @@ struct CaskrunApp: App {
             topBar
                 .padding(.top, 12)
                 .padding(.bottom, 2)
+            if page == .discover { DiscoverScopeBar(selection: $discoverScope) }
             operationPanel
             Group {
                 switch page {
                 case .home: homeView
+                case .library: gameLibraryView
                 case .discover: discoverView
                 }
             }
@@ -2878,7 +3102,7 @@ struct CaskrunApp: App {
             model.refresh()
             if !didChooseInitialPage {
                 page = !model.bottles.isEmpty ||
-                    !model.catalogAttempts.isEmpty ? .home : .discover
+                    !model.catalogAttempts.isEmpty || !model.browserGames.isEmpty ? .home : .discover
                 didChooseInitialPage = true
             }
             if let url = Bundle.main.url(forResource: "caskrun-icon", withExtension: "png"),
@@ -2928,6 +3152,12 @@ struct CaskrunApp: App {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if page == .home, let bottle = openBottle {
                 Task { await model.refreshSteamGames(in: bottle) }
+            }
+            if page == .library { Task { await model.refreshGameLibrary() } }
+        }
+        .task(id: page) {
+            if page == .library {
+                await model.refreshGameLibrary()
             }
         }
     }
@@ -3046,6 +3276,28 @@ struct CaskrunApp: App {
             .sheet(item: $notesBottle) { bottle in
                 BottleNotesView(model: model, bottle: bottle)
             }
+            .sheet(item: $browserGameRequest) { request in
+                AddBrowserGameSheet(initialName: request.name, initialURL: request.url) { name, url in
+                    try await model.addBrowserGame(name: name, url: url)
+                }
+            }
+            .sheet(item: $steamInstallRequest) { request in
+                SteamGameInstallSheet(request: request, bottles: steamBottles, isBusy: model.isQuitting || model.isLaunching || model.isManagingBottle || model.status.wine_path == nil) { appID, bottleID in
+                    guard !model.isQuitting, !model.isLaunching, !model.isManagingBottle, model.status.wine_path != nil else {
+                        throw NSError(domain: "Caskrun", code: 1, userInfo: [NSLocalizedDescriptionKey: "Wait for the current operation to finish and check that the Windows engine is available."])
+                    }
+                    if let bottleID {
+                        guard let bottle = steamBottles.first(where: { $0.id == bottleID }) else {
+                            throw NSError(domain: "Caskrun", code: 1, userInfo: [NSLocalizedDescriptionKey: "That Steam bottle is no longer available. Choose another bottle."])
+                        }
+                        model.requestSteamInstall(appID: appID, in: bottle)
+                    } else if let steam = CatalogSource.loaded.entries.first(where: { $0.id == "steam" }) {
+                        model.installCatalog(steam, thenInstallSteamAppID: appID)
+                    } else {
+                        throw NSError(domain: "Caskrun", code: 1, userInfo: [NSLocalizedDescriptionKey: "The Steam setup entry is missing. Rebuild Caskrun to restore it."])
+                    }
+                }
+            }
         }
         .defaultSize(width: 1000, height: 680)
         .commands {
@@ -3096,11 +3348,15 @@ struct CaskrunApp: App {
     private var topBar: some View {
         HStack(spacing: 4) {
             navigationButton(.home, title: "Home", symbol: "house", shortcut: "1")
+            navigationButton(.library, title: "Library", symbol: "gamecontroller", shortcut: "4")
             navigationButton(.discover, title: "Discover", symbol: "square.grid.2x2", shortcut: "2")
             Rectangle().fill(.primary.opacity(0.12))
                 .frame(width: 1, height: 18).padding(.horizontal, 5)
             Menu {
                 Button("Discover apps") { navigate(to: .discover) }
+                Button("Add browser game…") { browserGameRequest = AddBrowserGameRequest() }
+                Button("Install Steam game…") { steamInstallRequest = SteamGameInstallRequest(appID: nil, name: nil) }
+                    .disabled(model.status.wine_path == nil || model.isLaunching || model.isManagingBottle)
                 Button("Install from file…") { model.chooseInstaller(in: page == .home ? openBottleID : nil) }
                     .disabled(model.status.wine_path == nil || model.isLaunching || model.isManagingBottle)
                 Divider()
@@ -3124,9 +3380,9 @@ struct CaskrunApp: App {
             .onHover { hoveredInstall = $0 }
             .animation(.easeOut(duration: 0.12), value: hoveredInstall)
             if showingSearch {
-                searchField(page == .home ? "Search bottles and apps" : "Search stores and apps",
-                            text: page == .home ? $librarySearch : $catalogSearch,
-                            field: page == .home ? .library : .catalog)
+                searchField(page == .discover ? "Search Discover" : "Search your library",
+                            text: page == .discover ? $catalogSearch : $librarySearch,
+                            field: page == .discover ? .catalog : .library)
                     .frame(width: 210)
                 Button {
                     librarySearch = ""
@@ -3228,7 +3484,7 @@ struct CaskrunApp: App {
                             Text("Some Steam library entries could not be listed.").font(.caption).foregroundStyle(.secondary)
                         }
                     } else if model.bottles.isEmpty {
-                        homeEmptyState
+                        if model.browserGames.isEmpty { homeEmptyState }
                     } else {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 144), spacing: 12)],
                                   alignment: .leading, spacing: 12) {
@@ -3237,6 +3493,19 @@ struct CaskrunApp: App {
                         if !librarySearch.isEmpty && filteredBottles.isEmpty {
                             ContentUnavailableView.search(text: librarySearch)
                         }
+                    }
+                    if openBottle == nil, !model.browserGames.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Browser games").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 144), spacing: 12)], alignment: .leading, spacing: 12) {
+                                ForEach(model.browserGames.filter { librarySearch.isEmpty || $0.name.localizedStandardContains(librarySearch) }) { game in
+                                    BrowserGameTile(game: game, opensOnSingleClick: true, onSelect: {}, onOpen: { model.openBrowserGame(game) }, onRemove: { model.removeBrowserGame(game) })
+                                }
+                            }
+                        }
+                    }
+                    if let error = model.browserGamesError {
+                        Text(error).font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 .padding(24)
@@ -3361,7 +3630,181 @@ struct CaskrunApp: App {
         }
     }
 
-    private var discoverView: some View {
+    private var steamBottles: [Bottle] {
+        model.bottles.filter { bottle in model.savedSteamClients.contains { $0.bottle_id == bottle.id } }
+    }
+
+    private var gameLibraryEntries: [GameLibraryEntry] {
+        let canLaunch = !model.isQuitting && !model.isLaunching && !model.isManagingBottle && model.status.wine_path != nil
+        var entries: [GameLibraryEntry] = []
+        for bottle in model.bottles {
+            for game in model.steamGames[bottle.id] ?? [] {
+                let compatibility = GameCompatibilityCatalog.shared.game(appID: game.app_id)
+                entries.append(GameLibraryEntry(id: "steam:\(bottle.id):\(game.app_id)", name: game.name, source: .steam,
+                    subtitle: "Steam · \(bottle.name)", compatibilityText: compatibility?.summary ?? "Not tested in Caskrun",
+                    compatibility: compatibility, icon: model.gameIcons["\(bottle.id):\(game.id)"],
+                    artworkRevision: model.gameArtworkRevision(game, in: bottle),
+                    canPlay: canLaunch && model.savedSteamClients.contains(where: { $0.bottle_id == bottle.id }), canManageBottle: true,
+                    availableRenderers: model.bottleGraphics[bottle.id].map { $0.dxmt_available ? Set(["wined3d", "dxmt"]) : Set(["wined3d"]) },
+                    graphicsDescription: model.bottleGraphics[bottle.id].map { "Bottle graphics: " + ($0.effective_backend == "dxmt" ? "DXMT" : "WineD3D") }))
+            }
+            for game in model.publisherGames[bottle.id] ?? [] {
+                let scope: LibraryScope = game.store == "epic" ? .epic : .gog
+                entries.append(GameLibraryEntry(id: "publisher:\(bottle.id):\(game.id)", name: game.name, source: scope,
+                    subtitle: "\(scope.title) · \(bottle.name)", compatibilityText: "Not tested in Caskrun",
+                    compatibilityDetail: "This title was found in the store's local installation manifest. Compatibility reports need an exact game identifier; a matching title alone is not evidence.",
+                    canPlay: canLaunch && publisherClient(for: game, in: bottle) != nil, canManageBottle: true))
+            }
+            for launcher in model.launchers[bottle.id] ?? [] where !launcher.hidden_from_home {
+                entries.append(GameLibraryEntry(id: "app:\(bottle.id):\(launcher.id)", name: launcher.name, source: .apps,
+                    subtitle: "Windows app · \(bottle.name)", compatibilityText: "Saved app",
+                    compatibilityDetail: "This is a saved Windows app shortcut. A launcher opening does not establish game compatibility.",
+                    icon: model.launcherIcons["\(bottle.id):\(launcher.id)"], canPlay: canLaunch, canManageBottle: true))
+            }
+        }
+        for game in model.browserGames {
+            entries.append(GameLibraryEntry(id: "browser:\(game.id)", name: game.name, source: .browser,
+                subtitle: BrowserGame.checkedURL(game.url)?.host ?? "Browser game", compatibilityText: "Opens in browser",
+                browserURL: game.url, canPlay: !model.isQuitting))
+        }
+        return entries.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private var gameLibraryWarnings: [String] {
+        var warnings = model.bottles.compactMap { bottle in model.steamGameErrors[bottle.id].map { "\(bottle.name): \($0)" } }
+        warnings += model.bottles.compactMap { bottle in model.publisherGameErrors[bottle.id].map { "\(bottle.name): \($0)" } }
+        if !model.truncatedPublisherLibraries.isEmpty { warnings.append("Some Epic or GOG manifests were skipped or exceeded the local scan limit.") }
+        if model.bottles.count > 128 { warnings.append("Only the first 128 bottles were scanned. Open another bottle on Home to read its library.") }
+        if !model.truncatedSteamLibraries.isEmpty { warnings.append("Some Steam manifests could not be read completely.") }
+        if let error = model.browserGamesError { warnings.append(error) }
+        return warnings
+    }
+
+    private var gameLibraryView: some View {
+        GameLibraryView(entries: gameLibraryEntries, device: compatibilityDevice,
+            isLoading: model.loadingGameLibrary, warnings: gameLibraryWarnings, query: librarySearch,
+            onRefresh: { Task { await model.refreshGameLibrary() } }, onPlay: playLibraryEntry,
+            onManage: { entry in
+                let parts = entry.id.split(separator: ":")
+                if parts.count >= 3, let bottle = model.bottles.first(where: { $0.id == parts[1] }) { inspectBottle(bottle) }
+            }, onRemoveBrowser: { entry in
+                if let game = model.browserGames.first(where: { "browser:\($0.id)" == entry.id }) { model.removeBrowserGame(game) }
+            }, onAddBrowser: { browserGameRequest = AddBrowserGameRequest() }, onLoadArtwork: loadLibraryArtwork, onInspect: { entry in
+                guard entry.source == .steam, !model.isQuitting else { return }
+                let parts = entry.id.split(separator: ":")
+                if parts.count == 3, let bottle = model.bottles.first(where: { $0.id == parts[1] }), model.bottleGraphics[bottle.id] == nil {
+                    model.refreshBottleGraphics(in: bottle)
+                }
+            })
+    }
+
+    private func loadLibraryArtwork(_ entry: GameLibraryEntry) {
+        for bottle in model.bottles {
+            if let game = model.steamGames[bottle.id]?.first(where: { "steam:\(bottle.id):\($0.app_id)" == entry.id }) {
+                model.loadGameIcon(game, in: bottle); return
+            }
+            if let launcher = model.launchers[bottle.id]?.first(where: { "app:\(bottle.id):\($0.id)" == entry.id }) {
+                model.loadLauncherIcon(launcher, in: bottle); return
+            }
+        }
+    }
+
+    private func publisherClient(for game: PublisherGame, in bottle: Bottle) -> SavedLauncher? {
+        model.launchers[bottle.id]?.first { launcher in
+            guard launcher.saved_arguments?.isEmpty ?? true else { return false }
+            let path = launcher.path.lowercased()
+            guard let drive = path.range(of: "/prefix/drive_c/") else { return false }
+            let program = path[drive.upperBound...]
+            if game.store == "epic" {
+                return (program.hasPrefix("program files (x86)/epic games/launcher/") || program.hasPrefix("program files/epic games/launcher/"))
+                    && program.hasSuffix("/epicgameslauncher.exe")
+            }
+            return game.store == "gog" && (program == "program files (x86)/gog galaxy/galaxyclient.exe" || program == "program files/gog galaxy/galaxyclient.exe")
+        }
+    }
+
+    private func playLibraryEntry(_ entry: GameLibraryEntry) {
+        guard entry.canPlay else { return }
+        if let game = model.browserGames.first(where: { "browser:\($0.id)" == entry.id }) { model.openBrowserGame(game); return }
+        for bottle in model.bottles {
+            if let game = model.publisherGames[bottle.id]?.first(where: { "publisher:\(bottle.id):\($0.id)" == entry.id }),
+               let client = publisherClient(for: game, in: bottle) {
+                model.runLauncher(client, in: bottle); return
+            }
+            if let game = model.steamGames[bottle.id]?.first(where: { "steam:\(bottle.id):\($0.app_id)" == entry.id }) {
+                model.runSteamGame(game, in: bottle); return
+            }
+            if let launcher = model.launchers[bottle.id]?.first(where: { "app:\(bottle.id):\($0.id)" == entry.id }) {
+                model.runLauncher(launcher, in: bottle); return
+            }
+        }
+    }
+
+    @ViewBuilder private var discoverView: some View {
+        switch discoverScope {
+        case .stores: storeDiscoverView
+        case .games:
+            CompatibilityBrowseView(query: catalogSearch, device: compatibilityDevice,
+                canInstall: !model.isQuitting && !model.isLaunching && !model.isManagingBottle && model.status.wine_path != nil) { game in
+                    steamInstallRequest = SteamGameInstallRequest(appID: game.steamAppID, name: game.title)
+                }
+        case .browser: browserDiscoverView
+        }
+    }
+
+    private var browserDiscoverView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("One click away").font(.title2.weight(.semibold))
+                        Text("Games that run in your browser. Save a favourite to Home.").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Add a game link…") { browserGameRequest = AddBrowserGameRequest() }.buttonStyle(.bordered)
+                }
+                if let error = BrowserGameCatalog.loaded.error { Text(error).font(.caption).foregroundStyle(.secondary) }
+                let entries = BrowserGameCatalog.loaded.entries.filter {
+                    catalogSearch.isEmpty || $0.name.localizedStandardContains(catalogSearch) || $0.detail.localizedStandardContains(catalogSearch)
+                }
+                if entries.isEmpty { ContentUnavailableView.search(text: catalogSearch) }
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible())], spacing: 12) {
+                    ForEach(entries) { game in
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(spacing: 12) {
+                                BrowserGameArtwork(seed: game.url.absoluteString, size: 42)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(game.name).font(.headline)
+                                    Text(game.url.host ?? "").font(.system(size: 10)).foregroundStyle(.secondary)
+                                }
+                            }
+                            Text(game.detail).font(.caption).foregroundStyle(.secondary).frame(minHeight: 32, alignment: .topLeading)
+                            if game.requiresOwnFiles { Label("Bring your own game files", systemImage: "folder").font(.caption) }
+                            HStack {
+                                Button("Play in browser") {
+                                    model.openBrowserGame(BrowserGame(id: game.id, name: game.name, url: game.url.absoluteString, created_at: 0))
+                                }.buttonStyle(.borderless)
+                                Spacer()
+                                if model.browserGames.contains(where: { $0.url == game.url.absoluteString }) {
+                                    Label("On Home", systemImage: "checkmark").font(.caption).foregroundStyle(.secondary)
+                                } else {
+                                    Button("Add to Home") { browserGameRequest = AddBrowserGameRequest(name: game.name, url: game.url.absoluteString) }
+                                        .buttonStyle(.bordered)
+                                }
+                            }
+                            Link("Source", destination: game.sourceURL).font(.system(size: 10)).foregroundStyle(.secondary)
+                        }
+                        .padding(18).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 16))
+                    }
+                }
+                Text("Community ports are separate from official commercial releases. Availability and browser requirements are set by each site.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(24)
+        }
+    }
+
+    private var storeDiscoverView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 runtimeBanner
@@ -3843,6 +4286,12 @@ struct CaskrunApp: App {
                      ? "DXMT translates DirectX 10/11 to Metal. Game compatibility still needs testing."
                      : "WineD3D is the default. Close this bottle’s apps before changing its renderer.")
                     .font(.caption).foregroundStyle(.secondary)
+                if status.selected_backend == "dxmt" {
+                    DXMTOptionsView(status: status,
+                        isBusy: model.isQuitting || model.isLaunching || model.isManagingBottle || model.loadingBottleGraphics.contains(bottle.id)) { rate, scale in
+                            model.setDXMTOptions(in: bottle, frameRate: rate, spatialScale: scale)
+                        }
+                }
                 if !status.dxmt_available, let reason = status.unavailable_reason {
                     Text(reason).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }

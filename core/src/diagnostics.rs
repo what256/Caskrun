@@ -467,20 +467,13 @@ fn graphics_summary(
     runtime: &RuntimeSummary,
     issues: &mut Vec<Issue>,
 ) -> GraphicsSummary {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Settings {
-        version: u32,
-        backend: Renderer,
-    }
-    let selected = match json_file(&dir.join("graphics.json"), 4096) {
-        Ok(None) => Some(Renderer::Auto),
-        Ok(Some(value)) if value.is_object() => serde_json::from_value::<Settings>(value)
-            .ok()
-            .filter(|settings| settings.version == 1)
-            .map(|settings| settings.backend),
-        Ok(Some(_)) | Err(_) => None,
-    };
+    let selected = bottle_graphics::selected_backend(dir)
+        .ok()
+        .map(|backend| match backend {
+            bottle_graphics::Backend::Auto => Renderer::Auto,
+            bottle_graphics::Backend::Wined3d => Renderer::Wined3d,
+            bottle_graphics::Backend::Dxmt => Renderer::Dxmt,
+        });
     if selected.is_none() {
         issue(issues, Issue::GraphicsUnreadable);
     }
@@ -711,6 +704,51 @@ mod tests {
 
     fn has_issue(report: &serde_json::Value, value: &str) -> bool {
         report["issues"].as_array().unwrap().contains(&value.into())
+    }
+
+    #[test]
+    fn graphics_diagnostics_share_versioned_validation_without_exporting_options() {
+        let fixture = Fixture::new();
+        for (bytes, expected) in [
+            (r#"{"version":1,"backend":"auto"}"#, Some("auto")),
+            (
+                r#"{"version":2,"backend":"dxmt","dxmt_frame_rate":40,"dxmt_spatial_scale":100}"#,
+                Some("dxmt"),
+            ),
+            (
+                r#"{"version":1,"backend":"dxmt","dxmt_frame_rate":30}"#,
+                None,
+            ),
+            (
+                r#"{"version":2,"backend":"auto","dxmt_frame_rate":241,"dxmt_spatial_scale":100}"#,
+                None,
+            ),
+            (
+                r#"{"version":2,"backend":"auto","dxmt_frame_rate":30,"dxmt_spatial_scale":100,"private_token":"fixture-secret"}"#,
+                None,
+            ),
+            (
+                r#"{"version":3,"backend":"auto","dxmt_frame_rate":0,"dxmt_spatial_scale":100}"#,
+                None,
+            ),
+        ] {
+            fs::write(fixture.dir.join("graphics.json"), bytes).unwrap();
+            let report = fixture.report();
+            assert_eq!(report["graphics"]["selected_backend"].as_str(), expected);
+            assert_eq!(
+                has_issue(&report, "graphics_unreadable"),
+                expected.is_none()
+            );
+            let encoded = serde_json::to_string(&report).unwrap();
+            for private in [
+                "dxmt_frame_rate",
+                "dxmt_spatial_scale",
+                "fixture-secret",
+                "private_token",
+            ] {
+                assert!(!encoded.contains(private));
+            }
+        }
     }
 
     #[test]

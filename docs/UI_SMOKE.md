@@ -89,3 +89,22 @@ Command-2 opened the redesigned Discover page. Its screenshot showed all eight o
 Immediately before testing full Quit, process reads showed one Caskrun UI, one Steam main process, and four Steam web helpers. Command-Q on the updated candidate completed without an error UI. The subsequent process check showed **zero Caskrun UIs, zero Steam main processes, and zero Steam web helpers**. Caskrun then reopened successfully and was left on Discover. This verifies full Quit against the existing real Steam session, not application save prompts, active game shutdown, simultaneous installer cancellation, or all Wine programs. Closing only the main window retains the existing menu-bar behavior; that was not retested in this pass.
 
 The final ARM64 package passed compilation, catalog validation, architecture and ad-hoc signature checks, disk-image verification, publication, and checksum verification. The single visible development DMG is `dist/Caskrun-0.1.0-arm64-dev.dmg`; SHA-256: `19c0dc33702b41c678469dc03abfd0e802f04d80b451a62e032b065f7300e0d2`. Game compatibility and real CrossOver import remain unverified.
+
+
+## Library and browser phase — 8 October 2026
+
+The floating navigation now includes Library. Its compact filters cover All,
+Steam, Epic, GOG, saved Apps and Browser, with a right detail panel. Discover
+has Stores, Game reports and Browser games beneath its floating navigation.
+Home keeps its bottle folders and adds saved browser shortcuts.
+
+The complete SwiftUI source typechecks. Current automated coverage passes 420
+Rust unit tests and 6 integration tests (2 existing unit tests ignored), 125
+Python checks and 104 Swift checks. Timing-sensitive process tests passed with
+one Rust test thread; no production or test deadlines were relaxed. Package
+and command checks are recorded separately in launcher validation.
+
+This phase has not yet had a live visual/keyboard pass: the Mac locked before
+that check. Earlier UI results above concern their dated builds, not the new
+Library. Actual game compatibility, browser gameplay and publisher sign-in
+remain manual checks.

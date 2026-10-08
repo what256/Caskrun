@@ -2,6 +2,50 @@
 
 Caskrun is a demo in active development. More features are coming, and the repository remains private. An installer download, a saved executable, or a returned process ID does not prove launcher or game compatibility.
 
+## Library and graphics phase
+
+_8 October 2026. These additions do not change the real publisher-client outcomes recorded below. Authentication and gameplay remain untested._
+
+- **Local Library:** bounded read-only discovery lists installed Steam games,
+  Epic `.item` manifests and GOG game metadata inside supported bottle-local
+  C: locations, alongside saved Windows shortcuts. Original fixtures exercise
+  identity, path containment, malformed records, limits and read-only behavior.
+  Steam launches through its saved client; Epic/GOG entries open their saved
+  store client. Full account-owned libraries, arbitrary external drives and
+  verified per-game launch commands are not provided by manifest discovery.
+- **External compatibility evidence:** an attributed offline CC0 snapshot
+  contains 373 Steam identities and 71 direct reports. The UI compares known
+  generic device and runtime fields while retaining missing values, mixed
+  reports and renderer-availability uncertainty. All entries remain **Not
+  tested in Caskrun**. An external rating or matching chip does not establish
+  a result under Caskrun's engine. See [data boundaries](GAME_COMPATIBILITY.md).
+- **Steam installation requests:** a selected report or manually supplied
+  Steam AppID/store link can target an existing saved Steam client or a fresh
+  Steam setup. Input and routing checks do not establish a completed download.
+  Steam handles account sign-in, ownership and the actual game installation;
+  the user will test that journey with their chosen account and games.
+- **Browser shortcuts:** Discover offers checked developer/community links
+  and custom HTTPS links. Saved links open in the default browser from Home
+  or Library without Wine. Tests cover local persistence, deduplication,
+  removal and refused credential-bearing or unsafe links. Website inspection
+  does not establish gameplay or future availability. The Vice City community
+  port requires the user's own game files; Caskrun includes no game assets.
+  See [browser provenance](../catalog/BROWSER_GAMES.md).
+- **Optional DXMT controls:** the original live matrix passed five control
+  combinations under both Windows x64 and x86: 30/60 presentation targets
+  with spatial scaling off, plus application-controlled presentation at
+  1.25×/1.5×/2× spatial output scale. Each passed the recorded drawing,
+  readback, two-window lifecycle, selected-runtime and busy-refusal gates.
+  The owned prefixes were stopped, independently checked and removed.
+  API-submission timings are not displayed FPS or game-performance results.
+  Visible image quality, fullscreen, real games and other Macs remain manual
+  tests. See [exact DXMT evidence](DXMT_OPTIONS.md).
+
+Automatic remains WineD3D. High Resolution stays optional and off by default;
+DXMT frame targets and spatial scaling are optional and default off. These
+controls add neither DLSS, temporal reconstruction, frame generation, D3D12,
+DXVK, D3DMetal nor MSync. No performance advantage over CrossOver is claimed.
+
 ## Isolated local tests
 
 Use `scripts/test-launchers.py` with a Caskrun core and independent Wine runtime under the ignored `.build` directory. Each session owns its own Caskrun storage, macOS home-folder mappings, temporary files and XDG directories. Keep real accounts and user bottles out of these tests.
@@ -150,6 +194,28 @@ Caskrun states that imported programs keep their settings and data only when the
 
 ## Source verification
 
-The current serial Rust verification passed 267 unit tests and 2 integration tests; 2 existing tests remain ignored. Parallel runs exposed timing-sensitive failures, so the serial result is not a clean parallel-suite result. The Python harness, publication-privacy and catalog checks passed 47 tests; the harness now covers the Steam catalog entry and asserts its own list matches the tracked catalog. The native UI typechecked and a signed candidate app built and verified its signature in this round. The adaptive renderer's 23 real original image CLI cases, the packaged-core PE-artwork smoke and the development DMG verification belong to the earlier icon round and were not rerun here. These tests cover source behavior and fixtures, not real store authentication or games.
+The earlier profile-restoration round passed 267 Rust unit tests and 2 integration tests, with 2 existing tests ignored. Parallel runs exposed timing-sensitive failures, so that serial result was not a clean parallel-suite result. Its Python harness, publication-privacy and catalog checks passed 47 tests; the native UI typechecked and a signed candidate app verified its signature. The subsequent maintenance phase passed 375 Rust unit tests and 6 integration tests, with 2 existing tests ignored, plus 97 Python checks and 10 Swift argument checks. The library phase adds focused browser, compatibility-data, publisher-manifest and Steam-request checks; its graphics matrix is recorded separately above. Earlier adaptive-renderer image cases and packaged-core artwork checks retain their original scope. These tests cover source behavior, API probes and fixtures, not real store authentication or games.
 
 See the separate [feature inventory](FEATURES.md) for the demo's limitations.
+
+
+## Library phase packaged checks — 8 October 2026
+
+The current source passes 420 Rust unit tests and 6 integration tests, with 2
+existing unit tests ignored, 125 Python checks and 104 Swift checks. The full
+SwiftUI app typechecks. The complete Rust suite passes with one test thread;
+an earlier heavily parallel run exceeded mock-process deadlines. Those tests
+passed without relaxing their bounds. Clippy reports existing style warnings
+in unchanged files; the new feature code introduces no remaining warnings.
+
+An owned fixture exercised the packaged core's browser-link add/list/rename/
+remove commands, installed Steam/Epic/GOG game discovery and saved-client
+recognition. The read commands left the synthetic prefix byte-for-byte
+unchanged and never initialized or launched Wine. The fixture was removed
+after independent zero-file-owner inspection. These are metadata and command
+checks, not publisher account or game compatibility results.
+
+The new Library visual pass remains pending because the Mac was locked. Real
+publisher sign-in, browser gameplay and actual games remain manual tests; see
+[the checklist](MANUAL_TEST_CHECKLIST.md). DXMT rendering evidence and its
+explicit limits are recorded in [DXMT options](DXMT_OPTIONS.md).

@@ -25,6 +25,8 @@
  * mapping proof described above; its placeholder hash cannot prove DXMT.
  * Module paths stay local. Mismatching logical files refuse the test too.
  *
+ * --pacing-frames 30..120 adds a bounded API-submission timing trial after
+ * the rendering gates; a separate options harness validates those records.
  * Output is bounded JSON Lines, schemas 1 through 4. Events: probe, module, check,
  * pixel, modules, result. Every check carries an exact feature_level (10_0
  * or 11_0) or "none". Hardware devices have no WARP/software fallback.
@@ -63,6 +65,7 @@ typedef HRESULT (WINAPI *CompileFn)(const void *, SIZE_T, const char *,
 static const char *level_name = "none";
 static unsigned failures;
 static BOOL window_closed;
+static unsigned pacing_frames;
 static CreateDeviceFn create_device;
 static CreateSwapFn create_swap;
 static CompileFn compile_shader;
@@ -552,6 +555,40 @@ done:
     if (secondary.window) DestroyWindow(secondary.window);
 }
 
+/* Optional throughput timing after the normal rendering/lifecycle gates.
+ * This measures paced API submission, not display scanout or game FPS. */
+static void run_pacing(void)
+{
+    SwapTarget target = {0};
+    LARGE_INTEGER frequency, started, finished;
+    const FLOAT color[4] = {0.125f, 0.25f, 0.5f, 1.0f};
+    ID3D11RenderTargetView *view = NULL;
+    HRESULT hr;
+    unsigned frame;
+    uint64_t elapsed_us = 0;
+    level_name = "11_0";
+    if (!lifecycle_create_window(&target, L"Caskrun DXMT Pacing", "pacing_hwnd")) goto done;
+    if (!lifecycle_create_swap(&target, D3D_FEATURE_LEVEL_11_0, PROBE_SIZE, PROBE_SIZE, "pacing_swapchain")) goto done;
+    hr = ID3D11Device_CreateRenderTargetView(target.device, (ID3D11Resource *)target.texture, NULL, &view);
+    if (!check("pacing_render_target", SUCCEEDED(hr), hr)) goto done;
+    if (!check("pacing_timer", QueryPerformanceFrequency(&frequency) && QueryPerformanceCounter(&started), E_FAIL)) goto done;
+    for (frame = 0; frame < pacing_frames; ++frame) {
+        if (!pump_messages() || !IsWindow(target.window)) { check("pacing_window_open", FALSE, E_FAIL); goto done; }
+        ID3D11DeviceContext_ClearRenderTargetView(target.context, view, color);
+        hr = IDXGISwapChain_Present(target.swapchain, 0, 0);
+        if (hr != S_OK) { check("pacing_present", FALSE, hr); goto done; }
+    }
+    if (!check("pacing_finished", QueryPerformanceCounter(&finished), E_FAIL)) goto done;
+    elapsed_us = (uint64_t)((finished.QuadPart - started.QuadPart) * 1000000 / frequency.QuadPart);
+    printf("{\"event\":\"pacing\",\"feature_level\":\"11_0\",\"frames\":%u,\"elapsed_us\":%llu,\"measurement\":\"api_submission_not_display_fps\"}\n",
+        pacing_frames, (unsigned long long)elapsed_us);
+    fflush(stdout);
+done:
+    if (view) ID3D11RenderTargetView_Release(view);
+    release_swap_target(&target);
+    if (target.window) DestroyWindow(target.window);
+}
+
 int main(int argc, char **argv)
 {
     const char *expected_d3d11 = NULL, *expected_dxgi = NULL;
@@ -573,9 +610,16 @@ int main(int argc, char **argv)
             identity_only = TRUE;
         else if (!strcmp(argv[i], "--identity-gate") && !gate && i + 1 < argc)
             gate = argv[++i];
+        else if (!strcmp(argv[i], "--pacing-frames") && !pacing_frames && i + 1 < argc) {
+            const char *text = argv[++i];
+            char *end = NULL;
+            unsigned long frames = strtoul(text, &end, 10);
+            if (!text[0] || *end || frames < 30 || frames > 120) return 2;
+            pacing_frames = (unsigned)frames;
+        }
         else { fprintf(stderr, "Expected both --expected-d3d11-sha256 HEX and --expected-dxgi-sha256 HEX.\n"); return 2; }
     }
-    if (!valid_hash(expected_d3d11) || !valid_hash(expected_dxgi) || (identity_only && lifecycle)) {
+    if (!valid_hash(expected_d3d11) || !valid_hash(expected_dxgi) || (identity_only && (lifecycle || pacing_frames))) {
         fprintf(stderr, "Both expected DLL SHA-256 values must be 64 lowercase hexadecimal characters.\n");
         return 2;
     }
@@ -624,6 +668,7 @@ int main(int argc, char **argv)
     if (lifecycle) {
         run_lifecycle(D3D_FEATURE_LEVEL_10_0);
         run_lifecycle(D3D_FEATURE_LEVEL_11_0);
+        if (pacing_frames && !failures) run_pacing();
         result = failures ? 1 : 0;
         goto done;
     }
@@ -636,6 +681,7 @@ int main(int argc, char **argv)
     pump_messages();
     run_level(window, D3D_FEATURE_LEVEL_10_0);
     run_level(window, D3D_FEATURE_LEVEL_11_0);
+    if (pacing_frames && !failures) run_pacing();
     result = failures ? 1 : 0;
 done:
     printf("{\"event\":\"modules\",\"winemetal_loaded\":%s,\"wined3d_loaded\":%s}\n",
