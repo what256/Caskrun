@@ -81,12 +81,39 @@ Building from that public, separately licensed repository is distinct from
 copying anything out of an installed CrossOver, which stays forbidden. This is an
 engineering and documentation judgement, not legal advice.
 
-**Toolchain.** DXMT's build guide requires Meson 1.3+, LLVM 15 exactly (the guide
-pins `llvmorg-15.0.7`) built for x86_64 with headers and static libraries,
-Xcode 16+ with the Metal toolchain, a Wine 8+ build directory, and a mingw-w64
-cross-compiler. This Mac has Xcode 26.6 and `x86_64-w64-mingw32-gcc`, and lacks
-Meson, Ninja and any LLVM 15. Those three remain to be staged inside the ignored
-build directory before a DXMT build can be attempted.
+### DXMT gate 2: the build runs and stops at one missing Apple component
+
+The toolchain is now staged inside the ignored build directory: Meson 1.11.2 and
+Ninja 1.13.2 in a project-local virtual environment, and LLVM 15.0.7 built from
+`llvmorg-15.0.7` for x86_64 with headers and static libraries. Nothing was
+installed system-wide.
+
+The cross build configures. Meson selects `x86_64-w64-mingw32-gcc` for the
+Windows side and Apple clang for the build side, finds this project's own
+`winebuild` through `-Dwine_build_path`, and reports 16 build targets. Two
+details were needed beyond the upstream guide: the guide's advice to set
+`CFLAGS=-arch x86_64` must not reach the mingw cross compiler, which rejects
+`-arch`, and the build-machine side needs a native file forcing x86_64 so the
+unixlib can load into the x86_64 Wine runtime on an arm64 Mac. That native file
+is kept with the staged build.
+
+Compilation then runs and stops at one external blocker. 17 of 161 steps
+complete, including the `winemetal` Windows-side objects, before the first Metal
+shader fails:
+
+    xcrun -sdk macosx metal -c src/dxmt/dxmt_command.metal
+    error: cannot execute tool 'metal' due to missing Metal Toolchain;
+    use: xcodebuild -downloadComponent MetalToolchain
+
+The `metal` driver exists in Xcode 26.6 but its toolchain component is not
+installed. Installing it changes the Xcode installation on the development Mac,
+so it is left to the project owner. No source or build problem is known beyond
+this point; the remaining steps have not been attempted.
+
+**Still untested.** Nothing has been loaded into a bottle, no Direct3D call has
+been made through DXMT, and no rendering check has run. Those need the engine
+rebuilt with the visibility patch and repackaged behind the idle-bottle migration
+path, which has not been done.
 
 ### WineD3D OpenGL follow-up
 
