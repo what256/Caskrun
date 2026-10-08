@@ -32,6 +32,54 @@ Existing initialized bottles are bound to the exact bundled runtime-tree digest 
 
 The separate [DXMT upstream build guide](https://github.com/3Shain/dxmt/blob/main/docs/DEVELOPMENT.md) is a plausible next D3D10/11 experiment because it targets Metal directly and avoids this Vulkan device limit. Its documented Wine cross-build requires **Meson 1.3+**, **LLVM 15 exactly with x86_64 headers and static libraries**, Xcode 16+, Wine 8+ build files, and a Windows cross-compiler. This Mac has Xcode 26.6, Wine 11 build files, MinGW, and modern CMake, but no staged Meson, Ninja, or x86_64 LLVM 15; no DXMT build or D3D smoke was performed. The separately published [DXMT license](https://github.com/3Shain/dxmt/blob/main/LICENSE) is LGPL-2.1-or-later and credits Feifan He **for CodeWeavers**. Review that upstream provenance against the project's no-CrossOver-code requirement before including it. If approved, pin a DXMT source revision and toolchain, build x64 PE DLLs plus its x64 Unix library in ignored `.build/`, and run the same device/frame/visual tests; 32-bit PE DLLs are a separate build and depend on the x64 Unix library.
 
+### DXMT gate 1, measured: the engine hides what it must export — 8 October 2026
+
+The compatibility plan recorded that DXMT needs exported Wine `winemac` APIs. That
+is now measured against this project's own engine rather than taken from a
+document, and the blocker is specific and fixable.
+
+DXMT's unix layer resolves the driver two ways. It first looks for a
+`macdrv_functions` structure, which is a CrossOver export and is absent from
+upstream Wine. Failing that it falls back to resolving individual symbols by name
+with `dlsym(RTLD_DEFAULT, ...)`. Only that fallback matters here, and it needs
+these eight: `get_win_data`, `release_win_data`, `macdrv_get_cocoa_window`,
+`macdrv_create_metal_device`, `macdrv_release_metal_device`,
+`macdrv_view_create_metal_view`, `macdrv_view_get_metal_layer` and
+`macdrv_view_release_metal_view`. A ninth name in DXMT's structure,
+`macdrv_init_display_devices`, belongs to the CrossOver path only; it does not
+exist in Wine 11.0 and the by-name fallback never asks for it.
+
+In the packaged engine all eight exist in `winemac.so` and all eight are local
+symbols: the library exports two symbols out of 1905 entries. An original patch
+giving those eight declarations default visibility raises the exported count to
+10, and a rebuilt `winemac.so` from a clone of this project's configured Wine
+11.0 build tree confirms it. The patch is recorded in
+[runtime-patches](../runtime-patches/README.md) and is deliberately not packaged:
+including it rebuilds the engine and changes the runtime-tree digest existing
+bottles are bound to.
+
+Whether `dlsym(RTLD_DEFAULT, ...)` can then reach those symbols from DXMT's own
+unix library is a second, untested question, because it depends on how Wine loads
+driver libraries. Nothing has been built or executed on the DXMT side.
+
+**Provenance.** DXMT is published at `3Shain/dxmt` under LGPL-2.1-or-later,
+copyright "Feifan He for CodeWeavers", with release v0.80 of 23 April 2026 and a
+main branch head of `e94c312f5c054263acf261cfa109edf13e757587` dated
+6 October 2026. Building from that public, separately licensed repository is what
+this project's rules mean by using an independently licensed upstream component,
+and is distinct from copying anything out of an installed CrossOver, which stays
+forbidden. Any inclusion must pin a revision, carry the LGPL text and copyright
+notice, and keep a corresponding-source record. This is an engineering and
+documentation judgement, not legal advice; the project owner may want their own
+review before any release.
+
+**Toolchain.** DXMT's build guide requires Meson 1.3+, LLVM 15 exactly (the guide
+pins `llvmorg-15.0.7`) built for x86_64 with headers and static libraries,
+Xcode 16+ with the Metal toolchain, a Wine 8+ build directory, and a mingw-w64
+cross-compiler. This Mac has Xcode 26.6 and `x86_64-w64-mingw32-gcc`, and lacks
+Meson, Ninja and any LLVM 15. Those three remain to be staged inside the ignored
+build directory before a DXMT build can be attempted.
+
 ### WineD3D OpenGL follow-up
 
 The stable independent Wine runtime already loads Apple's OpenGL framework through its x86_64 `winemac.so`; its `SONAME_LIBGL` configure check concerns the X11 GL library and is not the missing macOS graphics path. A fresh disposable bottle using that unchanged runtime reported `GL_VERSION: "4.1 Metal - 90.5"` on Apple M5 Pro. [Apple says OpenGL on Apple Silicon reaches 4.1](https://developer.apple.com/videos/play/wwdc2020/10631/). WineD3D reported a maximum D3D feature level of **9_3 (`0x9300`)**. Its [Wine 11 `feature_level_from_caps()` source](https://gitlab.winehq.org/wine/wine/-/blob/wine-11.0/dlls/wined3d/adapter_gl.c) requires OpenGL 3.2, shader model 4, `ARB_sampler_objects`, and `ARB_polygon_offset_clamp` for level 10_0. The measured extension list contains the sampler extension but not either `ARB_polygon_offset_clamp` or `EXT_polygon_offset_clamp`; Wine's source treats the latter as an alternative spelling. Both supported `WINE_D3D_CONFIG` choices, `shader_backend=glsl` and `shader_backend=glsl-vkd3d`, still reported 9_3 and failed the original 10_0/11_0 device request with `0x80004005`. Thus a clean configure or shader-backend switch cannot raise this Wine/OpenGL combination to D3D 10_0/11_0 on this machine.

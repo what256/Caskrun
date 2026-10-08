@@ -1,0 +1,52 @@
+Give winemac.drv's Metal and window-data entry points default visibility.
+
+Wine builds its Unix libraries with hidden visibility, so winemac.so exports
+only its two unix-call tables. An independently sourced Direct3D-to-Metal
+translator resolves the entry points below from the loaded driver by name, which
+cannot work while they are local symbols. DXMT's own runtime notes describe this
+case and say to give the symbols default visibility or to stop building Wine with
+-fvisibility=hidden; this patch takes the narrow option and annotates only the
+eight declarations such a translator looks up.
+
+This changes no behaviour on its own: it widens linkage for existing functions
+and adds, removes and renames nothing. Measured against this project's Wine 11.0
+build, winemac.so goes from 2 exported symbols to 10.
+
+Applies to Wine 11.0. Upstream Wine is LGPL-2.1-or-later; this patch is offered
+under the same terms.
+
+--- a/dlls/winemac.drv/macdrv.h
++++ b/dlls/winemac.drv/macdrv.h
+@@ -206,10 +206,10 @@
+ 
+ extern struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd);
+ 
+-extern struct macdrv_win_data *get_win_data(HWND hwnd);
+-extern void release_win_data(struct macdrv_win_data *data);
++__attribute__((visibility("default"))) extern struct macdrv_win_data *get_win_data(HWND hwnd);
++__attribute__((visibility("default"))) extern void release_win_data(struct macdrv_win_data *data);
+ extern void init_win_context(void);
+-extern macdrv_window macdrv_get_cocoa_window(HWND hwnd, BOOL require_on_screen);
++__attribute__((visibility("default"))) extern macdrv_window macdrv_get_cocoa_window(HWND hwnd, BOOL require_on_screen);
+ extern RGNDATA *get_region_data(HRGN hrgn, HDC hdc_lptodp);
+ extern void activate_on_following_focus(void);
+ 
+--- a/dlls/winemac.drv/macdrv_cocoa.h
++++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -522,11 +522,11 @@
+ extern void macdrv_set_view_hidden(macdrv_view v, bool hidden);
+ extern void macdrv_add_view_opengl_context(macdrv_view v, macdrv_opengl_context c);
+ extern void macdrv_remove_view_opengl_context(macdrv_view v, macdrv_opengl_context c);
+-extern macdrv_metal_device macdrv_create_metal_device(void);
+-extern void macdrv_release_metal_device(macdrv_metal_device d);
+-extern macdrv_metal_view macdrv_view_create_metal_view(macdrv_view v, macdrv_metal_device d);
+-extern macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v);
+-extern void macdrv_view_release_metal_view(macdrv_metal_view v);
++__attribute__((visibility("default"))) extern macdrv_metal_device macdrv_create_metal_device(void);
++__attribute__((visibility("default"))) extern void macdrv_release_metal_device(macdrv_metal_device d);
++__attribute__((visibility("default"))) extern macdrv_metal_view macdrv_view_create_metal_view(macdrv_view v, macdrv_metal_device d);
++__attribute__((visibility("default"))) extern macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v);
++__attribute__((visibility("default"))) extern void macdrv_view_release_metal_view(macdrv_metal_view v);
+ extern bool macdrv_get_view_backing_size(macdrv_view v, int backing_size[2]);
+ extern void macdrv_set_view_backing_size(macdrv_view v, const int backing_size[2]);
+ extern uint32_t macdrv_window_background_color(void);

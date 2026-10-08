@@ -87,3 +87,29 @@ this is a sample, not a universal timing guarantee.
 Eighty-five isolated Cocoa role checks confirm ordinary apps/tools remain
 eligible for foreground use while the narrowly identified background roles
 are accessory. Full packaged-runtime and vendor-launcher checks remain separate.
+
+## `wine-11.0-winemac-metal-exports.patch` — prepared, not packaged
+
+Wine builds its Unix libraries with hidden visibility. Measured against this
+project's own Wine 11.0 build, `winemac.so` exports exactly two symbols, both
+unix-call tables, out of 1905 symbol entries. The Metal and window-data entry
+points an independently sourced Direct3D-to-Metal translator needs are present
+in that library but have local binding, so a by-name lookup cannot find them.
+
+The patch annotates eight declarations in `dlls/winemac.drv/macdrv.h` and
+`macdrv_cocoa.h` with default visibility: `get_win_data`, `release_win_data`,
+`macdrv_get_cocoa_window`, `macdrv_create_metal_device`,
+`macdrv_release_metal_device`, `macdrv_view_create_metal_view`,
+`macdrv_view_get_metal_layer` and `macdrv_view_release_metal_view`. It widens
+linkage only; nothing is added, removed or renamed.
+
+Rebuilding `winemac.so` from a clone of this project's configured Wine 11.0 build
+tree with the patch applied raised its exported symbols from 2 to 10, exactly the
+eight annotated declarations. The patch also applies cleanly to a pristine
+Wine 11.0 source tree. The disposable clone was removed afterwards.
+
+This patch is **not in any packaged engine**. Including it means rebuilding and
+repackaging the whole runtime, which changes the runtime-tree digest existing
+bottles are bound to, so it needs the general idle-bottle migration path the
+graphics plan already requires. No translator has been built or loaded, and no
+Direct3D call has been made through it. See the [graphics plan](../docs/GRAPHICS_PLAN.md).
