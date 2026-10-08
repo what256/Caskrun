@@ -158,3 +158,12 @@ predecessor: `complete: true`, no failures and zero bottles requiring a stop.
 The check took about 14 seconds, including full package hashes, and the
 runtime-record bytes remained unchanged. This verifies the production digest
 gate and idle server/owner path, not shutdown of a running legacy client.
+
+The follow-up ARM64 app and DMG passed ad-hoc signature, architecture, disk
+image and checksum verification. The packaged core repeated that shutdown
+check successfully in about 15 seconds with unchanged runtime records.
+Its SHA-256 is `9f57806a39e98fb3ff33d492c16c6435b371c5e37cf8c3d642adecca0a483b05`.
+The runtime component receipt matches the previously tested v4 engine.
+The final app switch and on-screen check remain pending: the Mac locked
+again during packaging. The earlier UI pass above used the initial Library
+package before these follow-up fixes.

@@ -215,12 +215,25 @@ unchanged and never initialized or launched Wine. The fixture was removed
 after independent zero-file-owner inspection. These are metadata and command
 checks, not publisher account or game compatibility results.
 
-The final packaged core also passed the combined 60 FPS / 1.5× DXMT trial on
+Before the UI/engine follow-up, the packaged core also passed the combined 60 FPS / 1.5× DXMT trial on
 both Windows architectures and the packaged executable-artwork smoke. All
 three owned fixtures were removed after zero-owner checks. The interface-only
 device capability gate preserves the tested core and runtime bytes.
 
-The new Library visual pass remains pending because the Mac was locked. Real
+The subsequent initial packaged UI pass covered Library selection and bottle
+controls, all three Discover scopes, report details, the Steam destination
+sheet, browser-link save/remove, keyboard search and window close/reopen.
+The follow-up corrected click routing, action wording and AppID formatting,
+and added reviewed engine upgrade/shutdown paths. It passes 431 Rust unit
+tests and 6 integration tests (2 ignored), 89 browser/Library Swift checks,
+full SwiftUI typechecking, formatting and an optimized ARM64 package build.
+Its packaged core completed the existing idle Steam predecessor shutdown
+check with no failures and unchanged runtime-record bytes. The runtime
+component receipt still matches the tested v4 package. The graphics API
+matrix was not repeated for these host-only fixes.
+
+The final app switch and on-screen follow-up remain pending because the Mac
+locked again. Detailed results are in [UI smoke](UI_SMOKE.md). Real
 publisher sign-in, browser gameplay and actual games remain manual tests; see
 [the checklist](MANUAL_TEST_CHECKLIST.md). DXMT rendering evidence and its
 explicit limits are recorded in [DXMT options](DXMT_OPTIONS.md).
