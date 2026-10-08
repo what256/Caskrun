@@ -1564,8 +1564,22 @@ fn read_log(home: &Path, id: &str, name: &str) -> Result<LogContent, String> {
 }
 
 fn add_launcher(home: &Path, id: &str, name: &str, exe: &Path) -> Result<Launcher, String> {
+    add_launcher_with_arguments(home, id, name, exe, Vec::new())
+}
+
+/// Save a complete command. A suggestion discovered from a Windows shortcut
+/// carries that shortcut's own arguments, so saving it without them would start
+/// a different program than the shortcut does.
+fn add_launcher_with_arguments(
+    home: &Path,
+    id: &str,
+    name: &str,
+    exe: &Path,
+    saved_arguments: Vec<String>,
+) -> Result<Launcher, String> {
     let _lock = lock_bottle(home, id)?;
     let name = check_name(name)?;
+    validate_app_arguments(&saved_arguments)?;
     let path = exe.canonicalize().map_err(|e| e.to_string())?;
     if !path.is_file() {
         return Err("Choose an existing Windows program".into());
@@ -1588,7 +1602,7 @@ fn add_launcher(home: &Path, id: &str, name: &str, exe: &Path) -> Result<Launche
             .map_err(|e| e.to_string())?
             .as_secs(),
         hidden_from_home: false,
-        saved_arguments: Vec::new(),
+        saved_arguments,
     };
     launchers.push(launcher.clone());
     save_json(&bottle_dir(home, id)?.join("launchers.json"), &launchers)?;
@@ -2503,6 +2517,15 @@ fn run() -> Result<(), String> {
         [command, id] if command == "prefix-path" => serde_json::to_value(prefix_path(&home, id)?),
         [command, id, name, path] if command == "add-app" =>
             serde_json::to_value(add_launcher(&home, id, name, Path::new(path))?),
+        [command, id, name, path, separator, arguments @ ..]
+            if command == "add-app" && separator == "--" =>
+            serde_json::to_value(add_launcher_with_arguments(
+                &home,
+                id,
+                name,
+                Path::new(path),
+                arguments.to_vec(),
+            )?),
         [command, bottle_id, launcher_id, visibility]
             if command == "set-app-visibility" && (visibility == "show" || visibility == "hide") =>
             serde_json::to_value(set_launcher_visibility(&home, bottle_id, launcher_id, visibility == "hide")?),
@@ -2525,7 +2548,7 @@ fn run() -> Result<(), String> {
                 Path::new(path),
                 parse_wait_launch_options(options)?,
             )?),
-        _ => return Err("Usage: caskrun-core overview | status | probe-runtime | list | deleted | catalog-attempts | create <name> | install-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher | retry-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher <bottle-id> | rename <id> <name> | delete <id> | restore-deleted <id> | duplicate <id> [name] | export <id> <path.caskrun-bottle> | import <path.caskrun-bottle> [name] | import-crossover <bottle-folder> [name] | steam-games <id> | run-steam-game <id> <appid> | initialize <id> | prefix-path <id> | apps <id> | app-icon <bottle-id> <launcher-id> | bottle-icon <bottle-id> | bottle-resolution <id> | set-bottle-resolution <id> on|off | quit-all-bottles | quit-bottle <id> | open-uninstaller <id> | open-winecfg <id> | open-regedit <id> | open-controller-panel <id> | open-taskmgr <id> | open-internet-settings <id> | open-command-prompt <id> | simulate-reboot <id> | discover-apps <id> | logs <id> | read-log <id> <log-file-name> | add-app <id> <name> <file.exe> | set-app-visibility <id> <app-id> show|hide | set-app-arguments <id> <app-id> -- [arguments...] | run-app <id> <app-id> [-- <program-args...>] | launch <id> <file.exe|file.msi> | launch-wait <id> <file.exe|file.msi> [--quiet-msi] [--timeout-seconds 1..3600] [-- <program-args...>]".into()),
+        _ => return Err("Usage: caskrun-core overview | status | probe-runtime | list | deleted | catalog-attempts | create <name> | install-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher | retry-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher <bottle-id> | rename <id> <name> | delete <id> | restore-deleted <id> | duplicate <id> [name] | export <id> <path.caskrun-bottle> | import <path.caskrun-bottle> [name] | import-crossover <bottle-folder> [name] | steam-games <id> | run-steam-game <id> <appid> | initialize <id> | prefix-path <id> | apps <id> | app-icon <bottle-id> <launcher-id> | bottle-icon <bottle-id> | bottle-resolution <id> | set-bottle-resolution <id> on|off | quit-all-bottles | quit-bottle <id> | open-uninstaller <id> | open-winecfg <id> | open-regedit <id> | open-controller-panel <id> | open-taskmgr <id> | open-internet-settings <id> | open-command-prompt <id> | simulate-reboot <id> | discover-apps <id> | logs <id> | read-log <id> <log-file-name> | add-app <id> <name> <file.exe> [-- <program-args...>] | set-app-visibility <id> <app-id> show|hide | set-app-arguments <id> <app-id> -- [arguments...] | run-app <id> <app-id> [-- <program-args...>] | launch <id> <file.exe|file.msi> | launch-wait <id> <file.exe|file.msi> [--quiet-msi] [--timeout-seconds 1..3600] [-- <program-args...>]".into()),
     }.map_err(|e| e.to_string())?;
     println!(
         "{}",

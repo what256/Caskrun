@@ -145,6 +145,7 @@ fn import_with_guard(
                         name: "Steam".into(),
                         path: steam.display().to_string(),
                         source: "program-files",
+                        arguments: Vec::new(),
                     });
                 }
             }

@@ -20,6 +20,9 @@ const MAX_PE_OFFSET: u64 = 64 * 1024;
 const MAX_SHORTCUT_SIZE: u64 = 1024 * 1024;
 const MAX_SHORTCUT_DEPTH: u8 = 6;
 const MAX_USERS: usize = 128;
+// Matches the bounds the core applies when it saves a launcher's arguments.
+const MAX_ARGUMENTS: usize = 64;
+const MAX_ARGUMENT_BYTES: usize = 4096;
 const SHELL_LINK_CLSID: [u8; 16] = [
     0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
 ];
@@ -35,6 +38,10 @@ pub(crate) struct Candidate {
     pub(crate) name: String,
     pub(crate) path: String,
     pub(crate) source: &'static str,
+    /// A shortcut's own Windows arguments, already split the way Windows splits
+    /// them. Saving a suggestion without these would launch a different command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) arguments: Vec<String>,
 }
 
 struct Found {
@@ -201,6 +208,7 @@ pub(crate) fn discover(prefix: &Path) -> Result<DiscoveryResult, String> {
                     name: stem,
                     path: resolved.display().to_string(),
                     source: "program-files",
+                    arguments: Vec::new(),
                 },
                 rank,
             });
@@ -230,9 +238,13 @@ pub(crate) fn discover(prefix: &Path) -> Result<DiscoveryResult, String> {
             })
             .then_with(|| a.candidate.path.cmp(&b.candidate.path))
     });
-    let mut seen_paths = HashSet::new();
+    let mut seen_commands = HashSet::new();
     for item in found {
-        if !seen_paths.insert(item.candidate.path.clone()) {
+        let command = (
+            item.candidate.path.clone(),
+            item.candidate.arguments.clone(),
+        );
+        if !seen_commands.insert(command) {
             continue;
         }
         if result.candidates.len() >= MAX_RETURNED {
@@ -411,11 +423,12 @@ fn scan_shortcuts(
             let Some(shortcut) = read_shortcut(&path, &metadata) else {
                 continue;
             };
-            // Saved launchers currently store only the executable path. Dropping
-            // shortcut arguments can change what opens, so do not suggest them.
-            if !shortcut.arguments.is_empty() {
+            // Dropping a shortcut's arguments would change what opens, so carry
+            // them with the suggestion. A command this parser cannot read exactly
+            // is skipped rather than offered in a partial form.
+            let Some(arguments) = parse_windows_arguments(&shortcut.arguments) else {
                 continue;
-            }
+            };
             let Some(target) = resolve_shortcut_target(
                 drive,
                 canonical_drive,
@@ -429,6 +442,7 @@ fn scan_shortcuts(
                     name,
                     path: target.display().to_string(),
                     source: directory.source,
+                    arguments,
                 },
                 rank: if directory.source == "start-menu" {
                     0
@@ -443,6 +457,84 @@ fn scan_shortcuts(
             }
         }
     }
+}
+
+/// Split a shortcut's argument string the way Windows splits a command tail,
+/// following the quoting and backslash rules of CommandLineToArgvW. Returns None
+/// for a command this cannot represent exactly, so a partial command is never
+/// suggested. Reference:
+/// https://learn.microsoft.com/en-us/cpp/cpp/main-function-command-line-args
+fn parse_windows_arguments(input: &str) -> Option<Vec<String>> {
+    if input.len() > MAX_ARGUMENT_BYTES {
+        return None;
+    }
+    // Tab separates arguments like a space; any other control character cannot
+    // survive a round trip through a saved command.
+    if input.chars().any(|c| c.is_control() && c != '\t') {
+        return None;
+    }
+    let mut arguments = Vec::new();
+    let characters: Vec<char> = input.chars().collect();
+    let mut index = 0;
+    while index < characters.len() {
+        while index < characters.len() && matches!(characters[index], ' ' | '\t') {
+            index += 1;
+        }
+        if index >= characters.len() {
+            break;
+        }
+        let mut current = String::new();
+        let mut quoted = false;
+        while index < characters.len() {
+            match characters[index] {
+                '\\' => {
+                    let mut slashes = 0;
+                    while index < characters.len() && characters[index] == '\\' {
+                        slashes += 1;
+                        index += 1;
+                    }
+                    if index < characters.len() && characters[index] == '"' {
+                        // Each pair of backslashes is one literal backslash; an odd
+                        // one escapes the quote instead of toggling quoting.
+                        current.extend(std::iter::repeat_n('\\', slashes / 2));
+                        if slashes % 2 == 1 {
+                            current.push('"');
+                            index += 1;
+                        }
+                    } else {
+                        current.extend(std::iter::repeat_n('\\', slashes));
+                    }
+                }
+                '"' => {
+                    index += 1;
+                    if quoted && index < characters.len() && characters[index] == '"' {
+                        // Inside quotes, a doubled quote is one literal quote.
+                        current.push('"');
+                        index += 1;
+                    } else {
+                        quoted = !quoted;
+                    }
+                }
+                ' ' | '\t' if !quoted => break,
+                character => {
+                    current.push(character);
+                    index += 1;
+                }
+            }
+        }
+        if quoted {
+            // An unterminated quote means the command was not understood.
+            return None;
+        }
+        if current.len() > MAX_ARGUMENT_BYTES {
+            return None;
+        }
+        arguments.push(current);
+        if arguments.len() > MAX_ARGUMENTS {
+            return None;
+        }
+    }
+    Some(arguments)
 }
 
 fn real_directory_chain(drive: &Path, parts: &[&str], truncated: &mut bool) -> Option<PathBuf> {
@@ -1141,8 +1233,7 @@ mod tests {
             "C:\\Program Files\\Atlas\\Atlas.exe",
             None,
         );
-        // A shortcut whose arguments cannot be preserved must not suppress
-        // the ordinary Program Files fallback for its product.
+        // A shortcut that carries arguments is suggested as the whole command.
         write_shortcut(
             &menu.join("Zenith.lnk"),
             "C:\\Program Files\\Zenith\\Zenith.exe",
@@ -1154,12 +1245,17 @@ mod tests {
         assert_eq!(result.candidates[0].name, "Atlas");
         assert_eq!(result.candidates[0].source, "start-menu");
         assert_eq!(result.candidates[0].path, atlas.display().to_string());
+        assert!(result.candidates[0].arguments.is_empty());
         assert!(result.candidates.iter().any(|item| {
             item.path == boreal.display().to_string() && item.source == "program-files"
         }));
-        assert!(result.candidates.iter().any(|item| {
-            item.path == zenith.display().to_string() && item.source == "program-files"
-        }));
+        let zenith_command = result
+            .candidates
+            .iter()
+            .find(|item| item.path == zenith.display().to_string())
+            .unwrap();
+        assert_eq!(zenith_command.source, "start-menu");
+        assert_eq!(zenith_command.arguments, ["--mode", "special"]);
         assert!(!result.truncated);
         fs::remove_dir_all(prefix).unwrap();
     }
@@ -1196,15 +1292,93 @@ mod tests {
     }
 
     #[test]
-    fn ignores_argument_urls_uninstallers_and_out_of_bottle_targets() {
+    fn splits_a_windows_command_tail_the_way_windows_does() {
+        let split = |input: &str| parse_windows_arguments(input);
+        assert_eq!(split(""), Some(Vec::new()));
+        assert_eq!(split("   \t "), Some(Vec::new()));
+        assert_eq!(
+            split("--mode special"),
+            Some(vec!["--mode".into(), "special".into()])
+        );
+        // Runs of whitespace separate arguments, and tabs count as whitespace.
+        assert_eq!(split("  a\t\t b  "), Some(vec!["a".into(), "b".into()]));
+        // A quoted run keeps its spaces and loses its quotes.
+        assert_eq!(
+            split("\"C:\\Program Files\\Game\" --windowed"),
+            Some(vec!["C:\\Program Files\\Game".into(), "--windowed".into()])
+        );
+        // Backslashes are literal unless they precede a quote: two become one
+        // and an odd one escapes the quote instead of ending the quoted run.
+        assert_eq!(split(r"a\\b"), Some(vec![r"a\\b".into()]));
+        assert_eq!(split(r#""a\\" b"#), Some(vec![r"a\".into(), "b".into()]));
+        assert_eq!(split(r#"a\"b"#), Some(vec!["a\"b".into()]));
+        assert_eq!(split(r#""a\\\"b""#), Some(vec!["a\\\"b".into()]));
+        // Inside quotes a doubled quote is one literal quote.
+        assert_eq!(split(r#""say ""hi""""#), Some(vec!["say \"hi\"".into()]));
+        // A quoted run can be glued to unquoted text.
+        assert_eq!(split(r#"-p"a b"c"#), Some(vec!["-pa bc".into()]));
+
+        // Commands this cannot reproduce exactly are refused outright.
+        assert_eq!(split("--name \"unfinished"), None);
+        assert_eq!(split("--line\nbreak"), None);
+        assert_eq!(split("--nul\0byte"), None);
+        assert_eq!(split(&"a".repeat(MAX_ARGUMENT_BYTES + 1)), None);
+        assert_eq!(split(&"a ".repeat(MAX_ARGUMENTS + 1)), None);
+    }
+
+    #[test]
+    fn two_shortcuts_to_one_program_stay_separate_commands() {
+        let prefix = test_prefix();
+        let game = prefix.join("drive_c/Games/Nova/Nova.exe");
+        fake_pe(&game);
+        let menu = prefix.join("drive_c/ProgramData/Microsoft/Windows/Start Menu/Programs");
+        write_shortcut(&menu.join("Nova.lnk"), "C:\\Games\\Nova\\Nova.exe", None);
+        write_shortcut(
+            &menu.join("Nova Safe Mode.lnk"),
+            "C:\\Games\\Nova\\Nova.exe",
+            Some("-safe"),
+        );
+        // The same command twice is still offered once.
+        write_shortcut(
+            &menu.join("Nova Again.lnk"),
+            "C:\\Games\\Nova\\Nova.exe",
+            Some("-safe"),
+        );
+        let result = discover(&prefix).unwrap();
+        assert_eq!(result.candidates.len(), 2);
+        let plain = result
+            .candidates
+            .iter()
+            .find(|item| item.arguments.is_empty())
+            .unwrap();
+        assert_eq!(plain.path, game.display().to_string());
+        let safe = result
+            .candidates
+            .iter()
+            .find(|item| !item.arguments.is_empty())
+            .unwrap();
+        assert_eq!(safe.path, game.display().to_string());
+        assert_eq!(safe.arguments, ["-safe"]);
+        fs::remove_dir_all(prefix).unwrap();
+    }
+
+    #[test]
+    fn keeps_arguments_and_ignores_urls_uninstallers_and_out_of_bottle_targets() {
         let prefix = test_prefix();
         let game = prefix.join("drive_c/Games/Nova/Nova.exe");
         fake_pe(&game);
         let desktop = prefix.join("drive_c/users/Public/Desktop");
+        // This one is a complete command and is now suggested with its arguments.
         write_shortcut(
             &desktop.join("With Args.lnk"),
             "C:\\Games\\Nova\\Nova.exe",
             Some("--game 123"),
+        );
+        // An unterminated quote is not a command this can reproduce exactly.
+        write_shortcut(
+            &desktop.join("Broken Quote.lnk"),
+            "C:\\Games\\Nova\\Nova.exe",
+            Some("--name \"unfinished"),
         );
         write_shortcut_with_working(
             &desktop.join("Wrong Working Dir.lnk"),
@@ -1230,7 +1404,10 @@ mod tests {
         );
         write_relative_shortcut(&desktop.join("Escaped.lnk"), "..\\..\\..\\..\\Nova.exe");
         let result = discover(&prefix).unwrap();
-        assert!(result.candidates.is_empty());
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].name, "With Args");
+        assert_eq!(result.candidates[0].path, game.display().to_string());
+        assert_eq!(result.candidates[0].arguments, ["--game", "123"]);
         fs::remove_dir_all(prefix).unwrap();
     }
 

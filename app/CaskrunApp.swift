@@ -369,7 +369,10 @@ struct DiscoveredProgram: Decodable, Identifiable, Sendable {
     let name: String
     let path: String
     let source: String
-    var id: String { path }
+    /// A shortcut's own Windows arguments. Two shortcuts can point at one
+    /// program and still be different commands, so the identity includes them.
+    var arguments: [String] = []
+    var id: String { ([path] + arguments).joined(separator: "\u{0}") }
 }
 
 struct DiscoveredProgramsResult: Decodable, Sendable {
@@ -1412,7 +1415,14 @@ final class CaskrunModel: ObservableObject {
     func saveDiscoveredProgram(_ program: DiscoveredProgram, in bottle: Bottle) {
         guard !isQuitting && !isLaunching && !isManagingBottle else { return }
         do {
-            let launcher = try call(["add-app", bottle.id, program.name, program.path], as: SavedLauncher.self)
+            // Save the whole command: dropping a shortcut's arguments would start
+            // a different program than the shortcut does.
+            var command = ["add-app", bottle.id, program.name, program.path]
+            if !program.arguments.isEmpty {
+                command.append("--")
+                command.append(contentsOf: program.arguments)
+            }
+            let launcher = try call(command, as: SavedLauncher.self)
             refresh()
             manualInstallReview = nil
             installHandoff = InstallHandoff(entryID: "manual", entryName: program.name,
