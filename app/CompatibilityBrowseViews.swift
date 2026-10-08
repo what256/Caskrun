@@ -162,7 +162,7 @@ struct SteamGameInstallSheet: View {
             if request.appID == nil {
                 TextField("Steam store link or AppID", text: $address).textFieldStyle(.roundedBorder)
             } else if let id = request.appID {
-                Text("Steam AppID \(id)").font(.caption).foregroundStyle(.secondary)
+                Text("Steam AppID \(String(id))").font(.caption).foregroundStyle(.secondary)
             }
             Picker("Install into", selection: $targetBottleID) {
                 ForEach(bottles) { Text($0.name).tag($0.id) }

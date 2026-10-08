@@ -631,7 +631,9 @@ fn recorded_runtime_for_prefix(
         }
         let mut file = OpenOptions::new()
             .read(true)
-            .custom_flags(O_NOFOLLOW_ANY)
+            // Darwin O_NONBLOCK prevents a regular-file-to-FIFO swap from
+            // blocking before the opened handle's snapshot is checked.
+            .custom_flags(O_NOFOLLOW_ANY | 0x4)
             .open(&record_path)
             .map_err(|e| format!("Could not safely open bottle runtime record: {e}"))?;
         if !same_snapshot(&before, &file.metadata().map_err(|e| e.to_string())?) {

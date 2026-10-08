@@ -289,6 +289,132 @@ struct GameLibraryEntry: Identifiable {
     var canManageBottle = false
     var availableRenderers: Set<String>? = nil
     var graphicsDescription: String? = nil
+
+    var actionTitle: String {
+        switch source {
+        case .browser: "Play in browser"
+        case .apps: "Open app"
+        case .epic, .gog: "Open store"
+        case .all, .steam: "Play"
+        }
+    }
+
+    var cardHelp: String {
+        let details = "Click for \(name) details."
+        guard canPlay else { return details }
+        let action: String
+        switch source {
+        case .browser: action = "play in your browser"
+        case .apps: action = "open the app"
+        case .epic, .gog: action = "open its store"
+        case .all, .steam: action = "play"
+        }
+        return "\(details) Double-click to \(action)."
+    }
+}
+
+// Keep the first tile's identity across the grid reflow caused by its inspector.
+// The sequence is independent of the view under the second mouse event.
+struct LibraryClickSequence {
+    enum Outcome: Equatable { case pass, consume, open(String) }
+    private struct Target {
+        let id: String
+        let windowNumber: Int
+        let point: NSPoint
+        let timestamp: TimeInterval
+    }
+    private var target: Target?
+    private var consumedWindowNumber: Int?
+    var hasTarget: Bool { target != nil }
+
+    mutating func remember(id: String, windowNumber: Int, point: NSPoint, timestamp: TimeInterval) {
+        target = Target(id: id, windowNumber: windowNumber, point: point, timestamp: timestamp)
+    }
+
+    mutating func cancel() { target = nil }
+
+    mutating func route(type: NSEvent.EventType, windowNumber: Int, point: NSPoint,
+                        timestamp: TimeInterval, clickCount: Int, doubleClickInterval: TimeInterval,
+                        isBlocked: Bool = false) -> Outcome {
+        if isBlocked {
+            cancel()
+            consumedWindowNumber = nil
+            return .pass
+        }
+        if type == .leftMouseUp, consumedWindowNumber == windowNumber {
+            consumedWindowNumber = nil
+            return .consume
+        }
+        guard type == .leftMouseDown else {
+            if type != .leftMouseUp { cancel() }
+            return .pass
+        }
+        consumedWindowNumber = nil
+        defer { cancel() }
+        guard clickCount == 2, let target, target.windowNumber == windowNumber else { return .pass }
+        let elapsed = timestamp - target.timestamp
+        let distance = hypot(point.x - target.point.x, point.y - target.point.y)
+        guard elapsed >= 0, elapsed <= doubleClickInterval, distance <= 8 else { return .pass }
+        consumedWindowNumber = windowNumber
+        return .open(target.id)
+    }
+}
+
+@MainActor
+private final class LibraryClickRouter: ObservableObject {
+    private var monitor: Any?
+    private weak var firstWindow: NSWindow?
+    private var sequence = LibraryClickSequence()
+    private var launch: (@MainActor @Sendable (String) -> Void)?
+
+    init() {
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [
+            .leftMouseDown, .leftMouseUp, .rightMouseDown, .scrollWheel, .keyDown
+        ]) { [weak self] event in
+            guard let self else { return event }
+            return self.route(event)
+        }
+    }
+
+    deinit {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+    }
+
+    func remember(_ event: NSEvent?, id: String, launch: @escaping @MainActor @Sendable (String) -> Void) {
+        cancel()
+        guard let event, event.type == .leftMouseUp, event.clickCount == 1,
+              let window = event.window, window.attachedSheet == nil, window.sheetParent == nil,
+              NSApp.modalWindow == nil else { return }
+        sequence.remember(id: id, windowNumber: window.windowNumber,
+                          point: event.locationInWindow, timestamp: event.timestamp)
+        firstWindow = window
+        self.launch = launch
+    }
+
+    func cancel() {
+        sequence.cancel()
+        firstWindow = nil
+        launch = nil
+    }
+
+    private func route(_ event: NSEvent) -> NSEvent? {
+        if event.type == .leftMouseDown, event.window !== firstWindow { cancel() }
+        let outcome = sequence.route(type: event.type, windowNumber: event.windowNumber,
+                                     point: event.locationInWindow, timestamp: event.timestamp,
+                                     clickCount: event.clickCount, doubleClickInterval: NSEvent.doubleClickInterval,
+                                     isBlocked: NSApp.modalWindow != nil || event.window?.attachedSheet != nil || event.window?.sheetParent != nil)
+        switch outcome {
+        case .open(let id):
+            let action = launch
+            cancel()
+            if let action { DispatchQueue.main.async { action(id) } }
+            return nil
+        case .consume: return nil
+        case .pass:
+            if !sequence.hasTarget { cancel() }
+            return event
+        }
+    }
 }
 
 struct GameLibraryView: View {
@@ -307,6 +433,7 @@ struct GameLibraryView: View {
     @State private var scope: LibraryScope = .all
     @State private var selectedID: String?
     @State private var confirmRemove = false
+    @StateObject private var clickRouter = LibraryClickRouter()
 
     private var filtered: [GameLibraryEntry] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -347,7 +474,7 @@ struct GameLibraryView: View {
                             LazyVGrid(columns: [GridItem(.adaptive(minimum: 132, maximum: 158), spacing: 14)], alignment: .leading, spacing: 14) {
                                 ForEach(filtered) { item in
                                     GameLibraryCard(item: item, isSelected: selectedID == item.id) {
-                                        selectedID = item.id
+                                        select(item)
                                     } open: { onPlay(item) }
                                         .task(id: item.id + ":" + item.artworkRevision) { onLoadArtwork(item) }
                                 }
@@ -372,13 +499,29 @@ struct GameLibraryView: View {
                 }
             }
         }
-        .onChange(of: scope) { _, _ in selectedID = nil }
-        .onChange(of: selectedID) { _, _ in if let selected { onInspect(selected) } }
-        .onChange(of: entries.map(\.id)) { _, ids in if let selectedID, !ids.contains(selectedID) { self.selectedID = nil } }
+        .onChange(of: scope) { _, _ in clickRouter.cancel(); selectedID = nil }
+        .onChange(of: query) { _, _ in clickRouter.cancel() }
+        .onChange(of: selectedID) { _, _ in
+            if let selected { onInspect(selected) } else { clickRouter.cancel() }
+        }
+        .onChange(of: entries.map(\.id)) { _, ids in
+            clickRouter.cancel()
+            if let selectedID, !ids.contains(selectedID) { self.selectedID = nil }
+        }
+        .onChange(of: entries.filter(\.canPlay).map(\.id)) { _, _ in clickRouter.cancel() }
+        .onDisappear { clickRouter.cancel() }
         .confirmationDialog("Remove this browser game?", isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Remove shortcut", role: .destructive) { if let selected { onRemoveBrowser(selected) } }
             Button("Cancel", role: .cancel) {}
         } message: { Text("Only the saved Caskrun link is removed. Your browser's game data stays in your browser.") }
+    }
+
+    private func select(_ item: GameLibraryEntry) {
+        clickRouter.remember(NSApp.currentEvent, id: item.id) { id in
+            guard selectedID == id, let current = filtered.first(where: { $0.id == id }), current.canPlay else { return }
+            onPlay(current)
+        }
+        selectedID = item.id
     }
 
     @ViewBuilder private var emptyState: some View {
@@ -413,7 +556,7 @@ struct GameLibraryView: View {
                     Text(item.subtitle).font(.caption).foregroundStyle(.secondary)
                 }
                 Button { onPlay(item) } label: {
-                    Label(item.source == .browser ? "Play in browser" : item.source == .apps ? "Open app" : (item.source == .epic || item.source == .gog) ? "Open store" : "Play", systemImage: item.source == .browser ? "arrow.up.right" : "play.fill")
+                    Label(item.actionTitle, systemImage: item.source == .browser ? "arrow.up.right" : "play.fill")
                         .font(.system(size: 13, weight: .semibold)).frame(maxWidth: .infinity).padding(.vertical, 4)
                 }
                 .buttonStyle(.borderedProminent).disabled(!item.canPlay)
@@ -514,10 +657,7 @@ private struct GameLibraryCard: View {
     let open: () -> Void
     @State private var hovered = false
     var body: some View {
-        Button {
-            select()
-            if (NSApp.currentEvent?.clickCount ?? 0) >= 2 && item.canPlay { open() }
-        } label: {
+        Button(action: select) {
             VStack(spacing: 8) {
                 GameLibraryArtwork(item: item, size: 54).frame(height: 64)
                 Text(item.name).font(.system(size: 12, weight: .semibold)).lineLimit(2)
@@ -534,8 +674,9 @@ private struct GameLibraryCard: View {
             .contentShape(RoundedRectangle(cornerRadius: 15))
         }
         .buttonStyle(.plain).onHover { hovered = $0 }
-        .help("Click for \(item.name) details. Double-click to \(item.source == .apps ? "open" : "play").")
+        .help(item.cardHelp)
         .accessibilityLabel("\(item.name), \(item.source.title), \(item.compatibilityText)")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityAction(named: Text(item.actionTitle)) { if item.canPlay { open() } }
     }
 }

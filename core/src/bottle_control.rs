@@ -303,6 +303,23 @@ fn new_control_log(dir: &Path) -> Result<(File, PathBuf), String> {
     Ok((log, log_path))
 }
 
+fn isolate_wineserver_environment(command: &mut Command) {
+    // A verified package must not inherit loader/library overrides or resolve
+    // its wrapper's tools through an unrelated PATH. Keep the login/temp
+    // context needed to find this user's existing server, then set the exact
+    // bottle's XDG paths and WINEPREFIX at the call site.
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    for key in [
+        "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
+    ] {
+        if let Some(value) = env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+}
+
 pub(super) fn run_wineserver(
     wineserver: &Path,
     prefix: &Path,
@@ -317,6 +334,7 @@ pub(super) fn run_wineserver(
         .ok_or("Bottle prefix has no parent directory")?;
     let xdg = bottle_xdg::for_bottle(dir)?;
     let mut command = Command::new(wineserver);
+    isolate_wineserver_environment(&mut command);
     xdg.apply(&mut command);
     if argument == "-k" {
         cancellation::check()?;
@@ -336,6 +354,34 @@ pub(super) fn run_wineserver(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_environment_discards_loader_and_foreign_prefix_overrides() {
+        let mut command = Command::new("/bin/sh");
+        for key in [
+            "PATH",
+            "WINEPREFIX",
+            "WINESERVER",
+            "WINELOADER",
+            "WINEDLLPATH",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "XDG_CONFIG_HOME",
+            "CASKRUN_FOREIGN_OVERRIDE",
+        ] {
+            command.env(key, "foreign-fixture-value");
+        }
+        isolate_wineserver_environment(&mut command);
+        command.env("WINEPREFIX", "/fixture/selected-prefix");
+        command.args(["-c", "printf '%s\\n' \"$PATH\" \"$WINEPREFIX\"; printf '%s' \"${WINESERVER-}${WINELOADER-}${WINEDLLPATH-}${DYLD_INSERT_LIBRARIES-}${DYLD_LIBRARY_PATH-}${DYLD_FALLBACK_LIBRARY_PATH-}${XDG_CONFIG_HOME-}${CASKRUN_FOREIGN_OVERRIDE-}\""]);
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            output.stdout,
+            b"/usr/bin:/bin:/usr/sbin:/sbin\n/fixture/selected-prefix\n"
+        );
+    }
 
     // Parallel installer tests can briefly delay these tiny mock processes.
     const MOCK_PROCESS_TIMEOUT: Duration = Duration::from_secs(8);

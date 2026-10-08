@@ -52,6 +52,31 @@ const TLS_TO_NATIVE_POLICY: MigrationPolicy<'static> = MigrationPolicy {
     verify_launcher_pe: true,
 };
 
+// Steam bottles can skip directly from either older reviewed package to the
+// switchable package. These are separate, Steam-gated edges, not a general
+// upgrade of every bottle using those older packages.
+const STEAM_TO_SWITCHABLE_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: STEAM_WINE_11_IDENTITY,
+    approved: SWITCHABLE_WINE_11_IDENTITY,
+    backup_suffix: "steam-to-switchable",
+    verify_launcher_pe: true,
+};
+
+const TLS_TO_SWITCHABLE_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: TLS_WINE_11_IDENTITY,
+    approved: SWITCHABLE_WINE_11_IDENTITY,
+    backup_suffix: "tls-to-switchable",
+    verify_launcher_pe: true,
+};
+
+const STEAM_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 5] = [
+    &TLS_TO_STEAM_POLICY,
+    &STEAM_TO_NATIVE_POLICY,
+    &TLS_TO_NATIVE_POLICY,
+    &STEAM_TO_SWITCHABLE_POLICY,
+    &TLS_TO_SWITCHABLE_POLICY,
+];
+
 const NATIVE_TO_SWITCHABLE_POLICY: MigrationPolicy<'static> = MigrationPolicy {
     previous: NATIVE_WINE_11_IDENTITY,
     approved: SWITCHABLE_WINE_11_IDENTITY,
@@ -101,11 +126,7 @@ pub(super) fn maybe_migrate_steam_runtime(
         bottle_id,
         wine,
         launcher_path,
-        &[
-            &TLS_TO_STEAM_POLICY,
-            &STEAM_TO_NATIVE_POLICY,
-            &TLS_TO_NATIVE_POLICY,
-        ],
+        &STEAM_RUNTIME_POLICIES,
         WINE_SERVER_CHECK_TIMEOUT,
     )
 }
@@ -676,6 +697,13 @@ mod tests {
             ))
         }
 
+        fn skipped_switchable_backup(&self, policy: &MigrationPolicy<'_>) -> PathBuf {
+            self.home.join(format!(
+                "runtime-migration-backups/{}-{}-prefix-record.json",
+                self.bottle_id, policy.backup_suffix
+            ))
+        }
+
         fn switchable_policy<'a>(&self, approved: &'a str) -> MigrationPolicy<'a> {
             MigrationPolicy {
                 previous: NATIVE_WINE_11_IDENTITY,
@@ -710,6 +738,22 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.home);
+        }
+    }
+
+    // A disposable package has its own content hash. Retain every production
+    // gate and predecessor while replacing only the approved destination hash.
+    fn test_skipped_switchable_policy<'a>(source: &str, approved: &'a str) -> MigrationPolicy<'a> {
+        let policy = match source {
+            TLS_WINE_11_IDENTITY => &TLS_TO_SWITCHABLE_POLICY,
+            STEAM_WINE_11_IDENTITY => &STEAM_TO_SWITCHABLE_POLICY,
+            _ => panic!("unexpected predecessor"),
+        };
+        MigrationPolicy {
+            previous: policy.previous,
+            approved,
+            backup_suffix: policy.backup_suffix,
+            verify_launcher_pe: policy.verify_launcher_pe,
         }
     }
 
@@ -1225,6 +1269,233 @@ mod tests {
         rollback.restore().unwrap();
         assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
         assert_eq!(fs::read(fixture.direct_native_backup()).unwrap(), original);
+    }
+
+    #[test]
+    fn skipped_switchable_edges_select_exact_source_and_preserve_rollback() {
+        for edge in [&STEAM_TO_SWITCHABLE_POLICY, &TLS_TO_SWITCHABLE_POLICY] {
+            assert!(
+                STEAM_RUNTIME_POLICIES
+                    .iter()
+                    .any(|candidate| std::ptr::eq(*candidate, edge))
+            );
+        }
+        assert_eq!(STEAM_TO_SWITCHABLE_POLICY.previous, STEAM_WINE_11_IDENTITY);
+        assert_eq!(TLS_TO_SWITCHABLE_POLICY.previous, TLS_WINE_11_IDENTITY);
+        assert_eq!(
+            STEAM_TO_SWITCHABLE_POLICY.approved,
+            SWITCHABLE_WINE_11_IDENTITY
+        );
+        assert_eq!(
+            TLS_TO_SWITCHABLE_POLICY.approved,
+            SWITCHABLE_WINE_11_IDENTITY
+        );
+        assert_ne!(
+            STEAM_TO_SWITCHABLE_POLICY.backup_suffix,
+            TLS_TO_SWITCHABLE_POLICY.backup_suffix
+        );
+        for source in [TLS_WINE_11_IDENTITY, STEAM_WINE_11_IDENTITY] {
+            let fixture = Fixture::new();
+            fixture.set_predecessor(source);
+            let original = fs::read(&fixture.record_path).unwrap();
+            let approved = fixture.approved_identity();
+            let steam_policy = test_skipped_switchable_policy(STEAM_WINE_11_IDENTITY, &approved);
+            let tls_policy = test_skipped_switchable_policy(TLS_WINE_11_IDENTITY, &approved);
+            let policies = [
+                &TLS_TO_STEAM_POLICY,
+                &STEAM_TO_NATIVE_POLICY,
+                &TLS_TO_NATIVE_POLICY,
+                &steam_policy,
+                &tls_policy,
+            ];
+            let selected = if source == TLS_WINE_11_IDENTITY {
+                &tls_policy
+            } else {
+                &steam_policy
+            };
+            let other = if source == TLS_WINE_11_IDENTITY {
+                &steam_policy
+            } else {
+                &tls_policy
+            };
+            let launcher = fixture.steam.canonicalize().unwrap();
+            let rollback = {
+                let _lock = lock_bottle(&fixture.home, &fixture.bottle_id).unwrap();
+                migrate_with_policies(
+                    &fixture.home,
+                    &fixture.bottle_id,
+                    &fixture.wine,
+                    &launcher,
+                    &policies,
+                    Duration::from_secs(2),
+                )
+                .unwrap()
+                .unwrap()
+            };
+            assert_eq!(
+                fs::read(fixture.skipped_switchable_backup(selected)).unwrap(),
+                original
+            );
+            assert!(!fixture.skipped_switchable_backup(other).exists());
+            assert!(!fixture.native_backup().exists());
+            assert!(!fixture.direct_native_backup().exists());
+            let migrated: PrefixRecord =
+                serde_json::from_slice(&fs::read(&fixture.record_path).unwrap()).unwrap();
+            assert_eq!(
+                migrated.runtime_identity.as_deref(),
+                Some(approved.as_str())
+            );
+            assert!(runtime_record_matches(&migrated, &fixture.wine).unwrap());
+            let dir = bottle_dir(&fixture.home, &fixture.bottle_id).unwrap();
+            assert_eq!(
+                fs::read(dir.join("prefix/keep.txt")).unwrap(),
+                b"prefix data to preserve"
+            );
+            ensure_prefix_with_wine(&fixture.home, &fixture.bottle_id, &fixture.wine).unwrap();
+            {
+                let _lock = lock_bottle(&fixture.home, &fixture.bottle_id).unwrap();
+                assert!(
+                    migrate_with_policies(
+                        &fixture.home,
+                        &fixture.bottle_id,
+                        &fixture.wine,
+                        &launcher,
+                        &policies,
+                        Duration::from_secs(2),
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+            }
+            rollback.restore().unwrap();
+            assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+            assert_eq!(
+                fs::read(fixture.skipped_switchable_backup(selected)).unwrap(),
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn skipped_switchable_edges_keep_steam_and_runtime_gates() {
+        for source in [TLS_WINE_11_IDENTITY, STEAM_WINE_11_IDENTITY] {
+            for invalid in [
+                "custom-path",
+                "unbound",
+                "catalog",
+                "launcher",
+                "pe",
+                "package",
+            ] {
+                let fixture = Fixture::new();
+                fixture.set_predecessor(source);
+                let approved = fixture.approved_identity();
+                let policy = test_skipped_switchable_policy(
+                    source,
+                    if invalid == "package" {
+                        "sha256:unapproved-switchable-package"
+                    } else {
+                        &approved
+                    },
+                );
+                match invalid {
+                    "custom-path" | "unbound" => {
+                        let mut record: PrefixRecord =
+                            serde_json::from_slice(&fs::read(&fixture.record_path).unwrap())
+                                .unwrap();
+                        if invalid == "custom-path" {
+                            record.wine_path =
+                                fixture.home.join("custom-wine").display().to_string();
+                        } else {
+                            record.runtime_fingerprint = Some("unbound".into());
+                        }
+                        save_json(&fixture.record_path, &record).unwrap();
+                    }
+                    "catalog" => {
+                        let mut attempt =
+                            steam_install::catalog_attempt(&fixture.home, &fixture.bottle_id)
+                                .unwrap()
+                                .unwrap();
+                        attempt.set_stage(steam_install::CatalogStage::Failed);
+                        steam_install::save_catalog_attempt(&fixture.home, &attempt).unwrap();
+                    }
+                    "launcher" => save_json(
+                        &bottle_dir(&fixture.home, &fixture.bottle_id)
+                            .unwrap()
+                            .join("launchers.json"),
+                        &Vec::<Launcher>::new(),
+                    )
+                    .unwrap(),
+                    "pe" => fs::write(&fixture.steam, vec![b'x'; 100 * 1024]).unwrap(),
+                    "package" => {}
+                    _ => unreachable!(),
+                }
+                let original = fs::read(&fixture.record_path).unwrap();
+                let result = fixture.migrate(&policy);
+                if matches!(invalid, "custom-path" | "unbound" | "catalog" | "launcher") {
+                    assert!(result.unwrap().is_none(), "{source} {invalid}");
+                } else {
+                    assert!(result.is_err(), "{source} {invalid}");
+                }
+                assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+                assert!(!fixture.skipped_switchable_backup(&policy).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn skipped_switchable_edges_refuse_live_tracked_and_untracked_owners() {
+        use std::io::BufRead;
+        struct Owner(Child);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                drop(self.0.stdin.take());
+                let _ = self.0.wait();
+            }
+        }
+        for source in [TLS_WINE_11_IDENTITY, STEAM_WINE_11_IDENTITY] {
+            let fixture = Fixture::new();
+            fixture.set_predecessor(source);
+            let approved = fixture.approved_identity();
+            let policy = test_skipped_switchable_policy(source, &approved);
+            let original = fs::read(&fixture.record_path).unwrap();
+            let dir = bottle_dir(&fixture.home, &fixture.bottle_id).unwrap();
+            save_json(
+                &dir.join("active-processes.json"),
+                &vec![std::process::id()],
+            )
+            .unwrap();
+            assert!(fixture.migrate(&policy).is_err());
+            assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+            save_json(&dir.join("active-processes.json"), &Vec::<u32>::new()).unwrap();
+
+            let held = dir.join("prefix/held-skipped-update.log");
+            fs::write(&held, b"test owner").unwrap();
+            let mut owner = Owner(
+                Command::new("/bin/sh")
+                    .args([
+                        "-c",
+                        "exec 3<\"$1\"; printf 'ready\\n'; read line; exit 0",
+                        "fixture",
+                    ])
+                    .arg(&held)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+            let mut ready = String::new();
+            std::io::BufReader::new(owner.0.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap();
+            assert_eq!(ready, "ready\n");
+            assert!(fixture.migrate(&policy).is_err());
+            assert!(owner.0.try_wait().unwrap().is_none());
+            assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+            assert!(!fixture.skipped_switchable_backup(&policy).exists());
+            drop(owner);
+            assert!(fixture.migrate(&policy).unwrap().is_some());
+        }
     }
 
     #[test]

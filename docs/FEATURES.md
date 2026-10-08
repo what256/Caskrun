@@ -10,6 +10,17 @@ Earlier user-led Steam tests reached a usable sign-in window and one working Doc
 
 The preceding maintenance phase passed 375 Rust unit tests and 6 integration tests, with 2 existing tests ignored; 97 Python checks and 10 Swift argument checks also passed. The library phase adds focused browser privacy, compatibility-data, manifest-discovery and Steam-install-request checks. The optional [DXMT controls](DXMT_OPTIONS.md) have a separate passing original x64/x86 API matrix; [app integration](DXMT_APP_INTEGRATION.md) retains its loader, rendering and migration evidence. See [maintenance workflows](DEMO_MAINTENANCE.md) and the [manual checklist](MANUAL_TEST_CHECKLIST.md). Source and graphics API tests do not establish app/game compatibility. The [implementation plan](COMPATIBILITY_PLAN.md) describes remaining work, while [UI smoke](UI_SMOKE.md) records earlier visual/navigation checks.
 
+Reviewed Steam bottles can skip the earlier TLS/Steam engine releases when
+moving to the switchable DXMT package. These exact upgrades retain the Steam
+recipe, PE, idle, backup and runtime verification guards. During full Quit,
+a mismatched recorded predecessor is used only after a separate full-package
+hash matches its recorded identity and the fixed reviewed allowlist. Missing,
+custom and unknown packages remain errors. Shutdown clears inherited loader
+and library overrides, retains the user's server lookup context and sets the
+exact bottle paths. This does not migrate the record or establish compatibility
+with unreviewed engines. The existing race between checking a user-writable
+package and executing it is not eliminated.
+
 ## Discover and install
 
 | Public workflow to cover | Status | Current Caskrun state |

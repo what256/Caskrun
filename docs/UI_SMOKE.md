@@ -104,7 +104,57 @@ Python checks and 104 Swift checks. Timing-sensitive process tests passed with
 one Rust test thread; no production or test deadlines were relaxed. Package
 and command checks are recorded separately in launcher validation.
 
-This phase has not yet had a live visual/keyboard pass: the Mac locked before
-that check. Earlier UI results above concern their dated builds, not the new
-Library. Actual game compatibility, browser gameplay and publisher sign-in
-remain manual checks.
+After the Mac was unlocked, the packaged app opened as the only Caskrun UI.
+Home retained its Steam bottle folder. Library showed the saved Steam app;
+selecting it opened details, and Bottle controls returned to the Home folder
+and inspector. No Windows app was launched by those selections.
+
+Discover displayed all three scopes. Stores retained all eight launchers;
+Game reports showed the offline catalogue, device summary, external source,
+engine, renderer and hardware differences. The Steam destination sheet
+selected the existing Steam bottle and cancelled without launching it.
+Browser games opened a prefilled Hextris editor. Saving put that shortcut on
+Home and in Library; removing the temporary shortcut returned the browser
+count to zero. No browser gameplay was attempted.
+
+Command-F focused Library search and filtering for Steam retained the saved
+app. The top Add menu exposed browser links, Steam game installation, file
+installation, a new bottle, Caskrun backup import and CrossOver import. The
+import commands were inspected without importing user data.
+
+Command-W hid the main window while the native process remained running.
+Reopening the same app restored Library. The status menu itself was not
+exposed by this automation surface, so its click-through remains a manual
+check. Standard and maximized layouts were inspected; minimum-size layout,
+VoiceOver and actual gameplay remain manual checks.
+
+The visual pass found a localized Steam AppID (with grouping separators),
+an Epic/GOG tooltip promising direct play, and a Library double-click that
+could target a different tile after opening the inspector reflowed the grid.
+The follow-up uses a plain ID string, source-specific action descriptions,
+and the first click's identity for the second click. A named accessibility
+action remains available for opening each item.
+
+The older app's Quit exposed a separate engine mismatch before the update.
+The existing matching-engine shutdown command completed, followed by empty
+exact-bottle and old-runtime ownership checks; only the obsolete native UI
+was then terminated for replacement. Bottle records were preserved. The
+follow-up adds explicit reviewed Steam upgrade edges and a separately
+full-attested predecessor-engine shutdown fallback; neither treats missing
+or unknown engines as evidence that a bottle is idle.
+
+The follow-up serial Rust suite passed **431 unit tests and 6 integration
+tests**, with 2 existing unit tests ignored. Its 21 shutdown tests include
+the reviewed-predecessor gates and refusal paths; a separate spawned-process
+regression verifies shutdown environment isolation. The expanded Swift
+browser/Library harness passed **89 checks**, including 42 click-routing and
+action-description checks. Full SwiftUI typechecking and Rust formatting
+passed. Clippy reported existing style suggestions; two new redundant
+constant assertions were removed. No test deadlines were relaxed.
+
+The optimized follow-up core completed `quit-all-bottles` against the existing
+idle Steam bottle while the selected package differed from its reviewed
+predecessor: `complete: true`, no failures and zero bottles requiring a stop.
+The check took about 14 seconds, including full package hashes, and the
+runtime-record bytes remained unchanged. This verifies the production digest
+gate and idle server/owner path, not shutdown of a running legacy client.
