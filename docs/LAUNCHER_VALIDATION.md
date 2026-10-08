@@ -232,8 +232,10 @@ check with no failures and unchanged runtime-record bytes. The runtime
 component receipt still matches the tested v4 package. The graphics API
 matrix was not repeated for these host-only fixes.
 
-The final app switch and on-screen follow-up remain pending because the Mac
-locked again. Detailed results are in [UI smoke](UI_SMOKE.md). Real
+After unlocking, the final signed package opened as one Caskrun UI. Library,
+Discover and the Steam destination sheet passed the on-screen follow-up;
+native Quit completed and the app reopened. Detailed results and automation
+limits are in [UI smoke](UI_SMOKE.md). Real
 publisher sign-in, browser gameplay and actual games remain manual tests; see
 [the checklist](MANUAL_TEST_CHECKLIST.md). DXMT rendering evidence and its
 explicit limits are recorded in [DXMT options](DXMT_OPTIONS.md).

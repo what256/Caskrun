@@ -164,6 +164,17 @@ image and checksum verification. The packaged core repeated that shutdown
 check successfully in about 15 seconds with unchanged runtime records.
 Its SHA-256 is `9f57806a39e98fb3ff33d492c16c6435b371c5e37cf8c3d642adecca0a483b05`.
 The runtime component receipt matches the previously tested v4 engine.
-The final app switch and on-screen check remain pending: the Mac locked
-again during packaging. The earlier UI pass above used the initial Library
-package before these follow-up fixes.
+After unlocking, the final signed package replaced the standard local app
+transactionally, after guarded bottle shutdown and empty ownership checks.
+Library selection opened the saved app's details; Discover displayed all
+eight stores, the report catalogue and all five browser entries. The Steam
+destination sheet showed the plain AppID `1966900` and cancelled without
+launching Steam. Close commands retained the native process, and selecting
+the app returned its window. The automation target can reopen windows while
+observing them, so direct status-menu click-through remains a manual check.
+
+Native Command-Q displayed “Closing Windows apps…” and then exited the
+observed process without an error. Reopening started one final Caskrun UI on
+Home. No Windows client or game was launched, no graphics setting changed,
+and the existing bottle records were retained. The temporary replacement
+rollback bundle was removed only after the final app checks passed.

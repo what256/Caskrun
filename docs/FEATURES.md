@@ -19,7 +19,10 @@ custom and unknown packages remain errors. Shutdown clears inherited loader
 and library overrides, retains the user's server lookup context and sets the
 exact bottle paths. This does not migrate the record or establish compatibility
 with unreviewed engines. The existing race between checking a user-writable
-package and executing it is not eliminated.
+package and executing it is not eliminated; the trailing metadata recheck
+shares that limitation. Recorded predecessor packages must remain at real,
+canonical paths. Symlinked or missing packages fail closed with an error;
+shutdown does not automatically repair their paths.
 
 ## Discover and install
 
