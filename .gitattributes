@@ -4,4 +4,6 @@
 *.rs text eol=lf
 *.swift text eol=lf
 *.md text eol=lf
+# Unified diffs mark an empty context line with a single space.
+*.patch whitespace=-blank-at-eol
 *.png binary

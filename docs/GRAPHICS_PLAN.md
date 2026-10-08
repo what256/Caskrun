@@ -30,7 +30,7 @@ The traces, executables, self-authored C probes, build logs, wrapper snapshot, a
 
 Existing initialized bottles are bound to the exact bundled runtime-tree digest in `core/src/main.rs`. The only current migration path in `core/src/runtime_migration.rs` is a narrowly approved transition for an idle, verified Steam bottle. A Vulkan candidate must therefore use fresh disposable bottles first; changing the development DMG alone would not make it safe to switch existing bottles. Before enabling per-bottle renderer selection for existing users, add a general idle-bottle migration with an exact source/destination identity check and a verified rollback path.
 
-The separate [DXMT upstream build guide](https://github.com/3Shain/dxmt/blob/main/docs/DEVELOPMENT.md) is a plausible next D3D10/11 experiment because it targets Metal directly and avoids this Vulkan device limit. Its documented Wine cross-build requires **Meson 1.3+**, **LLVM 15 exactly with x86_64 headers and static libraries**, Xcode 16+, Wine 8+ build files, and a Windows cross-compiler. This Mac has Xcode 26.6, Wine 11 build files, MinGW, and modern CMake, but no staged Meson, Ninja, or x86_64 LLVM 15; no DXMT build or D3D smoke was performed. The separately published [DXMT license](https://github.com/3Shain/dxmt/blob/main/LICENSE) is LGPL-2.1-or-later and credits Feifan He **for CodeWeavers**. Review that upstream provenance against the project's no-CrossOver-code requirement before including it. If approved, pin a DXMT source revision and toolchain, build x64 PE DLLs plus its x64 Unix library in ignored `.build/`, and run the same device/frame/visual tests; 32-bit PE DLLs are a separate build and depend on the x64 Unix library.
+The separate [DXMT upstream build guide](https://github.com/3Shain/dxmt/blob/main/docs/DEVELOPMENT.md) is a plausible next D3D10/11 experiment because it targets Metal directly and avoids this Vulkan device limit. Its documented Wine cross-build requires **Meson 1.3+**, **LLVM 15 exactly with x86_64 headers and static libraries**, Xcode 16+, Wine 8+ build files, and a Windows cross-compiler. At that initial review, the Meson/Ninja/LLVM toolchain and DXMT probes were not staged; the later gates below record their completed build and API tests. The separately published [DXMT license](https://github.com/3Shain/dxmt/blob/main/LICENSE) is LGPL-2.1-or-later and credits Feifan He **for CodeWeavers**. Review that upstream provenance against the project's no-CrossOver-code requirement before including it. If approved, pin a DXMT source revision and toolchain, build x64 PE DLLs plus its x64 Unix library in ignored `.build/`, and run the same device/frame/visual tests; 32-bit PE DLLs are a separate build and depend on the x64 Unix library.
 
 ### DXMT gate 1, measured: the engine hides what it must export — 8 October 2026
 
@@ -63,13 +63,11 @@ DXMT would hand window coordinates to `macdrv_view_create_metal_view` as a view
 pointer. A second patch declares only the fields that file reads, with Wine
 11.0's names and order.
 
-Both patches are recorded in [runtime-patches](../runtime-patches/README.md) and
-neither is packaged: including the Wine one rebuilds the engine and changes the
-runtime-tree digest existing bottles are bound to.
-
-Whether `dlsym(RTLD_DEFAULT, ...)` can then reach those symbols from DXMT's own
-unix library is a second, untested question, because it depends on how Wine loads
-driver libraries. Nothing has been built or executed on the DXMT side.
+Both patches are recorded in [runtime-patches](../runtime-patches/README.md).
+Changing the driver changes the runtime-tree digest existing bottles are bound
+to, so the later build and rendering gates use a separate package and fresh
+bottles. The first two patches alone proved insufficient for Wine 11's managed
+client-surface lifecycle; gate 3 records the additional fix and runtime proof.
 
 **Provenance.** The pinned revision is
 `e94c312f5c054263acf261cfa109edf13e757587`, committed 6 October 2026. Its
@@ -81,7 +79,7 @@ Building from that public, separately licensed repository is distinct from
 copying anything out of an installed CrossOver, which stays forbidden. This is an
 engineering and documentation judgement, not legal advice.
 
-### DXMT gate 2: the build runs and stops at one missing Apple component
+### DXMT gate 2: initial missing Apple component — resolved
 
 The toolchain is now staged inside the ignored build directory: Meson 1.11.2 and
 Ninja 1.13.2 in a project-local virtual environment, and LLVM 15.0.7 built from
@@ -105,15 +103,31 @@ shader fails:
     error: cannot execute tool 'metal' due to missing Metal Toolchain;
     use: xcodebuild -downloadComponent MetalToolchain
 
-The `metal` driver exists in Xcode 26.6 but its toolchain component is not
-installed. Installing it changes the Xcode installation on the development Mac,
-so it is left to the project owner. No source or build problem is known beyond
-this point; the remaining steps have not been attempted.
+The initial build stopped because the Metal compiler component was missing.
+It was subsequently installed through Apple's `xcodebuild -downloadComponent
+MetalToolchain`, and both x64 and x86 DXMT builds completed. Reusable build
+inputs remain isolated under ignored `.build/`.
 
-**Still untested.** Nothing has been loaded into a bottle, no Direct3D call has
-been made through DXMT, and no rendering check has run. Those need the engine
-rebuilt with the visibility patch and repackaged behind the idle-bottle migration
-path, which has not been done.
+### DXMT gate 3: managed Wine 11 surfaces and real Direct3D APIs
+
+The first candidate passed hardware device creation, clear pixels and the
+original shader triangle before aborting at Metal-view creation for an HWND.
+Correct exports and the window-structure offset were insufficient: Wine 11
+creates its client view only when a managed client surface exists. DXMT's old
+private-layout fallback never established one.
+
+Two additional original patches give Wine ownership of an opaque Metal client
+surface and connect DXMT create/prepare/release to that API. Preparation follows
+queued presentation order. Both Windows architectures now pass feature levels
+10_0 and 11_0, shader/readback checks and HWND Present calls through Caskrun in
+fresh separate bottles. Exact DLL hashes establish translator selection; an
+incidental `wined3d` shader-compiler dependency is not mistaken for a fallback.
+
+The [DXMT smoke record](DXMT_SMOKE.md) describes reproduction, lifecycle gates,
+source/notice receipts and cleanup. This remains a separate development
+candidate. Visible screen composition, real games and safe app-facing runtime
+selection/migration remain gates; the current app and user bottles are unchanged.
+High Resolution remains optional and off by default.
 
 ### WineD3D OpenGL follow-up
 
@@ -126,7 +140,7 @@ The next credible D3D10/11 route remains an independently sourced Metal translat
 ## Candidate upstream components
 
 1. **Direct3D 8–11 through DXVK and MoltenVK.** [DXVK](https://github.com/doitsujin/dxvk) translates those Direct3D versions to Vulkan; [MoltenVK](https://github.com/KhronosGroup/MoltenVK) provides a Vulkan portability implementation over Metal on macOS. MoltenVK implements a Vulkan subset, so API coverage and game results must be measured. Caskrun first needs a relocatable x86_64 Vulkan loader/MoltenVK package and a Wine build that can see it, followed by separately sourced DXVK DLLs and per-bottle overrides. Pin source, hashes, notices, and matching architectures before any bundle change.
-2. **Direct3D 10/11 through DXMT.** The separately published [DXMT source](https://github.com/3Shain/dxmt) targets Wine on macOS and Metal directly. Its [build guide](https://github.com/3Shain/dxmt/blob/main/docs/DEVELOPMENT.md) currently calls for Meson, LLVM 15, Xcode 16+, Wine 8+, and a Windows cross-compiler for a Wine build. This Mac has Xcode 26.6 and MinGW; Meson and a matching project-local LLVM 15 are not staged. Its upstream source and license would need an explicit provenance review against the project's no-CrossOver-bundle rule before inclusion.
+2. **Direct3D 10/11 through DXMT.** The separately published [DXMT source](https://github.com/3Shain/dxmt) targets Wine on macOS and Metal directly. Its [build guide](https://github.com/3Shain/dxmt/blob/main/docs/DEVELOPMENT.md) currently calls for Meson, LLVM 15, Xcode 16+, Wine 8+, and a Windows cross-compiler for a Wine build. A pinned build with project-local Meson/Ninja and x86_64 LLVM 15 is now packaged separately and passes the original Direct3D API gates described above. App integration and game checks remain separate.
 3. **Direct3D 12 is a separate gate.** [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) is a Vulkan-based candidate, but this Wine/MoltenVK combination has no measured D3D12 support here. Apple's D3DMetal is another possible path only after its distribution terms are reviewed for this open-source project. Do not label either option available in the UI on current evidence.
 
 ## Validation order

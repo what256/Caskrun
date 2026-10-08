@@ -88,10 +88,13 @@ Eighty-five isolated Cocoa role checks confirm ordinary apps/tools remain
 eligible for foreground use while the narrowly identified background roles
 are accessory. Full packaged-runtime and vendor-launcher checks remain separate.
 
-## DXMT preparation — prepared, not packaged
+## DXMT development candidate — separate from the included runtime
 
-Neither patch below is in any packaged engine, no translator has been built or
-loaded, and no Direct3D call has been made through one.
+Four patches now build an isolated, signed runtime candidate with both Windows
+architectures. Hardware Direct3D device, shader, readback and HWND Present gates
+pass in fresh Caskrun bottles. The current app runtime and existing bottles are
+unchanged. See [DXMT smoke](../docs/DXMT_SMOKE.md) for reproducible commands,
+acceptance boundaries and remaining game/app-integration work.
 
 ### `wine-11.0-winemac-metal-exports.patch`
 
@@ -127,17 +130,34 @@ order. It targets a build against upstream Wine 11.0 and does not preserve the
 older layout the `macdrv_functions` path expects, which upstream Wine never
 exports.
 
+### Managed Wine 11 client surfaces
+
+`wine-11.0-dxmt-client-surface.patch` follows the export patch. It adds versioned
+opaque create/prepare/release APIs using Wine's managed client surfaces, with
+safe argument/allocation failures and the existing ownership/destruction path.
+It exports three more functions; the candidate driver has ten exports total.
+
+`dxmt-e94c312f-wine-11-client-surface.patch` follows the layout patch and
+supersedes private-structure access entirely. DXMT retains only an opaque
+surface handle and its borrowed Metal layer. Appended Unix call 146 preserves
+all existing x64/WoW64 ordinals. Preparation follows committed presentation
+encoding order; release follows DXMT's existing GPU-idle lifecycle.
+
+The build and packager pin all modified DXMT files and the ordered patches.
+No code or runtime is extracted from an installed vendor app. All four patches
+are included in the separate candidate's corresponding-source records.
+
 ### Provenance and licence of the pinned revision
 
 DXMT is published at `3Shain/dxmt` under LGPL-2.1-or-later. The pinned revision
 is `e94c312f5c054263acf261cfa109edf13e757587`, committed 6 October 2026, tree
-`b3cc8aaef14ec492d1bcf62acf29196efde90024`; the latest tagged release is v0.80
+`b3cc8aaef14ec492d1bcf62acf29196efde90024`; the separately reviewed tagged release is v0.80
 of 23 April 2026. Its `LICENSE` file at that revision is 782 bytes, git blob
 `927beb2e391ca7188b15fa7fbd9599e83e84bd7a`, SHA-256
 `b87c35aef7b2cf14de854118ca55ce5c4b284c85b5f002421fb8d46d868c2d17`, and reads
 "Copyright (c) 2023-2026 Feifan He for CodeWeavers". That file is a grant notice
-only: it does not contain the LGPL text, so packaging would have to add a full
-LGPL-2.1 copy alongside it, plus a corresponding-source record and these patches.
+only: it does not contain the LGPL text, so the local candidate includes a full
+LGPL-2.1 copy alongside it, corresponding-source archives and these patches.
 
 Building from that public, separately licensed repository is distinct from
 copying anything out of an installed CrossOver, which remains forbidden. This is

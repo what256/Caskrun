@@ -1,0 +1,201 @@
+Use Wine 11's managed client-surface bridge for DXMT presentation.
+
+Applies after dxmt-e94c312f-wine-11-win-data.patch to pinned DXMT revision
+ e94c312f5c054263acf261cfa109edf13e757587. Requires the matching original
+wine-11.0-dxmt-client-surface.patch. It replaces the private window-layout
+fallback with a versioned opaque create/prepare/release API. A fresh managed
+surface exists before Metal-view creation, and each Present reactivates it.
+Unix call 146 is appended to both dispatch tables, preserving existing ordinals
+and the fixed-width x64/WoW64 argument layout. No installed vendor code is used.
+
+Offered under DXMT's LGPL-2.1-or-later terms.
+
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -1657,86 +1657,39 @@
+ typedef struct macdrv_opaque_metal_view *macdrv_metal_view;
+ typedef struct macdrv_opaque_metal_layer *macdrv_metal_layer;
+ typedef struct macdrv_opaque_view *macdrv_view;
+-typedef struct macdrv_opaque_window *macdrv_window;
+-typedef struct macdrv_opaque_window_data *macdrv_window_data;
+-typedef struct opaque_window_surface *window_surface;
+-typedef struct opaque_HWND *HWND;
+-/* Wine 11.0 keeps the client view in the third field and has no separate
+- * cocoa_view, so the older layout read the start of the following rectangle
+- * structure instead of a view pointer. Only the fields read below are
+- * declared, so a later field's layout cannot matter. */
+-struct macdrv_win_data {
+-  HWND hwnd; /* hwnd that this private data belongs to */
+-  macdrv_window cocoa_window;
+-  macdrv_view client_view;
+-};
+-
+-struct macdrv_functions_t {
+-  void (*macdrv_init_display_devices)(BOOL);
+-  struct macdrv_win_data *(*get_win_data)(HWND hwnd);
+-  void (*release_win_data)(struct macdrv_win_data *data);
+-  macdrv_window (*macdrv_get_cocoa_window)(HWND hwnd, BOOL require_on_screen);
+-  macdrv_metal_device (*macdrv_create_metal_device)(void);
+-  void (*macdrv_release_metal_device)(macdrv_metal_device d);
+-  macdrv_metal_view (*macdrv_view_create_metal_view)(macdrv_view v, macdrv_metal_device d);
+-  macdrv_metal_layer (*macdrv_view_get_metal_layer)(macdrv_metal_view v);
+-  void (*macdrv_view_release_metal_view)(macdrv_metal_view v);
+-  void (*on_main_thread)(dispatch_block_t b);
+-};
+-
++/* Caskrun's Wine 11 bridge owns a managed client surface. The opaque handle
++ * is released only through that bridge; no private Wine structure is mirrored. */
+ static NTSTATUS
+ _CreateMetalViewFromHWND(void *obj) {
+   struct unixcall_create_metal_view_from_hwnd *params = obj;
+-
+-  struct macdrv_win_data *(*pfn_get_win_data)(HWND hwnd) = NULL;
+-  void (*pfn_release_win_data)(struct macdrv_win_data *data) = NULL;
+-  macdrv_metal_view (*pfn_macdrv_view_create_metal_view)(macdrv_view v, macdrv_metal_device d) = NULL;
+-  macdrv_metal_layer (*pfn_macdrv_view_get_metal_layer)(macdrv_metal_view v) = NULL;
+-
+-  struct macdrv_functions_t *macdrv_functions;
+-  if ((macdrv_functions = dlsym(RTLD_DEFAULT, "macdrv_functions"))) {
+-    pfn_get_win_data = macdrv_functions->get_win_data;
+-    pfn_release_win_data = macdrv_functions->release_win_data;
+-    pfn_macdrv_view_create_metal_view = macdrv_functions->macdrv_view_create_metal_view;
+-    pfn_macdrv_view_get_metal_layer = macdrv_functions->macdrv_view_get_metal_layer;
+-  } else {
+-    pfn_get_win_data = dlsym(RTLD_DEFAULT, "get_win_data");
+-    pfn_release_win_data = dlsym(RTLD_DEFAULT, "release_win_data");
+-    pfn_macdrv_view_create_metal_view = dlsym(RTLD_DEFAULT, "macdrv_view_create_metal_view");
+-    pfn_macdrv_view_get_metal_layer = dlsym(RTLD_DEFAULT, "macdrv_view_get_metal_layer");
+-  }
+-
+-  if (pfn_get_win_data && pfn_release_win_data && pfn_macdrv_view_create_metal_view &&
+-      pfn_macdrv_view_get_metal_layer) {
+-    struct macdrv_win_data *win_data = pfn_get_win_data((HWND)params->hwnd);
+-    macdrv_metal_view view =
+-        pfn_macdrv_view_create_metal_view(win_data->client_view, (macdrv_metal_device)params->device);
+-    params->ret_view = (obj_handle_t)view;
+-    if (view) {
+-      params->ret_layer = (obj_handle_t)pfn_macdrv_view_get_metal_layer(view);
+-    }
+-    pfn_release_win_data(win_data);
+-  }
+-
++  void *(*create)(void *, void *, void **) =
++      dlsym(RTLD_DEFAULT, "caskrun_macdrv_metal_surface_create_v1");
++  void *layer = NULL;
++  params->ret_view = 0;
++  params->ret_layer = 0;
++  if (create) {
++    params->ret_view = (obj_handle_t)create((void *)(uintptr_t)params->hwnd,
++                                         (void *)params->device, &layer);
++    params->ret_layer = (obj_handle_t)layer;
++  }
+   return STATUS_SUCCESS;
+ }
+ 
+ static NTSTATUS
+ _ReleaseMetalView(void *obj) {
+   struct unixcall_generic_obj_noret *params = obj;
+-
+-  void (*pfn_macdrv_view_release_metal_view)(macdrv_metal_view v) = NULL;
+-
+-  struct macdrv_functions_t *macdrv_functions;
+-  if ((macdrv_functions = dlsym(RTLD_DEFAULT, "macdrv_functions"))) {
+-    pfn_macdrv_view_release_metal_view = macdrv_functions->macdrv_view_release_metal_view;
+-  } else {
+-    pfn_macdrv_view_release_metal_view = dlsym(RTLD_DEFAULT, "macdrv_view_release_metal_view");
+-  }
+-
+-  if (pfn_macdrv_view_release_metal_view)
+-    pfn_macdrv_view_release_metal_view((macdrv_metal_view)params->handle);
+-
++  void (*release)(void *) = dlsym(RTLD_DEFAULT, "caskrun_macdrv_metal_surface_release_v1");
++  if (release && params->handle)
++    release((void *)params->handle);
++  return STATUS_SUCCESS;
++}
++
++static NTSTATUS
++_PrepareMetalView(void *obj) {
++  struct unixcall_generic_obj_noret *params = obj;
++  void (*prepare)(void *) = dlsym(RTLD_DEFAULT, "caskrun_macdrv_metal_surface_prepare_v1");
++  if (prepare && params->handle)
++    prepare((void *)params->handle);
+   return STATUS_SUCCESS;
+ }
+ 
+@@ -3313,6 +3266,7 @@
+     &_MTLDevice_newIndirectCommandBuffer,
+     &_MTLDevice_newLibraryWithSource,
+     &_MTLTexture_getBytes,
++    &_PrepareMetalView,
+ };
+ 
+ #ifndef DXMT_NATIVE
+@@ -3463,5 +3417,6 @@
+     &_MTLDevice_newIndirectCommandBuffer,
+     &_MTLDevice_newLibraryWithSource,
+     &_MTLTexture_getBytes,
++    &_PrepareMetalView,
+ };
+ #endif
+--- a/src/winemetal/winemetal_thunks.c
++++ b/src/winemetal/winemetal_thunks.c
+@@ -723,6 +723,14 @@
+   return params.ret_view;
+ }
+ 
++/* Appended Unix call 146 preserves every existing x64/WoW64 ordinal. */
++WINEMETAL_API void
++PrepareMetalView(obj_handle_t view) {
++  struct unixcall_generic_obj_noret params;
++  params.handle = view;
++  UNIX_CALL(146, &params);
++}
++
+ WINEMETAL_API void
+ ReleaseMetalView(obj_handle_t view) {
+   struct unixcall_generic_obj_noret params;
+--- a/src/winemetal/winemetal.h
++++ b/src/winemetal/winemetal.h
+@@ -1782,6 +1782,7 @@
+ WINEMETAL_API obj_handle_t CreateMetalViewFromHWND(intptr_t hwnd, obj_handle_t device, obj_handle_t *layer);
+ 
+ WINEMETAL_API void ReleaseMetalView(obj_handle_t view);
++WINEMETAL_API void PrepareMetalView(obj_handle_t view);
+ 
+ WINEMETAL_API void MTLCommandEncoder_setLabel(obj_handle_t encoder, obj_handle_t label);
+ 
+--- a/src/winemetal/Metal.hpp
++++ b/src/winemetal/Metal.hpp
+@@ -1106,6 +1106,11 @@
+ inline Object
+ CreateMetalViewFromHWND(intptr_t hwnd, Device device, MetalLayer &layer) {
+   return {::CreateMetalViewFromHWND(hwnd, device.handle, &layer.handle)};
++}
++
++inline void
++PrepareMetalView(Object view) {
++  return ::PrepareMetalView(view.handle);
+ }
+ 
+ inline void
+--- a/src/d3d11/d3d11_swapchain.cpp
++++ b/src/d3d11/d3d11_swapchain.cpp
+@@ -793,6 +793,8 @@
+         scaler_info.output_width = upscaled->width();
+         scaler_info.output_height = upscaled->height();
+         ctx.upscale(backbuffer, upscaled, scaler);
++        // Surface activation must follow the queued presentation order.
++        WMT::PrepareMetalView(native_view_);
+         ctx.present(upscaled, presenter, vsync_duration, state.metadata);
+         ReleaseSemaphore(present_semaphore_, 1, nullptr);
+         this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());
+@@ -803,6 +805,8 @@
+         sync_state = SyncFrame(++presentation_count_),
+         backbuffer = backbuffer_->texture()
+       ](ArgumentEncodingContext &ctx) mutable {
++        // Surface activation must follow the queued presentation order.
++        WMT::PrepareMetalView(native_view_);
+         ctx.present(backbuffer, presenter, vsync_duration, state.metadata);
+         ReleaseSemaphore(present_semaphore_, 1, nullptr);
+         this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());

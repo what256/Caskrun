@@ -1,0 +1,120 @@
+Add an original, versioned Metal client-surface bridge for Wine 11.0.
+
+Upstream Wine 11 creates its client view lazily for OpenGL or Vulkan surfaces.
+A Direct3D-to-Metal translator cannot obtain a usable view by reading window
+private data alone. These exports create, prepare and release a fresh managed
+Wine client surface through an opaque handle; no private structure layout
+crosses the driver boundary. Preparing before each presentation reactivates a
+surface another swapchain may have hidden. Wine owns resize/reparent updates
+and detaches surfaces when their Windows window is destroyed.
+
+The supplied Metal device is borrowed; WineMetalView retains it. The managed
+surface owns the created Metal view and releases it in its existing destructor.
+The returned layer is borrowed until surface release. Null arguments and window,
+allocation, view and layer failures return a null handle and null output layer.
+Also guard the existing client-surface allocation before dereferencing it.
+
+Applies after wine-11.0-winemac-metal-exports.patch to the independently sourced
+Wine 11.0 tree. This original Caskrun patch is offered under Wine's
+LGPL-2.1-or-later licence. It contains no installed CrossOver code or assets.
+
+--- a/dlls/winemac.drv/macdrv.h
++++ b/dlls/winemac.drv/macdrv.h
+@@ -206,6 +206,13 @@
+ 
+ extern struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd);
+ 
++/* Caskrun's Wine 11 Metal bridge. The caller owns the opaque surface until
++ * release; device is borrowed and the returned layer lives with the surface. */
++__attribute__((visibility("default"))) extern void *caskrun_macdrv_metal_surface_create_v1(HWND hwnd, void *device,
++                                                                                       void **out_layer);
++__attribute__((visibility("default"))) extern void caskrun_macdrv_metal_surface_release_v1(void *context);
++__attribute__((visibility("default"))) extern void caskrun_macdrv_metal_surface_prepare_v1(void *context);
++
+ __attribute__((visibility("default"))) extern struct macdrv_win_data *get_win_data(HWND hwnd);
+ __attribute__((visibility("default"))) extern void release_win_data(struct macdrv_win_data *data);
+ extern void init_win_context(void);
+--- a/dlls/winemac.drv/window.c
++++ b/dlls/winemac.drv/window.c
+@@ -1151,20 +1151,72 @@
+     struct macdrv_client_surface *surface;
+     RECT rect;
+ 
+-    NtUserGetClientRect(hwnd, &rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI));
++    if (!toplevel || !NtUserGetClientRect(hwnd, &rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI)))
++        return NULL;
+     NtUserMapWindowPoints(hwnd, toplevel, (POINT *)&rect, 2, NtUserGetWinMonitorDpi(toplevel, MDT_RAW_DPI));
+ 
+-    surface = client_surface_create(sizeof(*surface), &macdrv_client_surface_funcs, hwnd);
+-    surface->cocoa_view = macdrv_create_view(cgrect_from_rect(rect));
++    if (!(surface = client_surface_create(sizeof(*surface), &macdrv_client_surface_funcs, hwnd)))
++        return NULL;
++    if (!(surface->cocoa_view = macdrv_create_view(cgrect_from_rect(rect))))
++    {
++        client_surface_release(&surface->client);
++        return NULL;
++    }
+     macdrv_set_view_hidden(surface->cocoa_view, TRUE);
+-
+-    if (surface)
+-    {
+-        macdrv_client_surface_update(&surface->client);
+-        macdrv_client_surface_present(&surface->client, 0);
+-    }
++    macdrv_client_surface_update(&surface->client);
++    macdrv_client_surface_present(&surface->client, 0);
+ 
+     return surface;
++}
++
++/* Original, versioned bridge for translators built against this Wine driver.
++ * Keep Wine's private window and client-surface layouts on this side of the
++ * boundary. A fresh managed surface owns its Metal view and receives Wine's
++ * window resize, reparent and destruction notifications. */
++void *caskrun_macdrv_metal_surface_create_v1(HWND hwnd, void *device, void **out_layer)
++{
++    struct macdrv_client_surface *surface;
++    struct macdrv_win_data *data;
++    macdrv_metal_layer layer;
++
++    if (!out_layer) return NULL;
++    *out_layer = NULL;
++    if (!hwnd || !device || !(data = get_win_data(hwnd))) return NULL;
++    /* Surface setup takes the window-data lock itself. Never keep it held
++     * across client-surface or Cocoa calls. */
++    release_win_data(data);
++
++    if (!(surface = macdrv_client_surface_create(hwnd))) return NULL;
++    /* The supplied device remains borrowed. WineMetalView retains it; the
++     * existing surface destructor releases only the Metal view we own. */
++    if (!(surface->metal_view = macdrv_view_create_metal_view(surface->cocoa_view, (macdrv_metal_device)device)))
++        goto failed;
++    if (!(layer = macdrv_view_get_metal_layer(surface->metal_view))) goto failed;
++
++    *out_layer = layer;
++    return surface;
++
++failed:
++    client_surface_release(&surface->client);
++    return NULL;
++}
++
++void caskrun_macdrv_metal_surface_release_v1(void *context)
++{
++    struct macdrv_client_surface *surface = context;
++
++    if (surface) client_surface_release(&surface->client);
++}
++
++void caskrun_macdrv_metal_surface_prepare_v1(void *context)
++{
++    struct macdrv_client_surface *surface = context;
++
++    if (!surface) return;
++    /* Each swapchain can make its own surface current again after another
++     * surface was presented. The managed calls ignore a destroyed window. */
++    client_surface_update(&surface->client);
++    client_surface_present(&surface->client);
+ }
+ 
+ /**********************************************************************

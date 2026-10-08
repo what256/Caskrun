@@ -2,6 +2,20 @@
 
 Copy the prompt below into Claude with access to this repository. The status is a handoff snapshot; inspect the current files and working tree before changing anything. Local experimental records under ignored `.build/` are intentionally absent from a fresh GitHub checkout.
 
+## Current continuation note — 8 October 2026
+
+The earlier prompt below is a snapshot. Later source work has completed
+portable user-folder/profile backup handling and bounded shortcut argument
+preservation. Do not reimplement those from the older Phase D bullets.
+
+The independently built DXMT candidate now passes x64/x86 hardware Direct3D
+10_0/11_0 device, shader/readback, HWND presentation and window-lifecycle gates.
+Read [DXMT smoke](DXMT_SMOKE.md) for source pins, commands, cleanup and exact
+boundaries. It remains separate from the app and existing bottles; app-facing
+capabilities, safe runtime migration/rollback, visible output and games remain.
+High Resolution stays optional and off by default. The user will perform
+manual game testing later.
+
 ---
 
 You are continuing **Caskrun**, an original Apple Silicon macOS app that installs and runs Windows x86/x64 software through an independently built Wine runtime. It is a **private demo in active development**. More features are coming. Improve the remaining compatibility and maintenance problems through small, verified changes. Do not promise universal Windows compatibility or CrossOver parity.
