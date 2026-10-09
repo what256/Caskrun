@@ -629,16 +629,14 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
 
     func install() {
         guard statusItem == nil else { return }
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
             if let logo = CaskrunMenuBarArtwork.image?.copy() as? NSImage {
                 logo.size = NSSize(width: 17, height: 17)
                 button.image = logo
-                button.imagePosition = .imageLeading
+                button.imagePosition = .imageOnly
             }
-            // Keep a readable label even if the image is unavailable or clipped.
-            button.title = "Caskrun"
-            button.font = .systemFont(ofSize: 12, weight: .semibold)
+            button.title = ""
             button.toolTip = "Caskrun"
             button.setAccessibilityLabel("Caskrun menu")
         }
