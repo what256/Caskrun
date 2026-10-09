@@ -1,6 +1,7 @@
 # AnyPS5 through Wine: development investigation
 
-_9 October 2026. Experimental work; PS5 gameplay on macOS is not validated._
+_10 October 2026. PS5 DOOM homebrew ran experimentally through Wine on Apple
+Silicon. Retail PS5 compatibility is not validated._
 
 AnyPS5 converts a PS5 executable into a Windows executable and supplies replacement
 system libraries. Wine then runs the Windows output. Sharing a Unix ancestry does
@@ -113,38 +114,172 @@ The extension name is advertised; that alone does not mean every feature in the
 extension is supported. This is not a Wine feature-query defect or a hidden
 graphics preference.
 
-DOOM's CPU scaler does not remove this constraint. The game opens VideoOut before
-choosing its scaler, and AnyPS5 constructs its Vulkan device for presentation.
-The scaler avoids the game's compute shader, not the engine's presentation
-device requirements.
+DOOM's CPU scaler does not remove this constraint in unmodified AnyPS5. The
+game opens VideoOut before choosing its scaler, and AnyPS5 constructs its
+Vulkan device for presentation. The scaler avoids the game's compute shader,
+not the engine's presentation device requirements. The limited capability
+patch described below makes the no-image-resource path eligible without
+claiming null-descriptor support.
+
+## Matched runtime follow-up
+
+The separate experimental build now uses the same `8b393b6` source revision
+as the successful converter, all eleven exact submodule revisions, and the
+upstream-supported Windows GCC 15.2.0 UCRT compiler. Running that compiler in
+an isolated Wine prefix preserves upstream's DWARF unwind requirements. A
+small compiler fixture confirmed that the available Mac GCC 16.1 cross-compiler
+instead produces SjLj exception calls with the upstream flags; simply changing
+those flags would not establish a compatible runtime.
+
+All 116 NID-patched system libraries built. An export audit against the main
+DOOM import registry found 171 references / 170 distinct imports, zero absent
+imports, zero missing libraries and zero library-name mismatches. A separate
+audit of the actual generated PE bootstrap found 274 references / 262 distinct
+imports including the guest libc module; each has an allowed provider. Recursive
+PE import/export verification covered 150 images and 14,618 import edges with
+zero missing libraries, missing exports or forwarding cycles, using the actual
+candidate Wine API-set schema. Presence does not establish correct behavior.
+The tool
+classifies `sceSystemServiceLoadExec` as a throwing stub because replacing an
+executable is unsupported. Its specific `"exit"` branch is implemented and
+exits the host with code zero, even when DOOM calls it after a fatal error.
+A successful process exit alone is therefore not evidence of gameplay.
+Four further guest-libc diagnostics for error reporting, backtraces and module
+lookup remain throwing stubs. The TLS import is bound to the converter's
+generated Windows resolver, as confirmed in the emitted startup code, rather
+than calling the host TLS stub. These static checks do not establish which
+error paths a live game will reach.
+
+The original, separately licensed changes are kept as reproducible patches in
+[`runtime-patches/anyps5/`](../runtime-patches/anyps5/):
+
+- **Limited null-descriptor capability negotiation:** keeps the actual feature
+  disabled, permits no-image shaders and fully populated image heaps, and
+  refuses direct or padded null image elements before guest address preparation,
+  GPU allocations, descriptor updates or draw. Deferred construction and cached
+  resource proofs use the same policy. This is not full null-descriptor emulation.
+- **Vulkan portability negotiation:** enables the advertised portability instance
+  extension together with its matching enumeration flag, and the device subset
+  extension only when advertised. No feature value is forced.
+- **Verified guest arena ownership:** an API probe found that Wine's Windows query
+  reports some occupied native Mac intervals as free. Both ordinary and placeholder
+  reservations fail there with `ERROR_INVALID_ADDRESS`, while other intervals
+  accept placeholders. The patch subdivides conflicting ranges within a finite
+  budget and excludes conflicts and all unverified remainder. Only successful
+  exact-address reservations are owned. Guest allocation, fixed placement, release,
+  commit and shared mapping check this coverage; other reservation errors remain
+  fatal. Adjacent exclusions are merged.
+
+### Presentation and focused checks
+
+The rebuilt independent Wine 11.0 candidate contains Vulkan Loader 1.4.350 and
+unchanged official MoltenVK 1.4.2. An original Windows Win32 presentation probe
+created the pinned engine's required-feature device while truthfully omitting
+null descriptors, then created its surface and swapchain. All 4,096 uploaded
+pixels matched after GPU readback. The independently compiled, corrected-count
+probe presented 183 frames at 632 by 406 over a bounded three-second run. An
+earlier equivalent probe presented 336 frames over five seconds.
+
+Omitting the advertised portability extension and flag reproduced
+`VK_ERROR_INCOMPATIBLE_DRIVER` (`-9`) at instance creation in both Wine and the
+native comparison. That measured failure motivated the portability patch.
+This verifies a device and transfer/presentation path; it does not validate
+SDL integration, PS5 shader translation, game performance, input or audio.
+
+The standalone capability/policy check passed 16 cases. The segmented-reservation
+check passed 32 cases independently on ARM64 macOS and with the supported
+Windows compiler under Wine. Full graphics tests initially failed before their
+entry point because libc's static guest-arena reservation encountered the
+occupied native intervals. With the reservation patch, the actual compiled
+shader-profile and Graphics validation executables both entered their test
+code and passed under Wine. A separate smoke using the rebuilt libc passed
+owned allocation, private commit, write/read, placeholder reset, release and
+reuse. It correctly refused ownership at the probed occupied intervals.
+The shared-mapping regression passed 18 actual Windows operations under Wine:
+private commit/reset across adjacent independent placeholders, two 16-KiB shared
+views, a read/write alias, coalescing and release. Its first attempt used a
+non-executable-capable section unlike production and was corrected in the fixture;
+no production permission was relaxed. The focused fixed-mapping guard entry
+passed all four refusal/preservation
+cases, flexible allocation reuse and named mappings. The full upstream
+GuestMemory suite then failed its existing `CheckMlock` working-set metadata
+assertion: Wine 11.0 explicitly returns equal constant minimum and maximum
+values from its working-set getter, and its setter does not change them.
+The underlying host `mlock` implementation is real. No fake metadata or
+full-suite success was substituted.
+
+## Actual PS5 homebrew game results
+
+The tested game was the converted public PS5 DOOM executable and its bundled
+guest libc, with the shareware episode and the matched 116-PRX runtime plus
+three exact GCC DLLs. A native Mac or Windows DOOM port was not substituted.
+The game used its CPU renderer; AnyPS5 still presented its tiled framebuffer
+through Vulkan compute/transfer operations and MoltenVK. The capture fallback
+that decodes the buffer on the CPU was not enabled.
+
+| Test | Observed result |
+| --- | --- |
+| Initial bounded 260-frame run | DOOM initialized, scripted menu/start/movement reached gameplay, six actual GPU-readback captures of the 1920 by 1080 framebuffer, exit 0 without timeout |
+| Fresh GUI relaunch | Live game window rendered; keyboard `W` changed the viewpoint; right mouse fire reduced ammunition from 50 to 48 |
+| Native window close | Process exited 0 without timeout before the configured frame limit |
+| Save through game menu | A 32,094-byte slot-zero save was written, description `E1M1`, `version 110` header, episode/map 1, final marker `0x1d` |
+| Load in a fresh process | Host log recorded reading the save, GPU frame showed the saved position; subsequent backward movement showed the room again; exit 0 without timeout |
+
+All four game sessions returned zero without timing out. Success is supported
+by logs, save-file validation, actual GPU captures and observed live input, not
+by the exit code alone. The displayed game rate was approximately 35 FPS,
+which is this homebrew's pacing; it is not a retail-game performance benchmark.
+
+The SDL/AudioOut path opened at 48 kHz, but audible output was not measured.
+A physical controller, sustained play and other PS5 games were not tested.
+No claim is made for general PS5 compatibility or games using null image slots.
+
+The public homebrew supports bounded test plans in `app0/test.cfg`. The initial
+reproduction used:
+
+```text
+game doom1.wad
+present cpu
+input 40:OPTIONS:2;60:CROSS:2;80:CROSS:2;100:CROSS:2;130:LY=-32000:70
+frames 260
+```
+
+For GPU readback evidence the isolated child process used
+`APS5_DUMP_FRAMES=7`, `APS5_DUMP_FRAMES_EVERY=40`, `APS5_DUMP_SCALE=2`,
+and no `APS5_NO_GPU_DUMP`. The process working directory contained the converted
+EXE, `libs/`, `app0/` and `download0/`. Source and download provenance, exact
+runtime/dependency hashes and sanitized results are retained locally under
+ignored experiment folders; no game files or runtime binaries are published.
 
 ## Work needed before integration
 
-1. Keep the successful, pinned newer converter build and its regression evidence.
-   The official release converter remains unsuitable for this homebrew input.
-2. Use a matched converter and Windows system-library build. The official release
-   predates later homebrew fixes; mixing newer conversion behavior with older
-   libraries must not be treated as a supported engine package.
-3. Implement and verify a real fallback for unsupported null descriptors, or use
-   a driver that implements the feature. Removing the guard or claiming support
-   through a forced flag is not a fix.
-4. Validate a real game: startup, presentation, input, sound, saves, shutdown and
-   relaunch. Only then expose the validated engine route in Caskrun.
+1. Validate audible sound, a physical controller and sustained play. Save/load,
+   rendering, keyboard/mouse input, window close and relaunch have the measured
+   homebrew results above.
+2. Keep games using null image descriptors unsupported until a complete shader
+   and resource fallback exists. Dummy images alone are insufficient.
+3. Address or correctly scope Wine's working-set metadata limitation before
+   claiming the full upstream GuestMemory suite passes.
+4. Package a reviewed, reproducible experimental engine route before exposing
+   it in Caskrun. The normal app and engine chooser were not changed.
+5. Test additional legitimately available PS5 inputs separately. One homebrew
+   does not establish retail PS5 compatibility.
 
-The documented Windows build uses GCC 15.2 UCRT. The available Mac cross-compiler
-uses GCC 16.1 with a different CRT baseline, and the full build executes generated
-Windows host tools. A full runtime cross-build needs an explicit host/target tool
-split and matching dependencies; a native Mac converter build alone does not
-produce the Windows system libraries.
+## Isolation and retained evidence
 
-All experiment data stays under ignored `.build/anyps5-wine-oct09/`. Each test uses a
-separate Caskrun data directory, bottle and runtime binding. Test profile host
-folder links are replaced with empty private folders and the host-root drive
-mapping is removed before test executables run. Both owned prefixes were stopped;
-process-environment and open-file checks found zero remaining owners before the
-two test bottles were removed. Raw session reports and compilation intermediates
-were removed. Reviewed public source, verified downloads, the successful native
-converter and sanitized capability evidence remain in the ignored experiment
-folder. The
-installed app, user collection, existing bottles and active runtime are not
-modified by this investigation.
+All experiments use ignored project `.build/` folders, separate Caskrun data
+homes, prefixes and runtime bindings. Test profile host-folder links are replaced
+with empty private folders and the host-root drive is removed before test code
+runs. The earlier two test bottles were stopped and removed after process and
+open-file ownership checks. The new compiler and game sessions were also
+stopped; process-environment and
+open-file checks confirmed zero owners before their disposable prefixes were
+removed. Raw game logs, captures and private session records were removed.
+The matching source, compiler/cache, dependency package and sanitized results
+remain in organized ignored folders for reproduction.
+
+Reviewed public source, verified upstream downloads, reproducible patches and
+sanitized evidence are retained in organized experiment folders. Game files,
+binaries, raw logs, captures, account details and device identifiers are not
+committed. The installed app, user collection, existing bottles and active
+Windows runtime are not modified by this investigation.

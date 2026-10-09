@@ -9,7 +9,7 @@ capabilities and create/destroy one minimal graphics queue/device per enumerated
 GPU. They enable no optional device features. Standard portability enumeration
 and the required portability-subset extension are enabled only when advertised.
 
-**This is initialization evidence only.** Neither probe creates a surface,
+**The two capability probes are initialization evidence only.** Neither creates a surface,
 swapchain or window, runs AnyPS5, converts a game, draws a frame or validates
 gameplay. Enumeration has finite limits; the caller must also enforce a process
 timeout and, for Wine, own and clean up the disposable prefix.
@@ -42,7 +42,7 @@ Use the retained official Khronos Vulkan Headers **v1.4.350**, an existing MinGW
 x64 compiler and Apple's command-line compiler. Keep outputs in ignored `.build`:
 
 ```sh
-probe_headers=.build/graphics-probe/stage/headers/include
+probe_headers=.build/anyps5-host-oct09/graphics-deps/headers/include
 probe_build=.build/anyps5-vulkan-diagnostics
 mkdir -p "$probe_build"
 x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror \
@@ -62,13 +62,13 @@ loader architecture and runs through Rosetta on Apple Silicon.
 
 ## Native comparison with the retained candidate
 
-The reviewed package is `.build/vulkan-candidate-runtime`, with its local loader,
+The reviewed package is `.build/anyps5-graphics-oct09/runtime-candidate`, with its local loader,
 official MoltenVK ICD and matching driver. Do not substitute an arbitrary
 system-wide loader/driver or edit the normal app/runtime to make a test pass.
 For a comparison against that exact local package:
 
 ```sh
-probe_runtime=.build/vulkan-candidate-runtime
+probe_runtime=.build/anyps5-graphics-oct09/runtime-candidate
 env -i PATH=/usr/bin:/bin \
   VK_DRIVER_FILES="$PWD/$probe_runtime/lib/vulkan/MoltenVK_icd.json" \
   MVK_CONFIG_LOG_LEVEL=0 \
@@ -85,3 +85,50 @@ owned disposable prefix, with an enforced timeout; never use an existing bottle.
 See [the experiment report](../../../docs/ANYPS5_WINE.md) for measured results,
 remaining barriers and cleanup. A capability result never overrides a false
 driver feature bit or establishes that a real game works.
+
+## Required-feature device and real presentation diagnostics
+
+`vulkan-required-features-native.cpp` repeats the native capability comparison
+but creates a device with the pinned renderer's required core, eight-bit storage
+and buffer-device-address features enabled. It retains the actual false null
+feature. A final argument `--no-portability` deliberately omits portability
+negotiation for the negative comparison.
+
+`vulkan-presentation-windows.cpp` is an original Win32 surface, transfer and
+swapchain diagnostic. It enables the same required feature subset, checks the
+BGRA surface and transfer formats, performs GPU upload/readback of 4,096 pixels,
+and presents bounded frames to its window. It does not run SDL, AnyPS5, a guest
+shader, audio or a game; it makes no performance claim.
+
+Build with the pinned Khronos headers already installed in the ignored graphics
+dependency folder:
+
+```sh
+x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror \
+  -static -static-libgcc -static-libstdc++ \
+  -I .build/anyps5-host-oct09/graphics-deps/headers/include \
+  scripts/diagnostics/anyps5-vulkan/vulkan-presentation-windows.cpp -luser32 \
+  -o .build/anyps5-host-oct09/presentation.exe
+
+clang++ -std=c++17 -O2 -arch x86_64 -mmacosx-version-min=14.0 \
+  -Wall -Wextra -Wpedantic -Werror \
+  -I .build/anyps5-host-oct09/graphics-deps/headers/include \
+  scripts/diagnostics/anyps5-vulkan/vulkan-required-features-native.cpp \
+  -o .build/anyps5-host-oct09/required-native
+```
+
+Windows arguments are test seconds (1–120, default 5), optionally followed by
+`--no-portability`. Use an owned disposable prefix, remove host mappings and the
+root drive before running, and enforce an external timeout. The native program
+requires an explicit loader path; set only that child's official ICD path and
+suppress driver informational logs. Never use an existing user bottle.
+
+The tested Windows v2 diagnostic returned zero, enumerated 15 instance
+extensions, one physical device, 126 device extensions, 60 surface formats and
+two swapchain images; 4,096/4,096 pixels matched and 183 frames were presented.
+The earlier equivalent v1 run presented 336 frames; its count labels reported
+Vulkan result codes, which v2 now distinguishes from actual counts. Both the
+Wine and native no-portability comparisons returned
+`VK_ERROR_INCOMPATIBLE_DRIVER` (-9) at instance creation. These observations are
+specific to the rebuilt local candidate and official MoltenVK 1.4.2. They are
+presentation evidence, not PS5 gameplay evidence.

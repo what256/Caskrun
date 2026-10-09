@@ -1,0 +1,507 @@
+--- /dev/null
++++ b/core/libs/prx/libc/include/ArenaReservation.hpp
+@@ -0,0 +1,83 @@
++#ifndef CORE_LIBS_PRX_LIBC_INCLUDE_ARENARESERVATION_HPP
++#define CORE_LIBS_PRX_LIBC_INCLUDE_ARENARESERVATION_HPP
++
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <deque>
++#include <iterator>
++#include <limits>
++#include <stdexcept>
++#include <utility>
++#include <vector>
++
++namespace GuestArena::Reservation {
++
++using Range = std::pair<std::uintptr_t, std::uintptr_t>;
++
++inline void MergeRanges(std::vector<Range>& ranges) {
++    std::sort(ranges.begin(), ranges.end());
++    std::size_t written = 0;
++    for (const auto range : ranges) {
++        if (range.first >= range.second) throw std::invalid_argument("invalid arena range");
++        if (written != 0 && ranges[written - 1].second >= range.first)
++            ranges[written - 1].second = std::max(ranges[written - 1].second, range.second);
++        else
++            ranges[written++] = range;
++    }
++    ranges.resize(written);
++}
++
++inline bool Contains(const std::vector<Range>& owned, std::uintptr_t address, std::size_t bytes) {
++    if (bytes > std::numeric_limits<std::uintptr_t>::max() - address) return false;
++    auto next = std::upper_bound(owned.begin(), owned.end(), address,
++        [](std::uintptr_t value, const Range& range) { return value < range.first; });
++    if (next == owned.begin()) return false;
++    const auto& range = *std::prev(next);
++    return address < range.second && bytes <= range.second - address;
++}
++
++struct Layout {
++    std::vector<Range> owned;
++    std::vector<Range> excluded;
++    std::size_t attempts = 0;
++};
++
++// The callback returns true only after reserving this exact range. False means
++// an address conflict; other failures must throw. A reported free interval may
++// contain native host mappings invisible to the Windows virtual-memory query.
++// Excluded intervals stay unowned even if they looked free in that query.
++template<class Reserve>
++Layout Segmented(std::uintptr_t first, std::uintptr_t last, std::size_t granularity,
++                 std::size_t attemptLimit, Reserve&& reserve) {
++    if (granularity == 0 || (granularity & (granularity - 1)) != 0 ||
++        first >= last || first % granularity != 0 || last % granularity != 0 ||
++        attemptLimit == 0)
++        throw std::invalid_argument("invalid segmented guest reservation");
++    Layout result;
++    std::deque<Range> pending{{first, last}};
++    // Breadth-first splitting probes both halves before spending the budget
++    // on a large conflicting native mapping near one end of the interval.
++    while (!pending.empty() && result.attempts < attemptLimit) {
++        const auto [start, end] = pending.front();
++        pending.pop_front();
++        ++result.attempts;
++        if (reserve(start, end - start)) {
++            result.owned.emplace_back(start, end);
++        } else if (end - start == granularity) {
++            result.excluded.emplace_back(start, end);
++        } else {
++            const auto middle = start + ((end - start) / granularity / 2) * granularity;
++            pending.emplace_back(start, middle);
++            pending.emplace_back(middle, end);
++        }
++    }
++    result.excluded.insert(result.excluded.end(), pending.begin(), pending.end());
++    MergeRanges(result.owned);
++    MergeRanges(result.excluded);
++    return result;
++}
++
++}
++
++#endif
+--- a/core/libs/prx/libc/src/GuestArena.cpp
++++ b/core/libs/prx/libc/src/GuestArena.cpp
+@@ -1,4 +1,5 @@
+ #include "prx/libc/include/GuestArena.hpp"
++#include "prx/libc/include/ArenaReservation.hpp"
+ #include "prx/libc/include/WindowsMappings.hpp"
+ #include <algorithm>
+ #include <atomic>
+@@ -46,7 +47,7 @@
+ 
+     bool Contains(const void* pointer, std::size_t bytes) const {
+         const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+-        return _base != 0 && address >= _base && bytes <= _end - _base && address - _base <= (_end - _base) - bytes;
++        return _base != 0 && Reservation::Contains(_reserved, address, bytes);
+     }
+ 
+     void* Allocate(std::size_t bytes, std::size_t alignment) {
+@@ -67,11 +68,13 @@
+             candidate = std::max(candidate, alignUp(end, alignment));
+         }
+         if (candidate > _end || bytes > _end - candidate) throw std::runtime_error("guest address space arena exhausted");
++        if (bytes == 0 || !Contains(reinterpret_cast<void*>(candidate), bytes)) throw std::runtime_error("guest allocation does not have verified arena backing");
+         _used.emplace(candidate, candidate + bytes);
+         return reinterpret_cast<void*>(candidate);
+     }
+ 
+     void MarkUsed(const void* pointer, std::size_t bytes) {
++        if (bytes == 0 || !Contains(pointer, bytes)) throw std::invalid_argument("fixed guest mapping is outside reserved guest memory");
+         std::lock_guard lock(_lock);
+         const auto start = reinterpret_cast<std::uintptr_t>(pointer);
+         const auto next = _used.lower_bound(start);
+@@ -84,6 +87,7 @@
+     }
+ 
+     void Release(const void* pointer, std::size_t bytes) {
++        if (bytes == 0 || !Contains(pointer, bytes)) throw std::invalid_argument("released guest range is outside reserved guest memory");
+         std::lock_guard lock(_lock);
+         const auto start = reinterpret_cast<std::uintptr_t>(pointer);
+         const auto end = start + bytes;
+@@ -113,25 +117,45 @@
+         GetSystemInfo(&system);
+         const std::uintptr_t granularity = system.dwAllocationGranularity;
+         const std::uintptr_t end = ApplicationAreaEnd;
+-        std::uint32_t retries = 0;
++        constexpr std::size_t ReservationAttemptLimit = 4096;
++        std::size_t excludedFreeBytes = 0;
+         for (std::uintptr_t cursor = ArenaStart; cursor < end;) {
+             MEMORY_BASIC_INFORMATION info{};
+             if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "query the guest arena range");
+             const auto regionEnd = std::min(end, reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize);
++            if (regionEnd <= cursor) throw std::runtime_error("guest arena query did not advance");
+             const auto first = info.State == MEM_FREE ? std::min(regionEnd, alignUp(cursor, granularity)) : regionEnd;
+             const auto last = std::max(first, regionEnd & ~(granularity - 1));
+-            if (first < last && WindowsMappings::Get().Reserve(reinterpret_cast<void*>(first), last - first) == nullptr) {
+-                const auto error = GetLastError();
+-                if (error == ERROR_INVALID_ADDRESS && ++retries < 64u) continue;
+-                throw std::system_error(static_cast<int>(error), std::system_category(), "reserve the guest arena range");
++            if (first < last) {
++                auto layout = Reservation::Segmented(first, last, granularity, ReservationAttemptLimit,
++                    [](std::uintptr_t start, std::size_t bytes) {
++                        const auto address = reinterpret_cast<void*>(start);
++                        const auto reserved = WindowsMappings::Get().Reserve(address, bytes);
++                        if (reserved == address) return true;
++                        if (reserved != nullptr) {
++                            VirtualFree(reserved, 0, MEM_RELEASE);
++                            throw std::runtime_error("guest placeholder reservation returned a different address");
++                        }
++                        const auto error = GetLastError();
++                        if (error == ERROR_INVALID_ADDRESS) return false;
++                        throw std::system_error(static_cast<int>(error), std::system_category(), "reserve the guest arena range");
++                    });
++                _reserved.insert(_reserved.end(), layout.owned.begin(), layout.owned.end());
++                for (const auto& [start, stop] : layout.excluded) excludedFreeBytes += stop - start;
++                _holes.insert(_holes.end(), layout.excluded.begin(), layout.excluded.end());
+             }
+-            retries = 0;
+             if (cursor < first) _holes.emplace_back(cursor, first);
+             if (last < regionEnd) _holes.emplace_back(last, regionEnd);
+             cursor = regionEnd;
+         }
++        Reservation::MergeRanges(_reserved);
++        if (_reserved.empty()) throw std::runtime_error("no verified guest placeholder reservation is available");
++        Reservation::MergeRanges(_holes);
++        if (excludedFreeBytes != 0)
++            std::fprintf(stderr, "[memory] segmented guest arena excludes 0x%llx bytes of conflicting or unverified address space\n", static_cast<unsigned long long>(excludedFreeBytes));
+         _hostRegions = _holes;
+         _holes.emplace_back(SystemReservedStart, SystemReservedEnd);
++        Reservation::MergeRanges(_holes);
+         for (const auto& [holeStart, holeEnd] : _holes) _used.emplace(holeStart, holeEnd);
+         _base = ArenaStart;
+         _end = end;
+@@ -142,6 +166,7 @@
+     std::map<std::uintptr_t, std::uintptr_t> _used;
+     std::vector<std::pair<std::uintptr_t, std::uintptr_t>> _holes;
+     std::vector<std::pair<std::uintptr_t, std::uintptr_t>> _hostRegions;
++    std::vector<Reservation::Range> _reserved;
+     std::uintptr_t _base = 0;
+     std::uintptr_t _end = 0;
+     bool _writeWatched = false;
+--- /dev/null
++++ b/core/libs/tests/ArenaReservation.cpp
+@@ -0,0 +1,90 @@
++#include "prx/libc/include/ArenaReservation.hpp"
++#include <iostream>
++#include <limits>
++#include <stdexcept>
++#include <vector>
++
++namespace {
++using namespace GuestArena::Reservation;
++constexpr std::uintptr_t Base = 0x200000000ull;
++constexpr std::size_t Granule = 0x10000;
++int checks = 0;
++
++void Require(bool value) {
++    ++checks;
++    if (!value) throw std::runtime_error("arena reservation regression");
++}
++
++void ValidateCoverage(const Layout& layout, std::uintptr_t first, std::uintptr_t last) {
++    auto all = layout.owned;
++    all.insert(all.end(), layout.excluded.begin(), layout.excluded.end());
++    std::sort(all.begin(), all.end());
++    auto next = first;
++    for (const auto& [start, end] : all) {
++        Require(start == next && end > start);
++        next = end;
++    }
++    Require(next == last);
++}
++
++Layout ConflictAt(std::size_t granules, std::vector<Range> conflicts, std::size_t budget = 4096) {
++    return Segmented(Base, Base + granules * Granule, Granule, budget,
++        [&](std::uintptr_t start, std::size_t bytes) {
++            return std::none_of(conflicts.begin(), conflicts.end(), [&](const auto& conflict) {
++                return conflict.first < start + bytes && start < conflict.second;
++            });
++        });
++}
++}
++
++int main() try {
++    auto free = ConflictAt(128, {});
++    Require(free.attempts == 1 && free.owned.size() == 1 && free.excluded.empty());
++    ValidateCoverage(free, Base, Base + 128 * Granule);
++
++    // This host interval is deliberately not visible to the hypothetical query.
++    auto hidden = ConflictAt(128, {{Base + 63 * Granule, Base + 64 * Granule}});
++    Require(hidden.owned.size() == 2 && hidden.excluded.size() == 1);
++    Require(hidden.excluded.front() == Range{Base + 63 * Granule, Base + 64 * Granule});
++    Require(Contains(hidden.owned, Base, 63 * Granule));
++    Require(!Contains(hidden.owned, Base + 63 * Granule, Granule));
++    Require(!Contains(hidden.owned, Base + 62 * Granule, 3 * Granule));
++    ValidateCoverage(hidden, Base, Base + 128 * Granule);
++
++    auto odd = ConflictAt(5, {{Base + 2 * Granule, Base + 3 * Granule}});
++    Require(odd.excluded.size() == 1 && odd.owned.size() == 2);
++    ValidateCoverage(odd, Base, Base + 5 * Granule);
++
++    auto none = ConflictAt(1024, {{Base, Base + 1024 * Granule}}, 9);
++    Require(none.attempts == 9 && none.owned.empty());
++    Require(none.excluded == std::vector<Range>{{Base, Base + 1024 * Granule}});
++    ValidateCoverage(none, Base, Base + 1024 * Granule);
++
++    // The unverified remainder is excluded when the budget ends; an accepted
++    // opposite half remains usable instead of being mislabeled as unowned.
++    auto bounded = ConflictAt(1024, {{Base, Base + 512 * Granule}}, 9);
++    Require(bounded.attempts == 9 && bounded.owned.size() == 1);
++    Require(bounded.owned.front() == Range{Base + 512 * Granule, Base + 1024 * Granule});
++    Require(!Contains(bounded.owned, Base, Granule));
++    Require(Contains(bounded.owned, Base + 512 * Granule, 512 * Granule));
++    ValidateCoverage(bounded, Base, Base + 1024 * Granule);
++
++    bool fatal = false;
++    try {
++        Segmented(Base, Base + Granule, Granule, 3,
++            [](std::uintptr_t, std::size_t) -> bool { throw std::runtime_error("unsupported API"); });
++    } catch (const std::runtime_error& error) { fatal = std::string(error.what()) == "unsupported API"; }
++    Require(fatal);
++    Require(!Contains(free.owned, std::numeric_limits<std::uintptr_t>::max() - 7, 16));
++    Require(!Contains(free.owned, Base + 128 * Granule, 0));
++
++    bool invalid = false;
++    try { Segmented(Base + 1, Base + Granule, Granule, 3, [](auto, auto) { return true; }); }
++    catch (const std::invalid_argument&) { invalid = true; }
++    Require(invalid);
++    std::cout << checks << " arena reservation checks passed\n";
++    return 0;
++} catch (const std::exception& error) {
++    std::cerr << error.what() << '\n';
++    return 1;
++}
+--- /dev/null
++++ b/core/libs/tests/WindowsSegmentedMappings.cpp
+@@ -0,0 +1,85 @@
++#include "prx/libc/include/WindowsMappings.hpp"
++#include <cstdint>
++#include <cstdio>
++#include <stdexcept>
++#include <system_error>
++
++namespace {
++int checks = 0;
++void Require(bool value, const char* message) {
++    ++checks;
++    if (!value) throw std::runtime_error(message);
++}
++
++MEMORY_BASIC_INFORMATION Query(const void* address) {
++    MEMORY_BASIC_INFORMATION info{};
++    if (VirtualQuery(address, &info, sizeof(info)) != sizeof(info))
++        throw std::system_error(GetLastError(), std::system_category(), "test query");
++    return info;
++}
++}
++
++int main() try {
++    constexpr std::size_t ReservationBytes = 0x10000;
++    constexpr std::size_t PageBytes = 0x4000;
++    auto& mappings = GuestArena::WindowsMappings::Get();
++    SYSTEM_INFO system{};
++    GetSystemInfo(&system);
++    Require(system.dwAllocationGranularity == ReservationBytes, "test requires 64KiB allocation granularity");
++
++    // Find a truly reservable run through the allocation API, then acquire its
++    // two halves separately. Every owned range below is an exact API success.
++    auto* base = static_cast<unsigned char*>(mappings.Reserve(nullptr, 2 * ReservationBytes));
++    Require(base != nullptr, "find contiguous placeholder run");
++    Require(VirtualFree(base, 0, MEM_RELEASE) != FALSE, "release initial locator reservation");
++    Require(mappings.Reserve(base, ReservationBytes) == base, "reserve first exact segment");
++    Require(mappings.Reserve(base + ReservationBytes, ReservationBytes) == base + ReservationBytes,
++            "reserve adjacent exact segment");
++    Require(Query(base).AllocationBase != Query(base + ReservationBytes).AllocationBase,
++            "test needs two original reservations");
++
++    auto* crossing = base + ReservationBytes - PageBytes;
++    const auto created = mappings.Commit(crossing, 2 * PageBytes, PAGE_READWRITE, 2 * PageBytes, true);
++    Require(created.size() == 1 && created.front().first == reinterpret_cast<std::uintptr_t>(crossing) &&
++            created.front().second == 2 * PageBytes, "private commit crosses the segment boundary");
++    crossing[0] = 0x39;
++    crossing[2 * PageBytes - 1] = 0x6a;
++    Require(crossing[0] == 0x39 && crossing[2 * PageBytes - 1] == 0x6a, "private memory is writable");
++    Require(Query(base).State == MEM_RESERVE && Query(crossing + 2 * PageBytes).State == MEM_RESERVE,
++            "neighbor placeholders survive private replacement");
++    mappings.Reset(crossing, 2 * PageBytes);
++    Require(Query(crossing).State == MEM_RESERVE && Query(crossing).RegionSize == 2 * PageBytes,
++            "private reset restores coalesced placeholder");
++
++    // Production PhysicalBacking creates an executable-capable section. Map
++    // first acquires a view with that maximum access, then narrows each guest
++    // page to the requested read/write protection.
++    HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE, 0, ReservationBytes, nullptr);
++    Require(section != nullptr, "create shared backing section");
++    mappings.Map(crossing, 2 * PageBytes, section, 0, PAGE_READWRITE);
++    crossing[0] = 0x17;
++    crossing[PageBytes + 7] = 0x48;
++    auto* alias = static_cast<unsigned char*>(mappings.MapAlias(reinterpret_cast<std::uintptr_t>(crossing), 2 * PageBytes));
++    Require(alias != nullptr && alias[0] == 0x17 && alias[PageBytes + 7] == 0x48,
++            "two 16KiB shared pages are visible through their contiguous alias");
++    alias[PageBytes - 1] = 0x55;
++    alias[2 * PageBytes - 1] = 0x77;
++    Require(crossing[PageBytes - 1] == 0x55 && crossing[2 * PageBytes - 1] == 0x77,
++            "alias writes reach both guest pages");
++    mappings.UnmapAlias(alias);
++    mappings.Reset(crossing, 2 * PageBytes);
++    Require(Query(crossing).State == MEM_RESERVE && Query(crossing).RegionSize == 2 * PageBytes,
++            "shared reset unmaps both pages and coalesces their placeholders");
++    Require(CloseHandle(section) != FALSE, "close original shared backing handle");
++
++    mappings.Reset(base, 2 * ReservationBytes);
++    Require(Query(base).State == MEM_RESERVE && Query(base).RegionSize == 2 * ReservationBytes,
++            "whole run coalesces across both initial reservations");
++    Require(VirtualFree(base, 0, MEM_RELEASE) != FALSE, "release only the owned test run");
++    Require(Query(base).State == MEM_FREE, "test run leaves no reservation behind");
++    std::printf("%d Windows segmented mapping checks passed\n", checks);
++    return 0;
++} catch (const std::exception& error) {
++    std::fprintf(stderr, "Windows segmented mapping test failed: %s\n", error.what());
++    return 1;
++}
+--- a/core/libs/CMakeLists.txt
++++ b/core/libs/CMakeLists.txt
+@@ -131,6 +131,24 @@
+ add_custom_target(libs DEPENDS ${PATCHED_OUTPUTS})
+ 
+ if(BUILD_TESTING)
++    add_test_executable(arena_reservation_tests tests/ArenaReservation.cpp)
++    target_include_directories(arena_reservation_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
++    configure_windows_unwind(arena_reservation_tests)
++    if(MINGW)
++        target_compile_options(arena_reservation_tests PRIVATE -fasynchronous-unwind-tables)
++        target_link_options(arena_reservation_tests PRIVATE -static -static-libgcc -static-libstdc++)
++    endif()
++    add_test(NAME arena_reservation COMMAND arena_reservation_tests)
++    if(WIN32)
++        add_test_executable(windows_segmented_mappings_tests tests/WindowsSegmentedMappings.cpp)
++        target_include_directories(windows_segmented_mappings_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
++        configure_windows_unwind(windows_segmented_mappings_tests)
++        if(MINGW)
++            target_compile_options(windows_segmented_mappings_tests PRIVATE -fasynchronous-unwind-tables)
++            target_link_options(windows_segmented_mappings_tests PRIVATE -static -static-libgcc -static-libstdc++)
++        endif()
++        add_test(NAME windows_segmented_mappings COMMAND windows_segmented_mappings_tests)
++    endif()
+     add_test_executable(patched_libraries_tests tests/PatchedLibraries.cpp)
+     add_dependencies(patched_libraries_tests libs)
+     if(MINGW)
+--- a/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp
++++ b/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp
+@@ -645,12 +645,32 @@
+     return mutation.Overlaps(addr, len) && !Reserved(addr, len);
+ }
+ 
++void ValidateFixedArenaOwnership(void* address, size_t length, int flags) {
++#ifdef _WIN32
++    if (address == nullptr || (flags & GuestMapFixedFlag) == 0) return;
++    const auto start = reinterpret_cast<std::uintptr_t>(address);
++    if (length > std::numeric_limits<std::uintptr_t>::max() - start)
++        throw std::invalid_argument("fixed guest mapping range overflow");
++    std::uintptr_t arenaBase = 0;
++    std::size_t arenaBytes = 0;
++    GuestArena::GuestArenaRange_nid_postfix(&arenaBase, &arenaBytes);
++    if (arenaBytes != 0 && start < arenaBase + arenaBytes && arenaBase < start + length &&
++        !GuestArena::GuestArenaContains_nid_postfix(address, length))
++        throw std::runtime_error("fixed mapping intersects an unreserved guest arena range");
++#else
++    (void)address;
++    (void)length;
++    (void)flags;
++#endif
++}
++
+ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment) {
+     ValidateOutput(addr);
+     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
+     if (physStart < 0 || (static_cast<std::uint64_t>(physStart) & (PS5_PAGE_SIZE - 1)) != 0 || static_cast<std::uint64_t>(physStart) >= DIRECT_MEMORY_SIZE || len > DIRECT_MEMORY_SIZE - static_cast<std::uint64_t>(physStart)) {
+         return SCE_KERNEL_ERROR_EINVAL;
+     }
++    ValidateFixedArenaOwnership(*addr, len, flags);
+     GuestAllocations::Mutation mutation;
+     if (FixedNoOverwriteConflict(mutation, *addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
+     if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags, physStart)) {
+@@ -680,6 +700,7 @@
+ int DoMapAnon(void** addr, size_t len, int prot, int flags) {
+     ValidateOutput(addr);
+     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
++    ValidateFixedArenaOwnership(*addr, len, flags);
+     GuestAllocations::Mutation mutation;
+     if (FixedNoOverwriteConflict(mutation, *addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
+     if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags)) {
+@@ -769,6 +790,7 @@
+ int DoReserveVirtual(void** addr, size_t len, int flags, size_t alignment) {
+     ValidateOutput(addr);
+     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
++    ValidateFixedArenaOwnership(*addr, len, flags);
+     GuestAllocations::Mutation mutation;
+     const bool fixed = *addr != nullptr && (flags & GuestMapFixedFlag) != 0;
+     if (fixed && mutation.Covers(*addr, len)) {
+--- a/core/libs/tests/GuestMemory.cpp
++++ b/core/libs/tests/GuestMemory.cpp
+@@ -1062,7 +1062,60 @@
+ }
+ #endif
+ 
++#ifdef _WIN32
++static void CheckUnreservedArenaFixedMappingRefusal() {
++    constexpr std::size_t page = 0x4000;
++    std::uintptr_t base = 0;
++    std::size_t size = 0;
++    GuestArena::GuestArenaRange_nid_postfix(&base, &size);
++    auto* hole = reinterpret_cast<void*>(base);
++    if (GuestArena::GuestArenaContains_nid_postfix(hole, page)) {
++        std::puts("first arena page is owned; Wine native-hole rejection fixture is absent");
++        return;
++    }
++    const auto rejects = [&](const auto& operation) {
++        bool refused = false;
++        try { operation(); }
++        catch (const std::runtime_error& error) {
++            refused = std::string(error.what()).find("unreserved guest arena") != std::string::npos;
++        }
++        Require(refused);
++    };
++    MEMORY_BASIC_INFORMATION before{}, after{};
++    Require(VirtualQuery(hole, &before, sizeof(before)) == sizeof(before));
++    void* requested = hole;
++    rejects([&] { sceKernelMapFlexibleMemory(&requested, page, 3, 0x10); });
++    Require(requested == hole);
++    rejects([&] { sceKernelReserveVirtualRange(&requested, page, 0x10, 0); });
++    Require(requested == hole);
++    std::int64_t physical = 0;
++    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page, 0, 0, &physical) == 0);
++    rejects([&] { sceKernelMapDirectMemory(&requested, page, 3, 0x10, physical, 0); });
++    Require(requested == hole);
++    Require(sceKernelReleaseDirectMemory(physical, page) == 0);
++    Require(VirtualQuery(hole, &after, sizeof(after)) == sizeof(after));
++    Require(before.BaseAddress == after.BaseAddress && before.AllocationBase == after.AllocationBase &&
++            before.RegionSize == after.RegionSize && before.State == after.State && before.Protect == after.Protect);
++
++    // A rejected fixed request spanning the hole and a live owned allocation
++    // must fail before fixed remapping can change that allocation.
++    void* owned = nullptr;
++    Require(sceKernelMapFlexibleMemory(&owned, page, 3, 0) == 0);
++    auto* bytes = static_cast<volatile unsigned char*>(owned);
++    bytes[0] = 0x42;
++    const auto ownedAddress = reinterpret_cast<std::uintptr_t>(owned);
++    Require(ownedAddress > base && ownedAddress - base < size);
++    requested = hole;
++    rejects([&] { sceKernelReserveVirtualRange(&requested, ownedAddress - base + page, 0x10, 0); });
++    Require(requested == hole && bytes[0] == 0x42);
++    Require(sceKernelMunmap(owned, page) == 0);
++}
++#endif
++
+ int main() {
++#ifdef _WIN32
++    CheckUnreservedArenaFixedMappingRefusal();
++#endif
+     CheckReleaseFlexibleMemory();
+     CheckNamedAndHintedMappings();
+     CheckInternalNamedFlexibleMapping();

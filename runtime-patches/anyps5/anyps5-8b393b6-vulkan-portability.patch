@@ -1,0 +1,53 @@
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+@@ -603,24 +603,32 @@
+     VkInstanceCreateInfo create{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+     create.pApplicationInfo = &application;
+     std::vector<const char*> instanceExtensions;
++    std::uint32_t availableCount = 0;
++    const auto enumerateExtensions = state->InstanceFunction<PFN_vkEnumerateInstanceExtensionProperties>("vkEnumerateInstanceExtensionProperties");
++    check(enumerateExtensions(nullptr, &availableCount, nullptr), "vkEnumerateInstanceExtensionProperties");
++    std::vector<VkExtensionProperties> availableInstanceExtensions(availableCount);
++    check(enumerateExtensions(nullptr, &availableCount, availableInstanceExtensions.data()), "vkEnumerateInstanceExtensionProperties");
+     if (window != nullptr) {
+         APS5_LOG_OUT("Presentation window context=%p extent=%ux%u extensions=%zu", window->context, window->width, window->height, window->extensions.size());
+         require(window->context && window->createSurface && window->getDrawableSize && window->width && window->height, "invalid window descriptor");
+         instanceExtensions.assign(window->extensions.begin(), window->extensions.end());
+-        std::uint32_t availableCount = 0;
+-        const auto enumerateExtensions = state->InstanceFunction<PFN_vkEnumerateInstanceExtensionProperties>("vkEnumerateInstanceExtensionProperties");
+-        check(enumerateExtensions(nullptr, &availableCount, nullptr), "vkEnumerateInstanceExtensionProperties");
+-        std::vector<VkExtensionProperties> available(availableCount);
+-        check(enumerateExtensions(nullptr, &availableCount, available.data()), "vkEnumerateInstanceExtensionProperties");
+         for (const auto* name : instanceExtensions) {
+             require(name != nullptr, "null instance extension");
+-            if (std::none_of(available.begin(), available.end(), [&](const auto& item) { return std::strcmp(item.extensionName, name) == 0; })) {
++            if (std::none_of(availableInstanceExtensions.begin(), availableInstanceExtensions.end(), [&](const auto& item) { return std::strcmp(item.extensionName, name) == 0; })) {
+                 throw std::runtime_error(std::string("Vulkan presentation: required instance extension missing: ") + name);
+             }
+         }
+-        create.enabledExtensionCount = static_cast<std::uint32_t>(instanceExtensions.size());
+-        create.ppEnabledExtensionNames = instanceExtensions.data();
+-    }
++    }
++    // Portability drivers are only enumerated when explicitly requested. This is
++    // standard extension negotiation, not a graphics capability override.
++    if (std::any_of(availableInstanceExtensions.begin(), availableInstanceExtensions.end(), [](const auto& item) { return std::strcmp(item.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0; })) {
++        if (std::none_of(instanceExtensions.begin(), instanceExtensions.end(), [](const auto* name) { return std::strcmp(name, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0; })) {
++            instanceExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
++        }
++        create.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
++    }
++    create.enabledExtensionCount = static_cast<std::uint32_t>(instanceExtensions.size());
++    create.ppEnabledExtensionNames = instanceExtensions.data();
+     check(state->InstanceFunction<PFN_vkCreateInstance>("vkCreateInstance")(&create, nullptr, &state->instance), "vkCreateInstance");
+     APS5_LOG_OUT("Vulkan instance created instance=%p", reinterpret_cast<void*>(state->instance));
+     if (window != nullptr) {
+@@ -784,6 +792,8 @@
+     }
+     std::vector<const char*> deviceExtensions;
+     if (window != nullptr) deviceExtensions.assign(presentationExtensions.begin(), presentationExtensions.end());
++    // VK_KHR_portability_subset is mandatory when advertised by a selected device.
++    if (hasExtension("VK_KHR_portability_subset")) deviceExtensions.push_back("VK_KHR_portability_subset");
+     if (state->fragmentShaderBarycentric) {
+         deviceExtensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+         state->capabilities.push_back(spv::CapabilityFragmentBarycentricKHR);
