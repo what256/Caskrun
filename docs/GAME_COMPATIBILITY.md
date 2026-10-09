@@ -64,6 +64,12 @@ it is not an account's complete owned library. Asking Steam to install a title
 hands its numeric AppID to the saved Windows Steam client in the chosen bottle.
 Steam handles sign-in, ownership and downloads.
 
+The [AnyPS5/Wine investigation](ANYPS5_WINE.md) validates a tiny converted
+program and isolated Vulkan initialization. A public PS5 homebrew game converts
+with the newer converter, but the available Windows runtime fails before game
+entry. This does not establish PS5 game compatibility or add AnyPS5 as a
+selectable Collection engine.
+
 Full account-library sync needs a separate, explicit account integration.
 [Steam OpenID](https://partner.steamgames.com/doc/features/auth#website) verifies
 identity; it does not itself grant access to private game details.
