@@ -1,5 +1,11 @@
 # Game compatibility evidence
 
+The standalone Library and Game reports screens were removed on 9 October
+2026 at the user's request. The source components, reviewed snapshot and
+manifest parsers described below remain; compatibility comparison is not
+exposed in the current navigation. Earlier UI validation retains its dated
+scope.
+
 Caskrun's game library can show a local device summary and direct community
 reports beside a Steam game. **No game in this snapshot is verified in Caskrun.**
 A result from a different launcher, engine, renderer, game version or Mac cannot

@@ -8,10 +8,10 @@ struct AddBrowserGameRequest: Identifiable {
 }
 
 enum DiscoverScope: String, CaseIterable, Identifiable {
-    case stores = "Stores", games = "Game reports", browser = "Browser games"
+    case stores = "Stores", browser = "Browser games"
     var id: Self { self }
     var symbol: String {
-        switch self { case .stores: "square.grid.2x2"; case .games: "gamecontroller"; case .browser: "globe" }
+        switch self { case .stores: "square.grid.2x2"; case .browser: "globe" }
     }
 }
 
@@ -24,26 +24,27 @@ struct DiscoverScopeBar: View {
         HStack(spacing: 3) {
             ForEach(DiscoverScope.allCases) { scope in
                 Button {
-                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { selection = scope }
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) { selection = scope }
                 } label: {
-                    Label(scope.rawValue, systemImage: scope.symbol)
-                        .font(.system(size: 11, weight: selection == scope ? .semibold : .medium))
-                        .padding(.horizontal, 12).frame(height: 29)
+                    Text(scope.rawValue)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(selection == scope ? Color.primary : Color.secondary)
+                        .padding(.horizontal, 10).frame(height: 28)
                         .background {
                             if selection == scope {
-                                Capsule().fill(.primary.opacity(0.10)).matchedGeometryEffect(id: "scope", in: highlight)
+                                Capsule().fill(.primary.opacity(0.09)).matchedGeometryEffect(id: "scope-selection", in: highlight)
                             }
                         }
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(selection == scope ? .primary : .secondary)
+                .accessibilityLabel(scope.rawValue)
                 .accessibilityAddTraits(selection == scope ? .isSelected : [])
             }
         }
-        .padding(4)
-        .background(.regularMaterial, in: Capsule())
-        .overlay { Capsule().strokeBorder(.primary.opacity(0.07), lineWidth: 1) }
+        .fixedSize(horizontal: true, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 24)
         .padding(.top, 5).padding(.bottom, 7)
     }
 }

@@ -523,10 +523,10 @@ private enum CatalogSource {
     }()
 }
 
-enum Page: Hashable { case home, library, discover }
+enum Page: Hashable { case home, discover }
 
 private enum CaskrunMenuCommand {
-    case open, home, library, discover, manageBottles, install
+    case open, home, discover, manageBottles, install
 }
 
 @MainActor
@@ -742,9 +742,6 @@ private struct CaskrunStatusBridge: View {
                 case .discover:
                     pageBinding.wrappedValue = .discover
                     initialPageBinding.wrappedValue = true
-                case .library:
-                    pageBinding.wrappedValue = .library
-                    initialPageBinding.wrappedValue = true
                 case .manageBottles:
                     pageBinding.wrappedValue = .home
                     folderBinding.wrappedValue = model.bottles.first(where: { $0.id == model.selectedBottleID })?.id
@@ -869,7 +866,6 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(item("Home", action: #selector(home)))
-        menu.addItem(item("Library", action: #selector(library)))
         menu.addItem(item("Discover", action: #selector(discover)))
         menu.addItem(item("Manage Bottles…", action: #selector(bottles)))
         menu.addItem(.separator())
@@ -900,7 +896,6 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func open() { handleMenuCommand?(.open) }
     @objc private func home() { handleMenuCommand?(.home) }
-    @objc private func library() { handleMenuCommand?(.library) }
     @objc private func discover() { handleMenuCommand?(.discover) }
     @objc private func bottles() { handleMenuCommand?(.manageBottles) }
     @objc private func installFromFile() { handleMenuCommand?(.install) }
@@ -3079,12 +3074,10 @@ struct CaskrunApp: App {
             topBar
                 .padding(.top, 12)
                 .padding(.bottom, 2)
-            if page == .discover { DiscoverScopeBar(selection: $discoverScope) }
             operationPanel
             Group {
                 switch page {
                 case .home: homeView
-                case .library: gameLibraryView
                 case .discover: discoverView
                 }
             }
@@ -3152,12 +3145,6 @@ struct CaskrunApp: App {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if page == .home, let bottle = openBottle {
                 Task { await model.refreshSteamGames(in: bottle) }
-            }
-            if page == .library { Task { await model.refreshGameLibrary() } }
-        }
-        .task(id: page) {
-            if page == .library {
-                await model.refreshGameLibrary()
             }
         }
     }
@@ -3348,7 +3335,6 @@ struct CaskrunApp: App {
     private var topBar: some View {
         HStack(spacing: 4) {
             navigationButton(.home, title: "Home", symbol: "house", shortcut: "1")
-            navigationButton(.library, title: "Library", symbol: "gamecontroller", shortcut: "4")
             navigationButton(.discover, title: "Discover", symbol: "square.grid.2x2", shortcut: "2")
             Rectangle().fill(.primary.opacity(0.12))
                 .frame(width: 1, height: 18).padding(.horizontal, 5)
@@ -3380,7 +3366,7 @@ struct CaskrunApp: App {
             .onHover { hoveredInstall = $0 }
             .animation(.easeOut(duration: 0.12), value: hoveredInstall)
             if showingSearch {
-                searchField(page == .discover ? "Search Discover" : "Search your library",
+                searchField(page == .discover ? "Search Discover" : "Search apps & bottles",
                             text: page == .discover ? $catalogSearch : $librarySearch,
                             field: page == .discover ? .catalog : .library)
                     .frame(width: 210)
@@ -3741,14 +3727,15 @@ struct CaskrunApp: App {
     }
 
     @ViewBuilder private var discoverView: some View {
-        switch discoverScope {
-        case .stores: storeDiscoverView
-        case .games:
-            CompatibilityBrowseView(query: catalogSearch, device: compatibilityDevice,
-                canInstall: !model.isQuitting && !model.isLaunching && !model.isManagingBottle && model.status.wine_path != nil) { game in
-                    steamInstallRequest = SteamGameInstallRequest(appID: game.steamAppID, name: game.title)
+        VStack(spacing: 0) {
+            DiscoverScopeBar(selection: $discoverScope)
+            Group {
+                switch discoverScope {
+                case .stores: storeDiscoverView
+                case .browser: browserDiscoverView
                 }
-        case .browser: browserDiscoverView
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 

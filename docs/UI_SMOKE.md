@@ -178,3 +178,23 @@ observed process without an error. Reopening started one final Caskrun UI on
 Home. No Windows client or game was launched, no graphics setting changed,
 and the existing bottle records were retained. The temporary replacement
 rollback bundle was removed only after the final app checks passed.
+
+## Simplified Discover navigation — 9 October 2026
+
+At the user's request, the floating navigation and status menu no longer
+offer Library. Discover's second floating capsule is replaced by a compact,
+left-aligned content filter row for Stores and Browser games. The Game
+reports scope has also been removed. Home retains bottle folders, saved apps,
+installed Steam games and saved browser links. Core manifest readers and the
+reviewed evidence snapshot remain; the aggregate Epic/GOG inventory and
+compatibility comparison are not exposed in the current UI.
+
+The full ARM64 app compiled and its signed development package passed
+signature, architecture, DMG and checksum checks. The packaged core SHA-256
+and engine component receipt are unchanged from the preceding verified build.
+The older UI completed native menu Quit before replacement. The new app
+showed only Home and Discover, all eight store entries and five browser
+entries; switching both content filters passed the on-screen check. No
+Windows app, browser game, installation or bottle mutation was started.
+The local DMG was updated, the known temporary rollback was removed after
+zero-owner checks, and Caskrun was left open on Discover.

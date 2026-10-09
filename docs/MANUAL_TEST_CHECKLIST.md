@@ -72,14 +72,12 @@ Developer ID signing/notarization, a separate-Mac clean-install check and the
 public binary licence/distribution review are release gates.
 
 
-## Library, browser games and optional DXMT controls
+## Discover, browser games and optional DXMT controls
 
-- Open Library (Command-4). Refresh, change store filters, search and inspect a
-  title. Confirm the installed games belong to their original bottle; Epic/GOG
-  open their saved store client rather than guessing a game executable.
-- In Discover > Game reports, compare a title with your chip. Confirm source,
-  engine, renderer and date remain visible, and that missing evidence never
-  becomes a claim that Caskrun supports or cannot run the game.
+- Switch between Stores and Browser games using Discover's compact content
+  filter row. Confirm Home and Discover are the only main navigation entries.
+- Open a bottle on Home, search its apps and installed Steam games, and confirm
+  a game opens through that bottle's saved Steam client.
 - Request a Steam game install in an existing Steam bottle, then in a new one.
   Steam must handle ownership, sign-in, agreements and download confirmation.
 - Add a browser game from Discover or a public HTTPS link. Confirm Home opens
