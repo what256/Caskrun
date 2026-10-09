@@ -521,7 +521,7 @@ actor BrowserGameCoverStore {
     }
 }
 
-/// Landscape pictures for Discover, separate from the compact Home shortcut.
+/// Landscape pictures for Discover, separate from the compact Collection shortcut.
 struct BrowserGameCover: View {
     let entry: BrowserGameCatalogEntry
     var compact = false
@@ -563,7 +563,7 @@ struct BrowserGameCover: View {
     }
 }
 
-private struct BrowserGameHomeArtwork: View {
+private struct BrowserGameCollectionArtwork: View {
     let game: BrowserGame
 
     var body: some View {
@@ -645,7 +645,7 @@ struct AddBrowserGameSheet: View {
                 BrowserGameArtwork(seed: link, size: 42)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Add a browser game").font(.title2.weight(.semibold))
-                    Text("A shortcut on Home. Play in your usual browser.")
+                    Text("A shortcut in Collection. Play in your usual browser.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -675,7 +675,7 @@ struct AddBrowserGameSheet: View {
                     }
                 } label: {
                     if saving { ProgressView().controlSize(.small).frame(width: 92) }
-                    else { Text("Add to Home") }
+                    else { Text("Add to Collection") }
                 }
                 .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
                 .disabled(saving || !validName || BrowserGameLink.validatedURL(link) == nil)
@@ -724,7 +724,7 @@ struct BrowserGameTile: View {
             if opensOnSingleClick ? clicks < 2 : clicks >= 2 { onOpen() }
         } label: {
             VStack(spacing: 8) {
-                BrowserGameHomeArtwork(game: game)
+                BrowserGameCollectionArtwork(game: game)
                 Text(game.name).font(.system(size: 13, weight: .semibold)).lineLimit(2)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(isSelected || hovered ? Color.accentColor : Color.primary)
@@ -740,9 +740,9 @@ struct BrowserGameTile: View {
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .contextMenu {
             Button("Play in browser", action: onOpen)
-            if onRemove != nil { Button("Remove from Home", role: .destructive) { confirmRemove = true } }
+            if onRemove != nil { Button("Remove from Collection", role: .destructive) { confirmRemove = true } }
         }
-        .confirmationDialog("Remove \(game.name) from Home?", isPresented: $confirmRemove, titleVisibility: .visible) {
+        .confirmationDialog("Remove \(game.name) from Collection?", isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Remove shortcut", role: .destructive) { onRemove?() }
             Button("Cancel", role: .cancel) {}
         } message: { Text("This removes the saved link. Your browser's game data stays in your browser.") }
@@ -883,7 +883,7 @@ struct LibraryClickSequence {
 }
 
 @MainActor
-private final class LibraryClickRouter: ObservableObject {
+final class LibraryClickRouter: ObservableObject {
     private var monitor: Any?
     private weak var firstWindow: NSWindow?
     private var sequence = LibraryClickSequence()
@@ -919,7 +919,14 @@ private final class LibraryClickRouter: ObservableObject {
         launch = nil
     }
 
-    private func route(_ event: NSEvent) -> NSEvent? {
+    func route(_ event: NSEvent) -> NSEvent? {
+        // clickCount and locationInWindow are mouse-event properties. Reading
+        // clickCount on a scroll or key event raises an AppKit exception before
+        // the sequence can pass that event through to its original control.
+        guard event.type == .leftMouseDown || event.type == .leftMouseUp else {
+            cancel()
+            return event
+        }
         if event.type == .leftMouseDown, event.window !== firstWindow { cancel() }
         let outcome = sequence.route(type: event.type, windowNumber: event.windowNumber,
                                      point: event.locationInWindow, timestamp: event.timestamp,
@@ -1097,7 +1104,7 @@ struct GameLibraryView: View {
                     }
                     Text("Browser requirements and game data are handled by the website. Windows graphics settings do not apply.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Button("Remove from Home", role: .destructive) { confirmRemove = true }
+                    Button("Remove from Collection", role: .destructive) { confirmRemove = true }
                         .font(.caption).buttonStyle(.borderless)
                 } else if item.source == .apps {
                     Label("Saved Windows shortcut", systemImage: "app").font(.caption.weight(.medium))

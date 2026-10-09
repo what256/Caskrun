@@ -12,7 +12,7 @@ The shared original MIT renderer samples a bounded 128-pixel image and checks al
 - Sparse, low-variation monochrome or extremely light/dark marks receive a restrained contrasting plate with a small contribution from their original colour.
 - Strong multicolour and ambiguous silhouettes remain standalone artwork. Classification is deliberately conservative.
 
-Home, Discover and Steam game tiles display this composition directly without extra Steam-specific backgrounds, padding or clipping. Discover and game image conversion run outside the UI thread. Home can prepare an image-only cache before an app’s first launch; it creates neither a native app bundle nor a Windows process during listing. The same policy creates PNG/ICNS artwork for native Dock identities.
+Collection, Discover and Steam game tiles display this composition directly without extra Steam-specific backgrounds, padding or clipping. Discover and game image conversion run outside the UI thread. Collection can prepare an image-only cache before an app’s first launch; it creates neither a native app bundle nor a Windows process during listing. The same policy creates PNG/ICNS artwork for native Dock identities.
 
 ## Cache and engine boundaries
 
@@ -24,6 +24,12 @@ Image cache keys include the exact publisher ICO and renderer bytes. Stable sour
 
 The real offscreen CLI passed 23 original synthetic-image cases: finished tile, circles, black/white/yellow marks, multicolour silhouettes, excess padding, crop orientation, opaque square, ICO/PNG, all native/Retina representations, malformed/empty/oversized inputs, FIFO, symbolic links, writable destinations and existing-output preservation. The slowest measured successful conversion was 0.365 seconds against the existing 1.1-second deadline; this is a sample on the development Mac, not a universal performance guarantee. Fixtures were removed after zero-owner checks.
 
-Run `python3 scripts/test-native-icon-renderer.py` on macOS. Rust tests separately cover cache publication/invalidation/tampering, manual host EXE artwork, helper selection, fallback retry, concurrent requests and timeout cleanup. The native UI typecheck, signed app and development DMG build/verification passed. `scripts/test-packaged-artwork.py --app <owned-build/Caskrun.app>` also passed with an original MinGW PE icon: the packaged core selected its adaptive helper, produced Home artwork before launch, reused it for app/bottle requests and created no launch alias. Both owned fixture attempts were cleaned after zero-owner checks. The included runtime matched the existing native package byte for byte. These checks do not open vendor apps or validate their GUI.
+Run `python3 scripts/test-native-icon-renderer.py` on macOS. Rust tests separately cover cache publication/invalidation/tampering, manual host EXE artwork, helper selection, fallback retry, concurrent requests and timeout cleanup. The native UI typecheck, signed app and development DMG build/verification passed. `scripts/test-packaged-artwork.py --app <owned-build/Caskrun.app>` also passed with an original MinGW PE icon: the packaged core selected its adaptive helper, produced Collection artwork before launch, reused it for app/bottle requests and created no launch alias. Both owned fixture attempts were cleaned after zero-owner checks. The included runtime matched the existing native package byte for byte. These checks do not open vendor apps or validate their GUI.
 
 This does not recover missing pixels, invent a vendor logo, or establish every publisher app’s Dock rendering/focus. Small source icons remain limited by their original detail. Actual vendor, manual app and child-game acceptance remains in [launcher validation](LAUNCHER_VALIDATION.md).
+
+The Collection update also fixes macOS local-artwork descriptors: the stronger
+`O_NOFOLLOW_ANY` is used alone, since combining it with `O_NOFOLLOW` is rejected
+on macOS. Twenty-two original read/compositing checks cover regular input,
+bounds, leaf/ancestor links, nonblocking FIFO refusal and PNG output. No Windows
+process is started by these checks.

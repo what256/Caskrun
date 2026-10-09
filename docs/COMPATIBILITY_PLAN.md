@@ -6,7 +6,7 @@ The user-directed static reference review covered packaged setup orchestration, 
 
 ## Keep the ordinary flow simple
 
-Discover → Install → publisher sign-in → install a game → Play remains the intended flow. Caskrun chooses its included engine and supported defaults. The Home bottle sidebar retains optional display, graphics, controller, diagnostic and maintenance controls. No global Settings page or Wine picker is needed for ordinary installation.
+Discover → Install → publisher sign-in → install a game → Play remains the intended flow. Caskrun chooses its included engine and supported defaults. The Collection Windows details panel retains optional display, graphics, controller, diagnostic and maintenance controls. No global Settings page or Wine picker is needed for ordinary installation.
 
 The public CrossOver guide describes choosing a bottle and dependencies for listed apps and publishing launch icons afterward. This is a useful workflow requirement for our own setup engine. Publisher agreements still require the user's decision. ([Mac user guide](https://support.codeweavers.com/en_US/crossover-mac-user-guide), [Steam setup](https://support.codeweavers.com/en_US/installing-steam-in-crossover))
 

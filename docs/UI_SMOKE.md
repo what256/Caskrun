@@ -283,3 +283,75 @@ Owned test probes, generated rollback apps and superseded candidate packages
 were removed after ownership and identity checks. No game artwork was retained
 on disk. Builds still referenced by real bottles were preserved. The expanded
 PS5 document is a future integration plan; no emulator was installed or run.
+
+## Collection navigation and optional PS5 imports — 9 October 2026
+
+Home is replaced by Collection. The grid projects saved Windows apps, bounded
+Steam/Epic/GOG manifest discoveries, browser bookmarks and explicit PS5 imports
+into one surface. One menu filters platform and Games/Apps. Bottle management
+remains available through the inspector, + menu and Command-3, including empty
+or fully hidden bottles. The standalone Library/Game reports screens stay absent.
+
+The first signed ARM64 candidate displayed the existing Steam app directly,
+opened its full Windows details without entering a folder, and closed details
+back to the same grid. Platform/type filters and all existing + import choices
+were visible. Discover retained its eight stores and 26 reviewed browser links
+with Add to Collection labels. No Windows app or game was launched.
+
+An original non-running ELF fixture imported from an Apps filter and selected
+its PS5 inspector with Open disabled because no engine was selected. Local
+artwork appeared and bookmark-only removal preserved the original inputs. That
+file import waited unusually long in an optional artwork open syscall. The
+updated importer therefore performs no optional image IO: file imports do not
+inspect siblings, and folder pictures load asynchronously with at most two
+readers. Selecting an engine now selects its complete folder or app.
+
+The oversized app-card treatment was rejected during the first visual check.
+Apps now use a 48px original icon and a centred name, with selection confined to
+a subtle name highlight; the duplicate subtitle and large outline/background
+are removed. Game entries retain landscape picture cards. The filter menu has
+no filled wrapper, and the details header preserves the complete local icon.
+
+Focused checks passed: 32 Collection model/interaction checks, 22 local artwork
+checks, 55 original PS5 metadata/process/artwork checks, and the 89 existing
+browser/click checks. Full app ARM64/macOS 14 typecheck passed. PS5 fixtures use
+only original compiled executables and dummy game headers; no emulator or real
+game is executed. Gameplay, engine window/Dock identity, controllers and saves
+remain for user testing.
+
+The final signed package displayed the compact Steam icon/name entry and its
+unclipped details icon. Details closed back to the unchanged grid. A selected
+original folder fixture imported and opened its PS5 inspector in the first
+post-click observation (about 0.8 seconds), with optional artwork independent
+of import. The complete-engine folder picker opened and Cancel preserved the
+unselected engine state. Open stayed disabled; removal cleared the inspector
+and kept the original files. The temporary references and their inputs were
+then removed after zero-owner checks, restoring the original absence of PS5
+metadata. Caskrun was left open on Collection.
+
+The final package passed deep/strict signature, ARM64 app/core, catalogue, DMG
+and checksum checks. Its core hash and engine receipt/component bytes remain
+unchanged. Superseded generated apps and packages were removed only after
+identity and zero-owner checks; runtimes referenced by real bottles were kept.
+No account, Windows app, browser game, PS5 engine or real game was opened in
+these packaged UI checks.
+
+The expanded Windows sidebar initially ignored wheel input even though its
+native accessibility Scroll Down action moved the viewport. The shared
+double-click monitor read `NSEvent.clickCount` on wheel and key events before
+its pure sequence classifier could pass them through. AppKit rejects that
+property on non-mouse events, as documented in
+[Apple's clickCount reference](https://developer.apple.com/documentation/appkit/nsevent/clickcount).
+The router now returns those original events before reading mouse properties.
+Six real AppKit event regression checks passed without posting events or opening
+windows. In the final signed app, wheel input moved the sidebar scrollbar from
+0 to 1 and exposed Windows Tools, Files & Maintenance, Manage Bottle and the
+bottom import controls. The user also confirmed scrolling works.
+
+Inspectors now have a finite viewport, independent scroll content and
+noninteractive decorative borders. A separate restart check exposed a host
+icon mapping that made the core's whole-bottle ownership check refuse Quit.
+Launcher and bottle icons now load bounded in-memory bytes instead of retaining
+an AppKit file mapping. After that fix, the displayed Steam icon held no bottle
+files and native Quit Caskrun completed normally. Core ownership checks and
+engine bytes were preserved. The final app remains open for user testing.

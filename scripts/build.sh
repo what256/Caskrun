@@ -92,7 +92,7 @@ for SIZE in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$STAGED_APP/Contents/Resources/CaskrunIcon.icns"
 swiftc -O -target arm64-apple-macos13.0 -parse-as-library "$PROJECT_ROOT/runtime-patches/native_icon.swift" -o "$STAGED_APP/Contents/MacOS/caskrun-native-icon"
-swiftc -O -target arm64-apple-macos14.0 -parse-as-library -D CASKRUN_ICON_LIBRARY "$PROJECT_ROOT/app/CaskrunApp.swift" "$PROJECT_ROOT/app/LaunchArguments.swift" "$PROJECT_ROOT/app/BottleMaintenanceViews.swift" "$PROJECT_ROOT/app/GameLibraryViews.swift" "$PROJECT_ROOT/app/GameCompatibility.swift" "$PROJECT_ROOT/app/CompatibilityBrowseViews.swift" "$PROJECT_ROOT/app/DXMTOptionsView.swift" "$PROJECT_ROOT/app/SteamGameLink.swift" "$PROJECT_ROOT/runtime-patches/native_icon.swift" -o "$STAGED_APP/Contents/MacOS/Caskrun"
+swiftc -O -target arm64-apple-macos14.0 -parse-as-library -D CASKRUN_ICON_LIBRARY "$PROJECT_ROOT/app/CaskrunApp.swift" "$PROJECT_ROOT/app/LaunchArguments.swift" "$PROJECT_ROOT/app/BottleMaintenanceViews.swift" "$PROJECT_ROOT/app/GameLibraryViews.swift" "$PROJECT_ROOT/app/CollectionViews.swift" "$PROJECT_ROOT/app/LocalArtwork.swift" "$PROJECT_ROOT/app/PS5Collection.swift" "$PROJECT_ROOT/app/PS5CollectionViews.swift" "$PROJECT_ROOT/app/GameCompatibility.swift" "$PROJECT_ROOT/app/CompatibilityBrowseViews.swift" "$PROJECT_ROOT/app/DXMTOptionsView.swift" "$PROJECT_ROOT/app/SteamGameLink.swift" "$PROJECT_ROOT/runtime-patches/native_icon.swift" -o "$STAGED_APP/Contents/MacOS/Caskrun"
 for BINARY in "$STAGED_APP/Contents/MacOS/Caskrun" "$STAGED_APP/Contents/MacOS/caskrun-core" "$STAGED_APP/Contents/MacOS/caskrun-native-icon"; do
   if [[ "$(lipo -archs "$BINARY")" != arm64 ]]; then
     print -u2 "Expected an ARM64-only binary: $BINARY"

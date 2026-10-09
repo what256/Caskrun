@@ -3,103 +3,6 @@ import SwiftUI
 import ImageIO
 import Darwin
 
-// Shared with the offscreen Dock renderer; no window or Windows process is created.
-private enum MacAppArtwork {
-    static func png(_ data: Data, crop: CGRect? = nil, svg: Bool = false) -> Data? {
-        guard !data.isEmpty, data.count <= 16 * 1024 * 1024 else { return nil }
-        let bitmap: CGImage
-        if svg {
-            guard let image = NSImage(data: data), image.isValid,
-                  image.size.width > 0, image.size.height > 0,
-                  image.size.width <= 2048, image.size.height <= 2048,
-                  let decoded = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-                  decoded.width <= 4096, decoded.height <= 4096 else { return nil }
-            if let crop {
-                let sx = CGFloat(decoded.width) / image.size.width
-                let sy = CGFloat(decoded.height) / image.size.height
-                let rect = CGRect(x: crop.minX * sx, y: crop.minY * sy,
-                                  width: crop.width * sx, height: crop.height * sy).integral
-                guard rect.minX >= 0, rect.minY >= 0,
-                      rect.maxX <= CGFloat(decoded.width), rect.maxY <= CGFloat(decoded.height),
-                      let cropped = decoded.cropping(to: rect) else { return nil }
-                bitmap = cropped
-            } else { bitmap = decoded }
-        } else {
-            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-                  CGImageSourceGetCount(source) > 0, CGImageSourceGetCount(source) <= 64 else { return nil }
-            var best = 0, area = 0
-            for index in 0..<CGImageSourceGetCount(source) {
-                guard let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
-                      let width = props[kCGImagePropertyPixelWidth] as? NSNumber,
-                      let height = props[kCGImagePropertyPixelHeight] as? NSNumber,
-                      width.intValue > 0, height.intValue > 0,
-                      width.intValue <= 4096, height.intValue <= 4096 else { return nil }
-                if width.intValue * height.intValue > area {
-                    best = index; area = width.intValue * height.intValue
-                }
-            }
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: 1024,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true
-            ]
-            guard let decoded = CGImageSourceCreateThumbnailAtIndex(source, best, options as CFDictionary) else { return nil }
-            bitmap = decoded
-        }
-        return try? caskrunAdaptiveIconPNG(bitmap, size: 256)
-    }
-
-    static func read(_ path: String, maximum: Int) -> Data? {
-        guard path.hasPrefix("/"), !path.contains("\0"),
-              URL(fileURLWithPath: path).standardizedFileURL.path == path else { return nil }
-        let fd = Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW | 0x2000_0000)
-        guard fd >= 0 else { return nil }
-        defer { Darwin.close(fd) }
-        var before = stat()
-        guard fstat(fd, &before) == 0, (before.st_mode & S_IFMT) == S_IFREG,
-              before.st_size > 0, before.st_size <= maximum else { return nil }
-        var data = Data(count: Int(before.st_size))
-        let readOK = data.withUnsafeMutableBytes { bytes in
-            var offset = 0
-            while offset < bytes.count {
-                let count = Darwin.read(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
-                if count < 0, errno == EINTR { continue }
-                guard count > 0 else { return false }
-                offset += count
-            }
-            return true
-        }
-        var after = stat()
-        guard readOK, fstat(fd, &after) == 0, before.st_size == after.st_size,
-              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
-              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
-              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
-              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else { return nil }
-        return data
-    }
-}
-
-// Decode only visible library artwork, with two bounded readers at a time.
-private actor SteamArtworkReader {
-    static let shared = SteamArtworkReader()
-    private var active = 0
-    private var waiting: [CheckedContinuation<Void, Never>] = []
-    func read(_ path: String) async -> Data? {
-        if active >= 2 { await withCheckedContinuation { waiting.append($0) } }
-        else { active += 1 }
-        defer {
-            if waiting.isEmpty { active -= 1 }
-            else { waiting.removeFirst().resume() }
-        }
-        guard !Task.isCancelled else { return nil }
-        return await Task.detached(priority: .utility) {
-            guard let bytes = MacAppArtwork.read(path, maximum: 8 * 1024 * 1024) else { return nil as Data? }
-            return MacAppArtwork.png(bytes)
-        }.value
-    }
-}
-
 private struct CatalogArtworkSource: Sendable {
     enum Format: Sendable {
         case png, icon, svg
@@ -523,24 +426,24 @@ private enum CatalogSource {
     }()
 }
 
-enum Page: Hashable { case home, discover }
+enum Page: Hashable { case collection, discover }
 
 private enum CaskrunMenuCommand {
-    case open, home, discover, manageBottles, install
+    case open, collection, discover, manageBottles, install
 }
 
 @MainActor
 private final class CaskrunAppDelegate: NSObject, NSApplicationDelegate {
     var handleMenuCommand: ((CaskrunMenuCommand) -> Void)?
-    var shutdownWindowsApps: (() async -> Bool)?
+    var shutdownOwnedApps: (() async -> Bool)?
     private var terminationPending = false
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationPending else { return .terminateLater }
-        guard let shutdownWindowsApps else { return .terminateCancel }
+        guard let shutdownOwnedApps else { return .terminateCancel }
         terminationPending = true
         Task {
-            let complete = await shutdownWindowsApps()
+            let complete = await shutdownOwnedApps()
             terminationPending = false
             sender.reply(toApplicationShouldTerminate: complete)
             if !complete { handleMenuCommand?(.open) }
@@ -648,72 +551,6 @@ private struct CaskrunWindowCapture: NSViewRepresentable {
     func updateNSView(_ nsView: CaskrunWindowCaptureView, context: Context) {}
 }
 
-// Preserve the original double-click target when opening its inspector
-// changes the grid layout. Single selection never waits for this monitor.
-@MainActor
-private final class CaskrunHomeClickRouter {
-    static let shared = CaskrunHomeClickRouter()
-    private var monitor: Any?
-    private weak var firstWindow: NSWindow?
-    private var firstPoint = NSPoint.zero
-    private var firstTimestamp: TimeInterval = 0
-    private var launch: (@MainActor @Sendable () -> Void)?
-    private var consumedWindowNumber: Int?
-
-    private init() {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [
-            .leftMouseDown, .leftMouseUp, .rightMouseDown, .scrollWheel, .keyDown
-        ]) { [weak self] event in
-            guard let self else { return event }
-            return self.route(event)
-        }
-    }
-
-    deinit {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-    }
-
-    func remember(_ event: NSEvent?, launch: @escaping @MainActor @Sendable () -> Void) {
-        cancel()
-        guard let event, event.type == .leftMouseUp, event.clickCount == 1,
-              let window = event.window else { return }
-        firstWindow = window
-        firstPoint = event.locationInWindow
-        firstTimestamp = event.timestamp
-        self.launch = launch
-    }
-
-    func cancel() {
-        firstWindow = nil
-        launch = nil
-    }
-
-    private func route(_ event: NSEvent) -> NSEvent? {
-        if event.type == .leftMouseUp, consumedWindowNumber == event.windowNumber {
-            consumedWindowNumber = nil
-            return nil
-        }
-        guard event.type == .leftMouseDown else {
-            if event.type != .leftMouseUp { cancel() }
-            return event
-        }
-        consumedWindowNumber = nil
-        let elapsed = event.timestamp - firstTimestamp
-        let distance = hypot(event.locationInWindow.x - firstPoint.x,
-                             event.locationInWindow.y - firstPoint.y)
-        guard event.clickCount == 2, let firstWindow, event.window === firstWindow,
-              elapsed >= 0, elapsed <= NSEvent.doubleClickInterval,
-              distance <= 8, let action = launch else {
-            cancel()
-            return event
-        }
-        cancel()
-        consumedWindowNumber = event.windowNumber
-        DispatchQueue.main.async(execute: action)
-        return nil
-    }
-}
-
 private struct CaskrunStatusBridge: View {
     @Environment(\.openWindow) private var openWindow
     @Binding var page: Page
@@ -721,6 +558,9 @@ private struct CaskrunStatusBridge: View {
     @Binding var showingBottleInspector: Bool
     @Binding var openBottleID: String?
     @ObservedObject var model: CaskrunModel
+    @ObservedObject var ps5: PS5CollectionModel
+    @Binding var selectedCollectionID: String?
+    @Binding var inspectingBottleOnly: Bool
     let delegate: CaskrunAppDelegate
 
     var body: some View {
@@ -729,13 +569,17 @@ private struct CaskrunStatusBridge: View {
             let pageBinding = $page
             let initialPageBinding = $didChooseInitialPage
             let inspectorBinding = $showingBottleInspector
+            let selectionBinding = $selectedCollectionID
+            let managementBinding = $inspectingBottleOnly
             let folderBinding = $openBottleID
             let openMainWindow = openWindow
             delegate.handleMenuCommand = { command in
                 switch command {
                 case .open: break
-                case .home, .install:
-                    pageBinding.wrappedValue = .home
+                case .collection, .install:
+                    managementBinding.wrappedValue = false
+                    selectionBinding.wrappedValue = nil
+                    pageBinding.wrappedValue = .collection
                     folderBinding.wrappedValue = nil
                     inspectorBinding.wrappedValue = false
                     initialPageBinding.wrappedValue = true
@@ -743,7 +587,9 @@ private struct CaskrunStatusBridge: View {
                     pageBinding.wrappedValue = .discover
                     initialPageBinding.wrappedValue = true
                 case .manageBottles:
-                    pageBinding.wrappedValue = .home
+                    managementBinding.wrappedValue = true
+                    selectionBinding.wrappedValue = nil
+                    pageBinding.wrappedValue = .collection
                     folderBinding.wrappedValue = model.bottles.first(where: { $0.id == model.selectedBottleID })?.id
                     inspectorBinding.wrappedValue = true
                     initialPageBinding.wrappedValue = true
@@ -757,7 +603,14 @@ private struct CaskrunStatusBridge: View {
                     DispatchQueue.main.async { model.chooseInstaller() }
                 }
             }
-            delegate.shutdownWindowsApps = { await model.shutdownForQuit() }
+            delegate.shutdownOwnedApps = {
+                guard await model.shutdownForQuit() else { return false }
+                guard await ps5.shutdownForQuit() else {
+                    model.resumeAfterQuitFailure(ps5.error ?? "A PS5 session could not be stopped.")
+                    return false
+                }
+                return true
+            }
             CaskrunStatusBarController.shared.configure(model: model) { [weak delegate] command in
                 delegate?.handleMenuCommand?(command)
             }
@@ -834,7 +687,7 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
         menuApps = Array(apps.prefix(menuAppLimit))
         if menuApps.isEmpty {
             let hasHiddenApps = model?.launchers.values.contains(where: { !$0.isEmpty }) == true
-            let placeholder = item(hasHiddenApps ? "Your apps are hidden from Home" : "No apps installed yet",
+            let placeholder = item(hasHiddenApps ? "Your apps are hidden from Collection" : "No apps installed yet",
                                    action: nil)
             placeholder.isEnabled = false
             appsMenu.addItem(placeholder)
@@ -856,7 +709,7 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
             }
             if apps.count > menuAppLimit {
                 appsMenu.addItem(.separator())
-                appsMenu.addItem(item("See all \(apps.count) apps in Home…", action: #selector(home)))
+                appsMenu.addItem(item("See all \(apps.count) apps in Collection…", action: #selector(collection)))
             }
         }
         let appsItem = item("Your Apps", action: nil)
@@ -865,7 +718,7 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(appsItem)
 
         menu.addItem(.separator())
-        menu.addItem(item("Home", action: #selector(home)))
+        menu.addItem(item("Collection", action: #selector(collection)))
         menu.addItem(item("Discover", action: #selector(discover)))
         menu.addItem(item("Manage Bottles…", action: #selector(bottles)))
         menu.addItem(.separator())
@@ -874,9 +727,9 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(installItem)
         menu.addItem(.separator())
         menu.addItem(item("About Caskrun", action: #selector(about)))
-        let quitItem = item(model?.isQuitting == true ? "Closing Windows apps…" : "Quit Caskrun", action: #selector(quit))
+        let quitItem = item(model?.isQuitting == true ? "Closing apps…" : "Quit Caskrun", action: #selector(quit))
         quitItem.isEnabled = model?.isQuitting != true
-        quitItem.toolTip = "Close Caskrun and all Windows apps in its bottles"
+        quitItem.toolTip = "Close Caskrun and its Windows apps and PS5 sessions"
         menu.addItem(quitItem)
     }
 
@@ -895,7 +748,7 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func open() { handleMenuCommand?(.open) }
-    @objc private func home() { handleMenuCommand?(.home) }
+    @objc private func collection() { handleMenuCommand?(.collection) }
     @objc private func discover() { handleMenuCommand?(.discover) }
     @objc private func bottles() { handleMenuCommand?(.manageBottles) }
     @objc private func installFromFile() { handleMenuCommand?(.install) }
@@ -904,7 +757,7 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
         guard menuApps.indices.contains(sender.tag), let model, !cannotLaunch else { return }
         let app = menuApps[sender.tag]
         model.runLauncher(app.launcher, in: app.bottle,
-                          onFailure: { [weak self] in self?.handleMenuCommand?(.home) })
+                          onFailure: { [weak self] in self?.handleMenuCommand?(.collection) })
     }
 
     @objc private func about() {
@@ -1098,7 +951,6 @@ final class CaskrunModel: ObservableObject {
     func shutdownForQuit() async -> Bool {
         guard !isQuitting else { return false }
         isQuitting = true
-        CaskrunHomeClickRouter.shared.cancel()
         activeManualInstaller?.cancel()
         activeCatalogCancellation?.cancel()
         activeMaintenanceCancellation?.cancel()
@@ -1133,6 +985,11 @@ final class CaskrunModel: ObservableObject {
             message = "Caskrun could not finish closing its Windows apps.\n\n" + error.localizedDescription
             return false
         }
+    }
+
+    func resumeAfterQuitFailure(_ detail: String) {
+        isQuitting = false
+        message = "Caskrun could not finish closing its sessions.\n\n" + detail
     }
 
     private func call<T: Decodable>(_ arguments: [String], as type: T.Type) throws -> T {
@@ -1208,7 +1065,10 @@ final class CaskrunModel: ObservableObject {
             guard let current = launchers[bottle.id]?.first(where: { $0.id == launcher.id }),
                   launcherIconStamp(current, in: bottle.id) == stamp else { return }
             guard let result, let path = result.path,
-                  let icon = NSImage(contentsOfFile: path) else {
+                  let data = await Task.detached(priority: .utility, operation: {
+                      MacAppArtwork.read(path, maximum: 8 * 1024 * 1024)
+                  }).value,
+                  let icon = NSImage(data: data) else {
                 launcherIcons.removeValue(forKey: key)
                 launcherIconStamps.removeValue(forKey: key)
                 return
@@ -1233,7 +1093,10 @@ final class CaskrunModel: ObservableObject {
             let result = try? await callAsync(["bottle-icon", bottle.id], as: AppIconResult.self)
             guard bottles.contains(where: { $0.id == bottle.id }), bottleIconStamp(bottle) == stamp else { return }
             guard let result, let path = result.path,
-                  let icon = NSImage(contentsOfFile: path) else {
+                  let data = await Task.detached(priority: .utility, operation: {
+                      MacAppArtwork.read(path, maximum: 8 * 1024 * 1024)
+                  }).value,
+                  let icon = NSImage(data: data) else {
                 bottleIcons.removeValue(forKey: bottle.id)
                 bottleIconStamps.removeValue(forKey: bottle.id)
                 return
@@ -1330,7 +1193,7 @@ final class CaskrunModel: ObservableObject {
             do {
                 _ = try await callAsync(["delete", bottle.id], as: Bottle.self)
                 refresh()
-                message = "Moved \(bottle.name) to Recently Deleted. Restore it from Manage bottles on Home."
+                message = "Moved \(bottle.name) to Recently Deleted. Restore it from Manage bottles on Collection."
             } catch { message = error.localizedDescription }
         }
     }
@@ -2201,9 +2064,9 @@ final class CaskrunModel: ObservableObject {
                                                      as: WaitLaunchResult.self, cancellation: cancellation)
                     canCancelManualInstaller = false
                     if cancellation.isCancelRequested {
-                        message = "The installer finished before Caskrun could cancel it. Select its bottle on Home to inspect it."
+                        message = "The installer finished before Caskrun could cancel it. Open Manage bottles to inspect its bottle."
                     } else if result.timed_out {
-                        message = "The installer did not finish within 30 minutes. Open Logs for \(bottle.name) in its Home bottle panel to investigate."
+                        message = "The installer did not finish within 30 minutes. Open Logs for \(bottle.name) in its Windows details panel to investigate."
                     } else if result.exit_code == 0 {
                         let after = try? await callAsync(["discover-apps", bottleID], as: DiscoveredProgramsResult.self)
                         let newPrograms = before == nil ? [] : (after?.candidates ?? []).filter {
@@ -2215,16 +2078,16 @@ final class CaskrunModel: ObservableObject {
                                                                   searchWasLimited: (before?.truncated == true || after?.truncated == true),
                                                                   discoveryUnavailable: before == nil || after == nil)
                     } else if let code = result.exit_code {
-                        message = "The installer closed with error code \(code). Open Logs for \(bottle.name) in its Home bottle panel to investigate."
+                        message = "The installer closed with error code \(code). Open Logs for \(bottle.name) in its Windows details panel to investigate."
                     } else if let signal = result.signal {
-                        message = "The installer stopped unexpectedly (signal \(signal)). Open Logs for \(bottle.name) in its Home bottle panel to investigate."
+                        message = "The installer stopped unexpectedly (signal \(signal)). Open Logs for \(bottle.name) in its Windows details panel to investigate."
                     } else {
-                        message = "The installer stopped unexpectedly. Open Logs for \(bottle.name) in its Home bottle panel to investigate."
+                        message = "The installer stopped unexpectedly. Open Logs for \(bottle.name) in its Windows details panel to investigate."
                     }
                 } catch {
                     let coreError = error as NSError
                     if coreError.domain == "Caskrun" && coreError.code == 130 {
-                        message = "Setup canceled. The bottle remains available on Home."
+                        message = "Setup canceled. The bottle remains available on Collection."
                     } else if cancellation.isCancelRequested {
                         message = "Setup needs attention after cancellation: \(error.localizedDescription)"
                     } else {
@@ -2275,7 +2138,7 @@ final class CaskrunModel: ObservableObject {
                 canCancelCatalogInstall = false
                 refresh()
                 if cancellation.isCancelRequested {
-                    message = "Setup finished before Caskrun could cancel it. Select the bottle on Home."
+                    message = "Setup finished before Caskrun could cancel it. Select the bottle on Collection."
                     return
                 }
                 selectedBottleID = result.bottle.id
@@ -2299,7 +2162,7 @@ final class CaskrunModel: ObservableObject {
                 refresh()
                 let coreError = error as NSError
                 if coreError.domain == "Caskrun" && coreError.code == 130 {
-                    message = "Setup canceled. If timeout cleanup had already begun, Windows apps in this bottle may also have stopped. Inspect the bottle on Home before retrying."
+                    message = "Setup canceled. If timeout cleanup had already begun, Windows apps in this bottle may also have stopped. Inspect the bottle on Collection before retrying."
                     return
                 }
                 if cancellation.isCancelRequested {
@@ -2358,7 +2221,7 @@ final class CaskrunModel: ObservableObject {
                 canCancelCatalogInstall = false
                 refresh()
                 if cancellation.isCancelRequested {
-                    message = "Setup finished before Caskrun could cancel it. Select the bottle on Home."
+                    message = "Setup finished before Caskrun could cancel it. Select the bottle on Collection."
                     return
                 }
                 selectedBottleID = result.bottle.id
@@ -2373,7 +2236,7 @@ final class CaskrunModel: ObservableObject {
                 refresh()
                 let coreError = error as NSError
                 if coreError.domain == "Caskrun" && coreError.code == 130 {
-                    message = "Setup canceled. If timeout cleanup had already begun, Windows apps in this bottle may also have stopped. Inspect the bottle on Home before retrying."
+                    message = "Setup canceled. If timeout cleanup had already begun, Windows apps in this bottle may also have stopped. Inspect the bottle on Collection before retrying."
                     return
                 }
                 if cancellation.isCancelRequested {
@@ -2450,51 +2313,6 @@ private struct LauncherBadge: View {
     var body: some View {
         LauncherArtwork(model: model, bottle: bottle, launcher: launcher,
                         fallbackSymbol: fallbackSymbol, size: size)
-    }
-}
-
-private struct HomeProgramTile: View {
-    @ObservedObject var model: CaskrunModel
-    let item: SavedProgram
-    let fallbackSymbol: String
-    let isSelected: Bool
-    let showBottle: (Int) -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button {
-            showBottle(NSApp.currentEvent?.clickCount ?? 0)
-        } label: {
-            VStack(spacing: 0) {
-                LauncherBadge(model: model, bottle: item.bottle,
-                              launcher: item.launcher, fallbackSymbol: fallbackSymbol)
-                    .frame(width: 80, height: 56)
-                    .padding(.top, 6)
-                Text(item.launcher.name)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(isSelected || isHovered ? Color.accentColor : Color.primary)
-                    .animation(.easeOut(duration: 0.10), value: isHovered)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 8)
-                Capsule().fill(isSelected ? Color.accentColor : Color.primary.opacity(isHovered ? 0.16 : 0))
-                    .frame(width: 18, height: 3)
-                    .animation(.easeOut(duration: 0.10), value: isHovered)
-                    .padding(.top, 8)
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .frame(width: 120)
-        .help("Click to manage \(item.launcher.name). Double-click to open.")
-        .accessibilityLabel("Manage \(item.launcher.name)")
-        .accessibilityHint("Opens bottle controls. Double-click to launch the app.")
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-        .onHover { isHovered = $0 }
-        .frame(maxWidth: .infinity)
     }
 }
 
@@ -2576,7 +2394,7 @@ private struct SavedLaunchArgumentsSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Saved arguments for \(item.launcher.name)")
                 .font(.title2.weight(.semibold))
-            Text("These options are used whenever you open this app from Home or its bottle.")
+            Text("These options are used whenever you open this app from Collection or its bottle.")
                 .foregroundStyle(.secondary)
             Text("Arguments — one per line")
                 .font(.subheadline.weight(.semibold))
@@ -2708,57 +2526,21 @@ private struct InspectorCloseButtonStyle: ButtonStyle {
     }
 }
 
-private struct SteamGameTile: View {
-    let game: SteamGame
-    let isSelected: Bool
-    let select: () -> Void
-    @State private var hovered = false
-    @State private var icon: NSImage?
-
-    var body: some View {
-        Button(action: select) {
-            VStack(spacing: 8) {
-                ZStack {
-                    if let icon {
-                        Image(nsImage: icon).resizable().interpolation(.high).scaledToFit()
-                    } else {
-                        Image(systemName: "gamecontroller.fill")
-                            .font(.system(size: 30)).foregroundStyle(.secondary)
-                    }
-                }
-                .frame(width: 56, height: 56)
-                Text(game.name).font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(isSelected || hovered ? Color.accentColor : Color.primary)
-                    .lineLimit(2).multilineTextAlignment(.center)
-                Capsule().fill(isSelected ? Color.accentColor : Color.primary.opacity(hovered ? 0.16 : 0))
-                    .frame(width: 18, height: 3)
-            }
-            .padding(12).frame(width: 120).contentShape(Rectangle())
-        }
-        .buttonStyle(.plain).frame(maxWidth: .infinity)
-        .onHover { hovered = $0 }
-        .animation(.easeOut(duration: 0.10), value: hovered)
-        .help("Click to select \(game.name). Double-click to open through Steam.")
-        .accessibilityLabel("Manage \(game.name)")
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-        .task(id: game.icon_path) {
-            icon = nil
-            if let path = game.icon_path {
-                let data = await Task.detached(priority: .utility) { () -> Data? in
-                    guard let bytes = MacAppArtwork.read(path, maximum: 8 * 1024 * 1024) else { return nil }
-                    return MacAppArtwork.png(bytes)
-                }.value
-                if !Task.isCancelled, let data { icon = NSImage(data: data) }
-            }
-        }
-    }
-}
-
 @main
 struct CaskrunApp: App {
     @NSApplicationDelegateAdaptor(CaskrunAppDelegate.self) private var appDelegate
     @StateObject private var model = CaskrunModel()
     @StateObject private var catalogArtwork = CatalogArtworkStore()
+    @StateObject private var ps5 = PS5CollectionModel()
+    @State private var collectionSelectedID: String?
+    @State private var collectionPlatform: CollectionPlatform = .all
+    @State private var collectionKind: CollectionItemKind?
+    @State private var showingPS5Import = false
+    @State private var ps5Artwork: [String: NSImage] = [:]
+    @State private var requestedPS5Artwork: Set<String> = []
+    @State private var ps5ArtworkOrder: [String] = []
+    @State private var ps5ArtworkTasks: [String: Task<Void, Never>] = [:]
+    @State private var ps5ArtworkGenerations: [String: UUID] = [:]
     @State private var page: Page = .discover
     @State private var didChooseInitialPage = false
     @State private var showingNewBottle = false
@@ -2773,7 +2555,6 @@ struct CaskrunApp: App {
     @State private var discoverScope: DiscoverScope = .stores
     @State private var browserGameRequest: AddBrowserGameRequest?
     @State private var steamInstallRequest: SteamGameInstallRequest?
-    private let compatibilityDevice = CompatibilityDevice.current()
     @State private var selectedCatalogEntry: CatalogEntry?
     @State private var catalogBottleID = ""
     @State private var catalogUseExistingBottle = false
@@ -2789,8 +2570,8 @@ struct CaskrunApp: App {
     @State private var hoveredPage: Page?
     @State private var hoveredInstall = false
     @State private var hoveredCatalogID: String?
-    @State private var hoveredHomeBottleID: String?
     @State private var showingBottleInspector = false
+    @State private var inspectingBottleOnly = false
     @State private var openBottleID: String?
     @State private var selectedSteamGameID: String?
     @State private var showingSearch = false
@@ -2848,14 +2629,6 @@ struct CaskrunApp: App {
         return SavedProgram(bottle: bottle, launcher: launcher)
     }
 
-    private var filteredBottles: [Bottle] {
-        let query = librarySearch.trimmingCharacters(in: .whitespacesAndNewlines)
-        return model.bottles.filter { bottle in
-            query.isEmpty || bottle.name.localizedCaseInsensitiveContains(query)
-                || (model.launchers[bottle.id] ?? []).contains { $0.name.localizedCaseInsensitiveContains(query) }
-        }
-    }
-
     private var openBottle: Bottle? { model.bottles.first { $0.id == openBottleID } }
 
     private var selectedSteamGame: SteamGame? {
@@ -2863,70 +2636,24 @@ struct CaskrunApp: App {
         return model.steamGames[bottle.id]?.first { $0.id == selectedSteamGameID }
     }
 
-    private var filteredSteamGames: [SteamGame] {
-        guard let bottle = openBottle else { return [] }
-        let games = model.steamGames[bottle.id] ?? []
-        let query = librarySearch.trimmingCharacters(in: .whitespacesAndNewlines)
-        return query.isEmpty ? games : games.filter { $0.name.localizedCaseInsensitiveContains(query) }
-    }
-
-    private func launchHomeProgram(id: String) {
-        guard page == .home, showingBottleInspector,
-              let item = allSavedPrograms.first(where: { $0.id == id }),
-              openBottleID == item.bottle.id,
-              !model.isLaunching, !model.isManagingBottle, model.status.wine_path != nil else { return }
-        inspectBottle(item.bottle, launcher: item.launcher)
-        model.runLauncher(item.launcher, in: item.bottle)
-    }
-
-    private func selectHomeProgram(_ item: SavedProgram, clicks: Int) {
-        let event = NSApp.currentEvent
-        inspectBottle(item.bottle, launcher: item.launcher)
-        if clicks == 1 {
-            CaskrunHomeClickRouter.shared.remember(event) { launchHomeProgram(id: item.id) }
-        }
-    }
-
-    private func selectSteamGame(_ game: SteamGame, in bottle: Bottle) {
-        let event = NSApp.currentEvent
-        inspectBottle(bottle)
-        selectedSteamGameID = game.id
-        CaskrunHomeClickRouter.shared.remember(event) {
-            guard page == .home, openBottleID == bottle.id,
-                  let current = model.steamGames[bottle.id]?.first(where: { $0.id == game.id }) else { return }
-            model.runSteamGame(current, in: bottle)
-        }
-    }
-
     private func inspectBottle(_ bottle: Bottle, launcher: SavedLauncher? = nil) {
-        CaskrunHomeClickRouter.shared.cancel()
+        inspectingBottleOnly = launcher == nil
+        collectionSelectedID = launcher.map { "app:\(bottle.id):\($0.id)" }
         model.selectedBottleID = bottle.id
         openBottleID = bottle.id
         selectedLauncherID = launcher?.id
         selectedSteamGameID = nil
-        page = .home
+        page = .collection
         showingBottleInspector = true
     }
 
     private func openBottleManager() {
-        CaskrunHomeClickRouter.shared.cancel()
+        collectionSelectedID = nil
+        inspectingBottleOnly = true
         if let bottle = selectedBottle ?? model.bottles.first { inspectBottle(bottle) }
-        page = .home
+        page = .collection
         showingBottleInspector = true
         showBottleManagement = true
-    }
-
-    private var savedPrograms: [SavedProgram] {
-        allSavedPrograms.filter { !$0.launcher.hidden_from_home && $0.bottle.id == openBottleID }
-    }
-
-    private var filteredSavedPrograms: [SavedProgram] {
-        let query = librarySearch.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return savedPrograms }
-        return savedPrograms.filter {
-            $0.launcher.name.localizedCaseInsensitiveContains(query)
-                || $0.bottle.name.localizedCaseInsensitiveContains(query)
-        }
     }
 
     private func installedProgram(for app: CatalogEntry) -> SavedProgram? {
@@ -3014,7 +2741,7 @@ struct CaskrunApp: App {
             model.catalogSetupFailure = nil
             model.retryCatalog(attempt)
         } else if failure.bottleID != nil && attempt(for: failure) == nil {
-            model.message = "The saved setup record could not be loaded. Select its bottle on Home to inspect this install."
+            model.message = "The saved setup record could not be loaded. Select its bottle on Collection to inspect this install."
         } else if let entry = CatalogSource.loaded.entries.first(where: { $0.id == failure.entryID }) {
             model.catalogSetupFailure = nil
             if let installed = installedProgram(for: entry) {
@@ -3031,7 +2758,7 @@ struct CaskrunApp: App {
         }
         if failure.detail.localizedCaseInsensitiveContains("still be running")
             || failure.detail.localizedCaseInsensitiveContains("Close Windows apps") {
-            return "Windows apps may still be running in this bottle. Quit them from its Home bottle panel, then retry setup."
+            return "Windows apps may still be running in this bottle. Quit them from its Windows details panel, then retry setup."
         }
         let timedOut = failure.detail.localizedCaseInsensitiveContains("timed out")
             || failure.detail.localizedCaseInsensitiveContains("timeout")
@@ -3077,7 +2804,7 @@ struct CaskrunApp: App {
             operationPanel
             Group {
                 switch page {
-                case .home: homeView
+                case .collection: collectionView
                 case .discover: discoverView
                 }
             }
@@ -3090,12 +2817,13 @@ struct CaskrunApp: App {
                                         didChooseInitialPage: $didChooseInitialPage,
                                         showingBottleInspector: $showingBottleInspector,
                                         openBottleID: $openBottleID,
-                                        model: model, delegate: appDelegate))
+                                        model: model, ps5: ps5,
+                                        selectedCollectionID: $collectionSelectedID, inspectingBottleOnly: $inspectingBottleOnly, delegate: appDelegate))
         .onAppear {
             model.refresh()
             if !didChooseInitialPage {
                 page = !model.bottles.isEmpty ||
-                    !model.catalogAttempts.isEmpty || !model.browserGames.isEmpty ? .home : .discover
+                    !model.catalogAttempts.isEmpty || !model.browserGames.isEmpty || !ps5.games.isEmpty ? .collection : .discover
                 didChooseInitialPage = true
             }
             if let url = Bundle.main.url(forResource: "caskrun-icon", withExtension: "png"),
@@ -3108,9 +2836,7 @@ struct CaskrunApp: App {
                 showingBottleInspector = false
                 openBottleID = nil
                 selectedSteamGameID = nil
-            } else if showingBottleInspector, model.bottles.contains(where: { $0.id == current }) {
-                openBottleID = current
-                selectedSteamGameID = nil
+                collectionSelectedID = nil
             }
             if !(model.launchers[current] ?? []).contains(where: { $0.id == selectedLauncherID }) {
                 selectedLauncherID = nil
@@ -3129,22 +2855,40 @@ struct CaskrunApp: App {
         .onChange(of: model.importedBottleID) { _, bottleID in
             if let bottle = model.bottles.first(where: { $0.id == bottleID }) { inspectBottle(bottle) }
         }
-        .onChange(of: openBottleID) { _, _ in
-            CaskrunHomeClickRouter.shared.cancel()
-            selectedSteamGameID = nil
-            librarySearch = ""
+        .onChange(of: collectionSelectedID) { _, selection in
+            if selection == nil && !inspectingBottleOnly { closeCollectionInspector() }
         }
-        .task(id: page == .home ? openBottleID : nil) {
-            guard page == .home, let bottle = openBottle else { return }
+        .onChange(of: collectionPlatform) { _, _ in closeCollectionInspector() }
+        .onChange(of: collectionKind) { _, _ in closeCollectionInspector() }
+        .onChange(of: ps5.games.map(\.id)) { _, ids in
+            let retained = Set(ids)
+            ps5Artwork = ps5Artwork.filter { retained.contains($0.key) }
+            requestedPS5Artwork.formIntersection(retained)
+            ps5ArtworkOrder.removeAll { !retained.contains($0) }
+            for (id, task) in ps5ArtworkTasks where !retained.contains(id) { task.cancel() }
+            ps5ArtworkTasks = ps5ArtworkTasks.filter { retained.contains($0.key) }
+            ps5ArtworkGenerations = ps5ArtworkGenerations.filter { retained.contains($0.key) }
+        }
+        .onChange(of: page) { _, current in
+            if current != .collection {
+                for task in ps5ArtworkTasks.values { task.cancel() }
+                ps5ArtworkTasks.removeAll()
+                ps5ArtworkGenerations.removeAll()
+                requestedPS5Artwork = Set(ps5Artwork.keys)
+            }
+        }
+        .task(id: page) {
+            guard page == .collection else { return }
             repeat {
-                await model.refreshSteamGames(in: bottle)
+                await model.refreshGameLibrary()
                 do { try await Task.sleep(for: .seconds(15)) }
                 catch { return }
             } while !Task.isCancelled
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            if page == .home, let bottle = openBottle {
-                Task { await model.refreshSteamGames(in: bottle) }
+            if page == .collection {
+                ps5.refresh()
+                Task { await model.refreshGameLibrary() }
             }
         }
     }
@@ -3263,6 +3007,11 @@ struct CaskrunApp: App {
             .sheet(item: $notesBottle) { bottle in
                 BottleNotesView(model: model, bottle: bottle)
             }
+            .sheet(isPresented: $showingPS5Import) {
+                ImportPS5GameSheet(model: ps5) { game in
+                    selectPS5Game(game)
+                }
+            }
             .sheet(item: $browserGameRequest) { request in
                 AddBrowserGameSheet(initialName: request.name, initialURL: request.url) { name, url in
                     try await model.addBrowserGame(name: name, url: url)
@@ -3290,15 +3039,12 @@ struct CaskrunApp: App {
         .commands {
             CommandGroup(replacing: .appSettings) {}
             CommandGroup(replacing: .newItem) {
-                Button("Install from file…") { model.chooseInstaller(in: page == .home ? openBottleID : nil) }
+                Button("Install from file…") { model.chooseInstaller(in: page == .collection ? openBottleID : nil) }
                     .keyboardShortcut("n", modifiers: .command)
                     .disabled(model.isQuitting || model.status.wine_path == nil || model.isLaunching || model.isManagingBottle)
             }
             CommandGroup(after: .textEditing) {
                 Button("Find Apps") {
-                    if page == .home && model.bottles.isEmpty {
-                        page = .discover
-                    }
                     showingSearch = true
                     focusedSearch = page == .discover ? .catalog : .library
                 }
@@ -3307,24 +3053,23 @@ struct CaskrunApp: App {
                 Button("Manage Bottles") { openBottleManager() }
                     .keyboardShortcut("3", modifiers: .command)
                     .disabled(model.isQuitting)
-                Button("Open Selected App") {
-                    if let game = selectedSteamGame, let bottle = openBottle { model.runSteamGame(game, in: bottle) }
-                    else if let item = inspectedProgram { model.runLauncher(item.launcher, in: item.bottle) }
+                Button("Open Selected Item") {
+                    if let item = selectedCollectionItem { openCollectionItem(item) }
                 }
                 .keyboardShortcut("o", modifiers: .command)
-                .disabled(model.isQuitting || page != .home || !showingBottleInspector || (inspectedProgram == nil && selectedSteamGame == nil) ||
-                          model.isLaunching || model.isManagingBottle || model.status.wine_path == nil)
+                .disabled(model.isQuitting || page != .collection || selectedCollectionItem?.canOpen != true)
             }
         }
     }
 
     private func navigate(to target: Page) {
-        CaskrunHomeClickRouter.shared.cancel()
         librarySearch = ""
         catalogSearch = ""
         showingSearch = false
         focusedSearch = nil
-        if target == .home {
+        if target == .collection {
+            inspectingBottleOnly = false
+            collectionSelectedID = nil
             openBottleID = nil
             selectedSteamGameID = nil
             showingBottleInspector = false
@@ -3334,16 +3079,18 @@ struct CaskrunApp: App {
 
     private var topBar: some View {
         HStack(spacing: 4) {
-            navigationButton(.home, title: "Home", symbol: "house", shortcut: "1")
-            navigationButton(.discover, title: "Discover", symbol: "square.grid.2x2", shortcut: "2")
+            navigationButton(.collection, title: "Collection", symbol: "square.grid.2x2", shortcut: "1")
+            navigationButton(.discover, title: "Discover", symbol: "sparkle.magnifyingglass", shortcut: "2")
             Rectangle().fill(.primary.opacity(0.12))
                 .frame(width: 1, height: 18).padding(.horizontal, 5)
             Menu {
                 Button("Discover apps") { navigate(to: .discover) }
+                Button("Import PS5 game…", action: beginPS5Import)
+                    .disabled(ps5.busy)
                 Button("Add browser game…") { browserGameRequest = AddBrowserGameRequest() }
                 Button("Install Steam game…") { steamInstallRequest = SteamGameInstallRequest(appID: nil, name: nil) }
                     .disabled(model.status.wine_path == nil || model.isLaunching || model.isManagingBottle)
-                Button("Install from file…") { model.chooseInstaller(in: page == .home ? openBottleID : nil) }
+                Button("Install from file…") { model.chooseInstaller(in: page == .collection ? openBottleID : nil) }
                     .disabled(model.status.wine_path == nil || model.isLaunching || model.isManagingBottle)
                 Divider()
                 Button("New bottle…") { showingNewBottle = true }
@@ -3361,12 +3108,12 @@ struct CaskrunApp: App {
                     .background(.primary.opacity(hoveredInstall ? 0.13 : 0.065), in: Circle())
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .help("Add apps or import a bottle")
-            .accessibilityLabel("Add apps or import a bottle")
+            .help("Add games, apps or import a bottle")
+            .accessibilityLabel("Add games, apps or import a bottle")
             .onHover { hoveredInstall = $0 }
             .animation(.easeOut(duration: 0.12), value: hoveredInstall)
             if showingSearch {
-                searchField(page == .discover ? "Search Discover" : "Search apps & bottles",
+                searchField(page == .discover ? "Search Discover" : "Search Collection",
                             text: page == .discover ? $catalogSearch : $librarySearch,
                             field: page == .discover ? .catalog : .library)
                     .frame(width: 210)
@@ -3407,148 +3154,240 @@ struct CaskrunApp: App {
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    private func showAllBottles() {
-        CaskrunHomeClickRouter.shared.cancel()
+    private func closeCollectionInspector() {
+        inspectingBottleOnly = false
+        collectionSelectedID = nil
         openBottleID = nil
         selectedSteamGameID = nil
+        selectedLauncherID = nil
         showingBottleInspector = false
-        librarySearch = ""
     }
 
-    private var homeView: some View {
-        HStack(alignment: .top, spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    runtimeBanner
-                    recoveryPanel
-                    if let bottle = openBottle {
-                        HStack(spacing: 8) {
-                            Button(action: showAllBottles) {
-                                Label("All bottles", systemImage: "chevron.left")
-                                    .font(.system(size: 12, weight: .medium))
-                            }
-                            .buttonStyle(.borderless)
-                            Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-                            Text(bottle.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                            Spacer()
+    private var collectionView: some View {
+        GeometryReader { viewport in
+            HStack(alignment: .top, spacing: 0) {
+                VStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if collectionPlatform == .all || collectionPlatform == .windows {
+                            runtimeBanner
+                            recoveryPanel
                         }
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 144), spacing: 12)],
-                                  alignment: .leading, spacing: 12) {
-                            ForEach(filteredSavedPrograms) { item in
-                                HomeProgramTile(model: model, item: item,
-                                                fallbackSymbol: launcherSymbol(item.launcher.name),
-                                                isSelected: showingBottleInspector && selectedSteamGameID == nil && inspectedProgram?.id == item.id,
-                                                showBottle: { selectHomeProgram(item, clicks: $0) })
-                            }
-                            ForEach(filteredSteamGames) { game in
-                                SteamGameTile(game: game, isSelected: selectedSteamGameID == game.id) {
-                                    selectSteamGame(game, in: bottle)
+                        if !collectionWarnings.isEmpty {
+                            DisclosureGroup("Some collection items could not be read") {
+                                ForEach(Array(collectionWarnings.enumerated()), id: \.offset) { _, warning in
+                                    Text(warning).font(.caption).foregroundStyle(.secondary)
                                 }
-                            }
+                            }.font(.caption)
                         }
-                        if filteredSavedPrograms.isEmpty && filteredSteamGames.isEmpty {
-                            if !librarySearch.isEmpty {
-                                ContentUnavailableView.search(text: librarySearch)
-                            } else if model.loadingSteamGames.contains(bottle.id) && model.steamGames[bottle.id] == nil {
-                                ProgressView().controlSize(.small).frame(maxWidth: .infinity, minHeight: 80)
-                            } else {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text("No apps to show").font(.headline)
-                                    Text((model.launchers[bottle.id] ?? []).isEmpty
-                                         ? "Add an app using the controls. Installed Steam games appear here automatically."
-                                         : "Use App Options in the controls to show hidden apps again.")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                                .padding(.vertical, 18)
-                            }
+                        if let error = ps5.error {
+                            Label(error, systemImage: "exclamationmark.circle")
+                                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                         }
-                        if let error = model.steamGameErrors[bottle.id] {
-                            Label("Steam library could not be read: \(error)", systemImage: "exclamationmark.triangle")
-                                .font(.caption).foregroundStyle(.orange)
-                        }
-                        if model.truncatedSteamLibraries.contains(bottle.id) {
-                            Text("Some Steam library entries could not be listed.").font(.caption).foregroundStyle(.secondary)
-                        }
-                    } else if model.bottles.isEmpty {
-                        if model.browserGames.isEmpty { homeEmptyState }
-                    } else {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 144), spacing: 12)],
-                                  alignment: .leading, spacing: 12) {
-                            ForEach(filteredBottles) { bottle in homeBottleTile(bottle) }
-                        }
-                        if !librarySearch.isEmpty && filteredBottles.isEmpty {
-                            ContentUnavailableView.search(text: librarySearch)
-                        }
-                    }
-                    if openBottle == nil, !model.browserGames.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Browser games").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 144), spacing: 12)], alignment: .leading, spacing: 12) {
-                                ForEach(model.browserGames.filter { librarySearch.isEmpty || $0.name.localizedStandardContains(librarySearch) }) { game in
-                                    BrowserGameTile(game: game, opensOnSingleClick: true, onSelect: {}, onOpen: { model.openBrowserGame(game) }, onRemove: { model.removeBrowserGame(game) })
-                                }
-                            }
-                        }
-                    }
-                    if let error = model.browserGamesError {
-                        Text(error).font(.caption).foregroundStyle(.secondary)
-                    }
+                    }.padding(.horizontal, 24)
+                    CollectionGrid(entries: collectionItems, selectedID: $collectionSelectedID,
+                                   platform: $collectionPlatform, kind: $collectionKind,
+                                   query: librarySearch, isLoading: model.loadingGameLibrary,
+                                   onSelect: selectCollectionItem, onOpen: openCollectionItem,
+                                   onLoadArtwork: loadCollectionArtwork,
+                                   onDiscover: {
+                                       discoverScope = collectionPlatform == .browser ? .browser : .stores
+                                       navigate(to: .discover)
+                                   }, onImportPS5: beginPS5Import)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                if let game = selectedPS5Game {
+                    PS5GameInspector(model: ps5, game: game, onClose: closeCollectionInspector)
+                        .frame(height: max(0, viewport.size.height - 36))
+                        .padding(.top, 20).padding(.trailing, 16).padding(.bottom, 16)
+                        .transition(.identity)
+                } else if let game = selectedBrowserGame, let item = selectedCollectionItem {
+                    browserGameInspector(game, item: item)
+                        .frame(height: max(0, viewport.size.height - 36))
+                        .padding(.top, 20).padding(.trailing, 16).padding(.bottom, 16)
+                        .transition(.identity)
+                } else if showingBottleInspector {
+                    bottleInspector.frame(width: 320, height: max(0, viewport.size.height - 36))
+                        .padding(.top, 20).padding(.trailing, 16).padding(.bottom, 16)
+                        .transition(.identity)
                 }
-                .padding(24)
             }
-            .frame(maxWidth: .infinity)
-            if showingBottleInspector {
-                bottleInspector.frame(width: 320)
-                    .padding(.top, 20).padding(.trailing, 16).padding(.bottom, 16)
-                    .transition(.identity)
+            .frame(width: viewport.size.width, height: viewport.size.height)
+        }
+    }
+
+    private var collectionWarnings: [String] {
+        switch collectionPlatform {
+        case .all, .windows: gameLibraryWarnings
+        case .browser: model.browserGamesError.map { [$0] } ?? []
+        case .ps5: []
+        }
+    }
+
+    private var selectedCollectionItem: CollectionItem? {
+        collectionItems.first { $0.id == collectionSelectedID }
+    }
+
+    private var selectedPS5Game: PS5CollectionGame? {
+        ps5.games.first { "ps5:\($0.id)" == collectionSelectedID }
+    }
+
+    private var selectedBrowserGame: BrowserGame? {
+        model.browserGames.first { "browser:\($0.id)" == collectionSelectedID }
+    }
+
+    private var collectionItems: [CollectionItem] {
+        var items = gameLibraryEntries.map { entry in
+            CollectionItem(id: entry.id, name: entry.name,
+                           platform: entry.source == .browser ? .browser : .windows,
+                           kind: entry.source == .apps ? .app : .game,
+                           subtitle: entry.subtitle, icon: entry.icon, browserURL: entry.browserURL,
+                           artworkRevision: entry.artworkRevision, canOpen: entry.canPlay,
+                           openActionTitle: entry.source == .epic || entry.source == .gog ? "Open store" : nil)
+        }
+        items += ps5.games.map { game in
+            CollectionItem(id: "ps5:\(game.id)", name: game.name, platform: .ps5, kind: .game,
+                           subtitle: "PS5 · Experimental", icon: ps5Artwork[game.id],
+                           artworkRevision: game.path + String(game.createdAt),
+                           canOpen: !model.isQuitting && !ps5.busy && ps5.engine != nil,
+                           status: ps5.runningGameIDs.contains(game.id) ? "Running" : "",
+                           openActionTitle: ps5.runningGameIDs.contains(game.id) ? "Show window" : "Open game")
+        }
+        return items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private func beginPS5Import() {
+        closeCollectionInspector()
+        page = .collection
+        collectionPlatform = .ps5
+        collectionKind = nil
+        // Let filter changes settle while the user chooses their input. The
+        // success callback only selects; it never races a filter reset.
+        showingPS5Import = true
+    }
+
+    private func selectPS5Game(_ game: PS5CollectionGame) {
+        inspectingBottleOnly = false
+        guard ps5.games.contains(where: { $0.id == game.id }) else { return }
+        openBottleID = nil
+        showingBottleInspector = false
+        selectedSteamGameID = nil
+        collectionSelectedID = "ps5:\(game.id)"
+    }
+
+    private func selectCollectionItem(_ item: CollectionItem) {
+        guard !model.isQuitting else { return }
+        if let game = ps5.games.first(where: { "ps5:\($0.id)" == item.id }) {
+            selectPS5Game(game); return
+        }
+        if item.platform == .browser {
+            inspectingBottleOnly = false
+            openBottleID = nil
+            selectedSteamGameID = nil
+            showingBottleInspector = false
+            collectionSelectedID = item.id
+            return
+        }
+        for bottle in model.bottles {
+            if let game = model.steamGames[bottle.id]?.first(where: { "steam:\(bottle.id):\($0.app_id)" == item.id }) {
+                inspectBottle(bottle)
+                selectedSteamGameID = game.id
+                inspectingBottleOnly = false
+                collectionSelectedID = item.id
+                return
+            }
+            if let game = model.publisherGames[bottle.id]?.first(where: { "publisher:\(bottle.id):\($0.id)" == item.id }) {
+                inspectBottle(bottle, launcher: publisherClient(for: game, in: bottle))
+                inspectingBottleOnly = false
+                collectionSelectedID = item.id
+                return
+            }
+            if let launcher = model.launchers[bottle.id]?.first(where: { "app:\(bottle.id):\($0.id)" == item.id }) {
+                inspectBottle(bottle, launcher: launcher)
+                inspectingBottleOnly = false
+                collectionSelectedID = item.id
+                return
             }
         }
-        .onDisappear { CaskrunHomeClickRouter.shared.cancel() }
     }
 
-    private func homeBottleTile(_ bottle: Bottle) -> some View {
-        let hovered = hoveredHomeBottleID == bottle.id
-        return Button { inspectBottle(bottle) } label: {
-            VStack(spacing: 8) {
-                ZStack(alignment: .center) {
-                    Image(systemName: "folder.fill")
-                        .resizable().scaledToFit().foregroundStyle(Color.accentColor.opacity(0.72))
-                        .frame(width: 76, height: 60)
-                    BottleArtwork(model: model, bottle: bottle, size: 28).offset(y: 7)
-                }
-                .frame(width: 80, height: 64)
-                Text(bottle.name).font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(hovered ? Color.accentColor : Color.primary)
-                    .lineLimit(2).multilineTextAlignment(.center)
-                    .animation(.easeOut(duration: 0.10), value: hovered)
-            }
-            .padding(12).frame(width: 120).contentShape(Rectangle())
+    private func openCollectionItem(_ item: CollectionItem) {
+        guard !model.isQuitting,
+              let current = collectionItems.first(where: { $0.id == item.id }), current.canOpen else { return }
+        if let game = ps5.games.first(where: { "ps5:\($0.id)" == item.id }) {
+            do {
+                if ps5.runningGameIDs.contains(game.id) {
+                    if !ps5.focus(game) { throw PS5CollectionError.invalid("The engine has no visible window yet.") }
+                } else { try ps5.launch(game) }
+            } catch { model.message = error.localizedDescription }
+            return
         }
-        .buttonStyle(.plain)
-        .help("Open \(bottle.name) to see its apps and controls")
-        .accessibilityLabel("Open bottle \(bottle.name)")
-        .onHover { hoveredHomeBottleID = $0 ? bottle.id : nil }
-        .frame(maxWidth: .infinity)
+        if let entry = gameLibraryEntries.first(where: { $0.id == item.id }) { playLibraryEntry(entry) }
     }
 
-    private var homeEmptyState: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Image(systemName: "square.stack.3d.up")
-                .font(.system(size: 24, weight: .medium)).foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Your apps will appear here").font(.title3.weight(.semibold))
-                Text("Choose a store in Discover or install your own Windows app.")
-                    .font(.subheadline).foregroundStyle(.secondary)
+    private func loadCollectionArtwork(_ item: CollectionItem) {
+        if let game = ps5.games.first(where: { "ps5:\($0.id)" == item.id }) {
+            guard requestedPS5Artwork.insert(game.id).inserted else { return }
+            let generation = UUID()
+            ps5ArtworkGenerations[game.id] = generation
+            ps5ArtworkTasks[game.id] = Task {
+                defer {
+                    if ps5ArtworkGenerations[game.id] == generation {
+                        ps5ArtworkTasks[game.id] = nil
+                        ps5ArtworkGenerations[game.id] = nil
+                    }
+                }
+                let image = await ps5.gameArtwork(game)
+                guard !Task.isCancelled, ps5.games.contains(game) else { return }
+                if let image {
+                    // At most 40 decoded 512px pictures stay in the grid cache.
+                    while ps5ArtworkOrder.count >= 40 {
+                        let oldest = ps5ArtworkOrder.removeFirst()
+                        ps5Artwork[oldest] = nil
+                        requestedPS5Artwork.remove(oldest)
+                    }
+                    ps5Artwork[game.id] = image
+                    ps5ArtworkOrder.append(game.id)
+                }
             }
+        } else if let entry = gameLibraryEntries.first(where: { $0.id == item.id }) { loadLibraryArtwork(entry) }
+    }
+
+    private func browserGameInspector(_ game: BrowserGame, item: CollectionItem) -> some View {
+        VStack(spacing: 0) {
             HStack {
-                Button("Browse stores") { page = .discover }.buttonStyle(.borderedProminent)
-                Button("Install from file…") { model.chooseInstaller() }
-                    .disabled(model.status.wine_path == nil || model.isLaunching || model.isManagingBottle)
+                Text("BROWSER GAME").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Button(action: closeCollectionInspector) { Image(systemName: "xmark").frame(width: 28, height: 28) }
+                    .buttonStyle(InspectorCloseButtonStyle()).keyboardShortcut(.escape, modifiers: [])
+                    .accessibilityLabel("Close game details")
             }
+            .padding(.horizontal, 18).padding(.top, 12).padding(.bottom, 8)
+            Divider().padding(.horizontal, 18)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    CollectionArtwork(item: item).frame(height: 152).clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    Text(game.name).font(.title3.weight(.semibold))
+                    Text(item.subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    Button("Play in browser") { model.openBrowserGame(game) }
+                        .buttonStyle(.borderedProminent).disabled(model.isQuitting)
+                    Text("Opens in your default browser. Closing Caskrun does not close browser tabs.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Button("Remove from Collection", role: .destructive) {
+                        model.removeBrowserGame(game)
+                    }.disabled(model.editingBrowserGames)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(18)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(22)
-        .frame(maxWidth: .infinity, minHeight: 160, alignment: .leading)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 18))
+        .frame(width: 320).frame(maxHeight: .infinity)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20).strokeBorder(.primary.opacity(0.10))
+                .allowsHitTesting(false)
+        }
     }
 
     @ViewBuilder
@@ -3660,28 +3499,10 @@ struct CaskrunApp: App {
         var warnings = model.bottles.compactMap { bottle in model.steamGameErrors[bottle.id].map { "\(bottle.name): \($0)" } }
         warnings += model.bottles.compactMap { bottle in model.publisherGameErrors[bottle.id].map { "\(bottle.name): \($0)" } }
         if !model.truncatedPublisherLibraries.isEmpty { warnings.append("Some Epic or GOG manifests were skipped or exceeded the local scan limit.") }
-        if model.bottles.count > 128 { warnings.append("Only the first 128 bottles were scanned. Open another bottle on Home to read its library.") }
+        if model.bottles.count > 128 { warnings.append("Only the first 128 bottles were scanned. Use Manage bottles to select another bottle and read its library.") }
         if !model.truncatedSteamLibraries.isEmpty { warnings.append("Some Steam manifests could not be read completely.") }
         if let error = model.browserGamesError { warnings.append(error) }
         return warnings
-    }
-
-    private var gameLibraryView: some View {
-        GameLibraryView(entries: gameLibraryEntries, device: compatibilityDevice,
-            isLoading: model.loadingGameLibrary, warnings: gameLibraryWarnings, query: librarySearch,
-            onRefresh: { Task { await model.refreshGameLibrary() } }, onPlay: playLibraryEntry,
-            onManage: { entry in
-                let parts = entry.id.split(separator: ":")
-                if parts.count >= 3, let bottle = model.bottles.first(where: { $0.id == parts[1] }) { inspectBottle(bottle) }
-            }, onRemoveBrowser: { entry in
-                if let game = model.browserGames.first(where: { "browser:\($0.id)" == entry.id }) { model.removeBrowserGame(game) }
-            }, onAddBrowser: { browserGameRequest = AddBrowserGameRequest() }, onLoadArtwork: loadLibraryArtwork, onInspect: { entry in
-                guard entry.source == .steam, !model.isQuitting else { return }
-                let parts = entry.id.split(separator: ":")
-                if parts.count == 3, let bottle = model.bottles.first(where: { $0.id == parts[1] }), model.bottleGraphics[bottle.id] == nil {
-                    model.refreshBottleGraphics(in: bottle)
-                }
-            })
     }
 
     private func loadLibraryArtwork(_ entry: GameLibraryEntry) {
@@ -3776,9 +3597,9 @@ struct CaskrunApp: App {
                                 }.buttonStyle(.borderless)
                                 Spacer()
                                 if model.browserGames.contains(where: { $0.url == game.url.absoluteString }) {
-                                    Label("On Home", systemImage: "checkmark").font(.caption).foregroundStyle(.secondary)
+                                    Label("On Collection", systemImage: "checkmark").font(.caption).foregroundStyle(.secondary)
                                 } else {
-                                    Button("Add to Home") { browserGameRequest = AddBrowserGameRequest(name: game.name, url: game.url.absoluteString) }
+                                    Button("Add to Collection") { browserGameRequest = AddBrowserGameRequest(name: game.name, url: game.url.absoluteString) }
                                         .buttonStyle(.bordered)
                                 }
                             }
@@ -3897,16 +3718,16 @@ struct CaskrunApp: App {
     private var bottleInspector: some View {
         VStack(spacing: 0) {
             HStack {
-                bottlePanelLabel("BOTTLE CONTROLS")
+                bottlePanelLabel(collectionSelectedID == nil ? "BOTTLE CONTROLS" : "WINDOWS DETAILS")
                 Spacer()
-                Button(action: showAllBottles) {
+                Button(action: closeCollectionInspector) {
                     Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
                         .frame(width: 28, height: 28).contentShape(Rectangle())
                 }
                 .buttonStyle(InspectorCloseButtonStyle())
                 .keyboardShortcut(.escape, modifiers: [])
-                .help("Close bottle and return to Home (Esc)")
-                .accessibilityLabel("Close bottle and return to Home")
+                .help("Close details and return to Collection (Esc)")
+                .accessibilityLabel("Close details and return to Collection")
             }
             .padding(.horizontal, 18).padding(.top, 12).padding(.bottom, 8)
             Divider().padding(.horizontal, 18)
@@ -3953,16 +3774,21 @@ struct CaskrunApp: App {
                     }
                     .padding(18)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onChange(of: selectedSteamGame?.id ?? inspectedProgram?.id ?? selectedBottle?.id) { _, _ in
                     proxy.scrollTo("inspector-top", anchor: .top)
                 }
             }
+            .frame(maxHeight: .infinity)
         }
+        .frame(maxHeight: .infinity)
         .tint(.primary)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(.primary.opacity(0.10))
+                .allowsHitTesting(false)
         }
         .shadow(color: .black.opacity(0.10), radius: 12, y: 5)
         .task(id: selectedBottle?.id) {
@@ -3975,13 +3801,21 @@ struct CaskrunApp: App {
 
     private func inspectorHeader(for bottle: Bottle) -> some View {
         HStack(spacing: 12) {
-            BottleArtwork(model: model, bottle: bottle)
+            if let item = selectedCollectionItem, item.platform == .windows {
+                if let icon = item.icon {
+                    Image(nsImage: icon).resizable().interpolation(.high).scaledToFit()
+                        .frame(width: 48, height: 48)
+                } else {
+                    Image(systemName: item.kind == .app ? "app" : "gamecontroller")
+                        .font(.system(size: 28)).foregroundStyle(.secondary).frame(width: 48, height: 48)
+                }
+            } else { BottleArtwork(model: model, bottle: bottle) }
             VStack(alignment: .leading, spacing: 4) {
-                Text(bottle.name).font(.system(size: 19, weight: .semibold, design: .rounded))
+                Text(selectedCollectionItem?.platform == .windows ? (selectedCollectionItem?.name ?? bottle.name) : bottle.name).font(.system(size: 19, weight: .semibold, design: .rounded))
                     .lineLimit(2)
                 let count = (model.launchers[bottle.id] ?? []).count
                 let games = (model.steamGames[bottle.id] ?? []).count
-                Text("\(count) \(count == 1 ? "app" : "apps")" + (games == 0 ? "" : " · \(games) \(games == 1 ? "game" : "games")"))
+                Text(selectedCollectionItem?.platform == .windows ? "Windows · " + bottle.name : "\(count) \(count == 1 ? "app" : "apps")" + (games == 0 ? "" : " · \(games) \(games == 1 ? "game" : "games")"))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
@@ -3993,14 +3827,23 @@ struct CaskrunApp: App {
         let games = model.steamGames[bottle.id] ?? []
         let busy = model.isManagingBottle || model.isLaunching
         return VStack(alignment: .leading, spacing: 12) {
-            if let item = inspectedProgram {
+            if let entry = selectedCollectionItem, entry.id.hasPrefix("publisher:") {
+                Button("Open store for \(entry.name)") { openCollectionItem(entry) }
+                    .buttonStyle(.borderedProminent).disabled(!entry.canOpen)
+                Text("This installed title was found in its local store manifest. Start it from the store; gameplay is not verified.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let item = inspectedProgram {
                 if apps.count + games.count > 1 {
                     Picker("App", selection: Binding(
                         get: { selectedSteamGame.map { "game:" + $0.id } ?? "app:" + (inspectedProgram?.launcher.id ?? "") },
                         set: { value in
-                            CaskrunHomeClickRouter.shared.cancel()
-                            if value.hasPrefix("game:") { selectedSteamGameID = String(value.dropFirst(5)) }
-                            else { selectedLauncherID = String(value.dropFirst(4)); selectedSteamGameID = nil }
+                            if value.hasPrefix("game:"), let game = games.first(where: { $0.id == String(value.dropFirst(5)) }) {
+                                selectedSteamGameID = game.id
+                                collectionSelectedID = "steam:\(bottle.id):\(game.app_id)"
+                            } else {
+                                selectedLauncherID = String(value.dropFirst(4)); selectedSteamGameID = nil
+                                collectionSelectedID = "app:\(bottle.id):\(selectedLauncherID ?? "")"
+                            }
                         }
                     )) {
                         ForEach(apps) { app in
@@ -4027,7 +3870,7 @@ struct CaskrunApp: App {
                         bottleAction("Run with Options…", symbol: "play.circle") { runOptionsItem = item }
                         bottleAction("Edit Saved Arguments…", symbol: "text.alignleft") { savedArgumentsItem = item }
                         bottleAction("Rename App…", symbol: "pencil") { renameLauncherItem = item }
-                        bottleAction(item.launcher.hidden_from_home ? "Show on Home" : "Hide from Home",
+                        bottleAction(item.launcher.hidden_from_home ? "Show on Collection" : "Hide from Collection",
                                      symbol: item.launcher.hidden_from_home ? "eye" : "eye.slash") {
                             model.setLauncherVisibility(item.launcher, in: bottle,
                                                         hidden: !item.launcher.hidden_from_home)
@@ -4381,7 +4224,7 @@ struct CaskrunApp: App {
         if model.isQuitting {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
-                Text("Closing Windows apps…").font(.system(size: 12, weight: .medium))
+                Text("Closing apps…").font(.system(size: 12, weight: .medium))
                 Spacer()
             }
             .padding(.horizontal, 24).padding(.vertical, 10)
@@ -4479,7 +4322,7 @@ struct CaskrunApp: App {
                     .foregroundStyle(completion.setupNote == nil ? .green : .orange)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(completion.entryID == "manual"
-                         ? "\(completion.entryName) is ready in Home"
+                         ? "\(completion.entryName) is ready in Collection"
                          : "Continue in \(completion.entryName)")
                         .font(.subheadline.weight(.semibold))
                     Text(completion.setupNote ?? (completion.entryID == "manual"
@@ -4632,8 +4475,8 @@ struct CaskrunApp: App {
             Text("Find the installed program")
                 .font(.title2.weight(.semibold))
             Text(review.installerName.isEmpty
-                 ? "Choose a program found in this bottle to add to Home. You can open it from the bottle panel on Home."
-                 : "\(review.installerName) closed. Choose a new program to add to Home, once the publisher's setup has finished.")
+                 ? "Choose a program found in this bottle to add to Collection. You can open it from the bottle panel on Collection."
+                 : "\(review.installerName) closed. Choose a new program to add to Collection, once the publisher's setup has finished.")
                 .foregroundStyle(.secondary)
             if review.candidates.isEmpty {
                 ContentUnavailableView(review.discoveryUnavailable ? "Could not search for programs" : "No new program found",
@@ -4658,7 +4501,7 @@ struct CaskrunApp: App {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Button("Add to Home") {
+                                Button("Add to Collection") {
                                     model.saveDiscoveredProgram(program, in: review.bottle)
                                 }
                             }
@@ -4674,7 +4517,7 @@ struct CaskrunApp: App {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Text("Caskrun has not verified this app's compatibility. Installer logs are available in the bottle panel on Home.")
+            Text("Caskrun has not verified this app's compatibility. Installer logs are available in the bottle panel on Collection.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {

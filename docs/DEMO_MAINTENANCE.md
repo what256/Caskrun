@@ -1,7 +1,8 @@
 # Demo maintenance workflows
 
-The development app retains Home/Discover navigation and its existing bottle
-inspector. These actions are under **Home → bottle → Files & Maintenance**.
+The development app uses Collection/Discover navigation and a flat item grid.
+Select a Windows app/game, then open **Files & Maintenance** in its details.
+Empty or hidden bottles remain reachable through + → Manage bottles or Command-3.
 They do not establish publisher-client or game compatibility.
 
 ## Installed Programs
@@ -27,7 +28,7 @@ owned generated native bundles and derived artwork before deleting cache data.
 Unknown files, links, shared files and readonly layouts are preserved.
 
 Publisher executables, installed programs, preferences, launch options and
-engine records are unchanged. Home artwork reloads automatically; native Dock
+engine records are unchanged. Collection artwork reloads automatically; native Dock
 aliases regenerate on their next ordinary launch. A per-bottle UI generation
 rejects stale asynchronous icon results after a repair.
 
@@ -66,7 +67,7 @@ Run an EXE now offers a temporary argument sheet. If the selected executable
 already has a saved launcher, it routes through that launcher to retain the
 current recipe and saved options. Multiple saved commands for one executable
 have an explicit selector. Otherwise `launch <bottle-id> <path> -- ...`
-starts it once without adding a Home icon. Each line is one literal argument;
+starts it once without adding a Collection icon. Each line is one literal argument;
 leading/trailing spaces are preserved, and no shell is involved. Saved and
 temporary editors share bounds matching the core. Null characters are refused
 before launch.

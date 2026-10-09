@@ -2,7 +2,7 @@
 
 The standalone Library and Game reports screens were removed on 9 October
 2026 at the user's request. The source components, reviewed snapshot and
-manifest parsers described below remain; compatibility comparison is not
+manifest parsers described below remain and now populate Collection; compatibility comparison is not
 exposed in the current navigation. Earlier UI validation retains its dated
 scope.
 
@@ -58,7 +58,7 @@ source link uses the default browser and contacts that source normally.
 
 ## Installed library and account boundary
 
-The current library reads locally installed games and saved app shortcuts. The
+Collection reads locally installed Steam/Epic/GOG games and saved app shortcuts, plus local browser bookmarks and explicit PS5 imports. PS5 imports are not included in Wine bottle backups or diagnostics. The
 compatibility catalog is a separate list of public game identities and reports;
 it is not an account's complete owned library. Asking Steam to install a title
 hands its numeric AppID to the saved Windows Steam client in the chosen bottle.

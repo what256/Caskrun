@@ -138,7 +138,7 @@ struct OneTimeRunSheet: View {
             Text("Run a program").font(.title2.weight(.semibold))
             Label(selectedLauncher?.name ?? program.url.lastPathComponent, systemImage: "app")
                 .font(.headline).lineLimit(2)
-            Text("Run once in \(program.bottle.name). This does not add a new Home icon.")
+            Text("Run once in \(program.bottle.name). This does not add a new Collection icon.")
                 .foregroundStyle(.secondary)
             if program.savedLaunchers.count > 1 {
                 Picker("Saved launch options", selection: $selectedLauncherID) {
@@ -253,7 +253,7 @@ struct InstalledProgramsView: View {
                 if programs.isEmpty {
                     ContentUnavailableView(query.isEmpty ? "No registered programs" : "No matching programs",
                                            systemImage: "square.stack.3d.up",
-                                           description: Text(inventory.initialized ? "Use Find installed apps to add a portable program to Home." : "Install an app to set up this bottle."))
+                                           description: Text(inventory.initialized ? "Use Find installed apps to add a portable program to Collection." : "Install an app to set up this bottle."))
                 } else {
                     List(programs) { program in
                         VStack(alignment: .leading, spacing: 4) {

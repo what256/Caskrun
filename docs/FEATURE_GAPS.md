@@ -6,6 +6,13 @@ CodeWeavers' public guide describes the intended user journey: find an app, clic
 
 ## Current validation
 
+The October Collection update replaces Home with a flat game/app grid, one
+platform/type filter menu and platform-specific details. Local Steam/Epic/GOG
+readers are exposed again, without a separate Library or Game reports page.
+The optional PS5 adapter has original fixture checks only; engine/gameplay,
+controller/save and native window identity checks remain for the user.
+
+
 The October maintenance pass adds installed-program inventory, icon-cache
 rebuilding, local diagnostic/log export, app renaming and one-time arguments,
 checked shortcut working folders, bottle notes, Windows-version control and

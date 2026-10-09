@@ -1,6 +1,6 @@
 # Retro gaming and console ports
 
-Research snapshot: **9 October 2026**. These are future integration candidates; Caskrun does not currently provide console emulation or game conversion. No extension, emulator, game or BIOS was installed or executed for this research.
+Research snapshot: **9 October 2026**. The demo now has an optional external KytyPS5 adapter and local imports; actual console emulation remains the selected engine’s responsibility, and game conversion is not implemented. No extension, emulator, game or BIOS was installed or executed for this work.
 
 ## RetroBrowser+
 
@@ -29,7 +29,7 @@ The denominator can change as declarations are added. These figures supersede th
 
 [KytyPS5](https://github.com/KytyPS5/KytyPS5) is a separate GPL-2.0-only PS5 emulator. Its README describes experimental Apple Silicon execution using an x86-64 build under Rosetta 2 and MoltenVK. A small number of titles have reached gameplay; Windows receives most testing. [Mac release archives](https://github.com/KytyPS5/KytyPS5/releases) exist, but their availability does not validate Caskrun integration or any particular game.
 
-An optional external adapter could eventually launch a local game folder through the Mac executable. Emulator data and version-specific settings would remain separate from Wine bottles.
+The optional external adapter can invoke a user-selected Mac executable with the documented game argument. Engine data remains outside Wine bottles. This is source implementation and original process-fixture validation, not evidence that a PS5 game runs.
 
 ## Static recompilation alternatives
 
@@ -47,10 +47,9 @@ These tools are not universal one-click game converters. Prefer importing finish
 
 Start with native Mac ports or optional external engine adapters, a pinned engine version and one validated title. Verify rendering, saves, controllers and shutdown before claiming support. Use user-owned game files and any required BIOS; bundle no games, BIOS, firmware or proprietary assets. Review each engine and dependency licence before redistribution.
 
-## Recommended Caskrun implementation
+## Current adapter and remaining work
 
-For Apple Silicon, start with an optional KytyPS5 Mac adapter. This is a proposed
-feature, not an implemented or tested Caskrun engine. The current upstream
+The demo implements an optional KytyPS5 Mac adapter. Import and process ownership are checked with original fixtures; no real engine or game was launched. The current upstream
 [Mac build and launch instructions](https://github.com/KytyPS5/KytyPS5#building-on-macos)
 document an x86-64 executable running under Rosetta 2, with MoltenVK alongside
 it. This avoids introducing AnyPS5's additional conversion and Wine path in the
@@ -58,13 +57,13 @@ first version.
 
 ### 1. Import and launch
 
-- Add **Import PS5 game** to the existing + menu. Keep game cards on Home;
+- Add **Import PS5 game** to the existing + menu. Keep game cards in Collection;
   no additional Library screen is needed.
 - Accept an explicitly selected game folder, ELF or `.zar` dump using the
   [upstream input formats](https://github.com/KytyPS5/KytyPS5#running). Preserve
   the original files and use local game artwork when available.
 - Attach a user-installed engine initially. Validate its executable,
-  architecture, engine version, Rosetta prerequisite and graphics dependencies.
+  architecture, Rosetta prerequisite and local MoltenVK dependency. The engine version is recorded as unknown; Caskrun does not execute a selected binary to probe it.
   Keep its records and settings separate from Wine bottles.
 - Invoke the documented `kyty_emulator --game` command with an argument array.
   The inspector should show engine-specific controls and an Experimental label.
@@ -97,3 +96,29 @@ must be satisfied first, including its Windows library toolchain. Wine,
 Rosetta and graphics compatibility then require a separate real-title test.
 Conversion completion and technology-coverage counters are not acceptance
 criteria for playable games.
+
+## Local metadata and lifecycle boundaries
+
+PS5 imports are references to original files. The private versioned JSON is
+bounded to 512 KiB and 256 games and uses atomic replacement; symbolic-link
+paths are refused. It is separate from bottle backups, diagnostics and Git.
+For explicitly selected game folders, local `sce_sys/icon0.png` or `icon0.png`
+is decoded asynchronously within byte and dimension limits, with at most two
+readers. Optional picture reads never hold up import. ELF/ZAR file imports do
+not scan neighbouring files; selecting one file grants no sibling-folder scope. Removing an entry removes only its reference.
+
+The selected engine is structurally checked as a supported Mach-O executable
+named `kyty_emulator`; this does not authenticate a publisher or prove it works.
+The user selects a complete trusted local engine folder or app, including its
+MoltenVK dependency. Caskrun stores the validated executable inside that package. Caskrun invokes it directly
+with `--game` and the imported path, preserving filenames literally.
+
+Each owned process has a private session log capped at 4 MiB. Stop and full Quit
+signal only retained Process objects started by this Caskrun instance; a bounded
+shutdown failure leaves Caskrun open. Independent engine sessions are untouched.
+The adapter does not manage engines’ own child processes, controllers, saves or
+graphics settings. Those limits, native Dock/window identity and real-title
+rendering/audio/performance require user testing before any compatibility claim.
+
+AnyPS5 conversion and managed engine downloads remain planned. No engine,
+MoltenVK binary, game, firmware or BIOS is redistributed by this adapter.
