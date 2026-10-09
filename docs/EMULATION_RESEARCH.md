@@ -122,3 +122,33 @@ rendering/audio/performance require user testing before any compatibility claim.
 
 AnyPS5 conversion and managed engine downloads remain planned. No engine,
 MoltenVK binary, game, firmware or BIOS is redistributed by this adapter.
+
+## Engine comparison and management proposal
+
+Rechecked upstream documentation on **9 October 2026**. This is research;
+no additional engine was installed or run, and Caskrun currently supports
+only its external KytyPS5 adapter.
+
+| Project | Upstream functionality and Mac route | Proposed place in Caskrun |
+| --- | --- | --- |
+| [KytyPS5](https://github.com/KytyPS5/KytyPS5) | Experimental x86-64 Mac build via Rosetta and MoltenVK; game folders, ELF and streamed read-only ZAR archives; graphics/debug controls. | Keep the existing adapter as the first option. |
+| [SharpEmu](https://github.com/sharpemu/sharpemu) | Independent C# PS5 engine, Mac x64 via Rosetta with bundled MoltenVK; eboot input and per-game/global environment controls. | Best candidate for a second adapter, with its own input and lifecycle validation. |
+| [KytyPlus](https://github.com/Coder787-source/KytyPlus) | KytyPS5 derivative; Mac x64 via Rosetta, pipeline caching, FSR 1.0 and configurable presentation. Upstream explicitly says game-level optimization benefits remain unvalidated. | Optional later alternative; avoid implying a performance improvement on this Mac. |
+| [AnyPS5](https://github.com/boykopovar/AnyPS5/blob/main/docs/dev/BUILD.md) | Relinker builds on Mac ARM64 but outputs x86-64 Windows/Linux programs; it does not provide Mac game execution. | Separate conversion workflow, not a drop-in Mac engine. |
+| [prosper](https://github.com/mattias800/prosper) | Experimental PS5 compatibility layer, with documented results primarily on Linux. Its README states no licence is granted yet. | Research only; do not redistribute it. |
+
+Recommendation: support multiple engine records and a per-game selection, while
+showing only engines whose adapter is implemented. Preserve each engine's
+version, arguments, save/cache roots and owned sessions independently. Validate
+a user-owned title's rendering, audio, input, saves and shutdown before marking
+that engine/game pair tested on Apple Silicon. Upstream screenshots or technology
+coverage percentages do not establish this.
+
+A small gear at the right of the existing floating header could open an
+**Engines** panel. Keep it focused: installed version/status, Add local engine,
+reviewed official download, update and rollback. Downloads should use a pinned
+release and hash, bounded staging, architecture/dependency checks, corresponding
+licence/source notices and atomic replacement. Never update an engine with an
+owned running session. Unsupported or unreviewed packages should not have a
+working Download action. This panel, downloads and extra adapters remain
+proposals pending implementation; they are not part of the browser UI update.

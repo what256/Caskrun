@@ -384,3 +384,41 @@ catalog, signature, architecture, DMG and checksum checks passed; core and
 engine receipts were unchanged. No Windows app or game was launched. Caskrun
 was left open on Discover. Superseded generated build products were removed
 after identity, reference and idle checks.
+
+## Browser game presentation and browser choice — 9 October 2026
+
+Discover uses compact picture-first cards without the enclosing grey panels.
+Pictures fit fully inside their previews, with neutral space when the source
+aspect ratio differs. Details and attribution remain available in an information
+popover. The smaller save sheet retains an editable name and Website disclosure.
+Collection's scrolling browser inspector includes the picture, a full-width
+browser chooser, play action, project details and shortcut-only removal.
+
+Browser discovery requires both HTTPS handling and HTML viewing declarations;
+general link handlers such as chat clients are excluded. A per-game preference
+stores only a validated URL hash and browser bundle identifier. Launch refreshes
+installed browsers and reports unavailable explicit selections rather than
+silently choosing another browser. Removing the saved game removes its choice.
+
+All 313 focused checks passed: 143 artwork policy/cache checks, 89 browser and
+Collection interaction checks, and 81 browser discovery, persistence and routing
+checks. Routing tests use an injected environment and a disposable preferences
+domain; they do not launch browsers or inspect personal installations.
+
+Packaged native checks verified full pictures, the information popover, name
+editing and Website disclosure followed by Cancel, sidebar wheel scrolling from
+0 to 1, removal confirmation followed by Cancel, and closing details back to the
+flat Collection grid. The original two Collection entries stayed intact. A live
+browser menu exposed a general HTTPS handler, which prompted the HTML-viewer
+filter and its regression checks. The final signed app displayed the revised
+full-width chooser and its visible arrow. macOS locked before the final filtered
+menu list and final grid alignment could be visually rechecked; those last visual
+checks remain for an unlocked session. Actual browser launch, gameplay and
+cross-session preference behaviour remain for user testing.
+
+The final ARM64 app and DMG passed compilation, catalogue, deep/strict signature,
+architecture and checksum verification. Core and runtime receipt bytes remain
+unchanged. Superseded generated apps, packages and test binaries were removed
+after identity, reference, checksum and zero-owner checks. Referenced real-bottle
+runtimes were preserved. No Windows app, browser game or PS5 engine was launched.
+The final app remains running with the browser-game inspector open.

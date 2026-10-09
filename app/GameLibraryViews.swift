@@ -525,6 +525,7 @@ actor BrowserGameCoverStore {
 struct BrowserGameCover: View {
     let entry: BrowserGameCatalogEntry
     var compact = false
+    var cornerRadius: CGFloat? = nil
     @State private var image: NSImage?
     @State private var loading = true
 
@@ -535,9 +536,8 @@ struct BrowserGameCover: View {
             .overlay {
                 GeometryReader { geometry in
                     if let image {
-                        Image(nsImage: image).resizable().scaledToFill()
+                        Image(nsImage: image).resizable().scaledToFit()
                             .frame(width: geometry.size.width, height: geometry.size.height)
-                            .clipped()
                     } else {
                         VStack(spacing: compact ? 3 : 8) {
                             if loading { ProgressView().controlSize(.small) }
@@ -549,7 +549,7 @@ struct BrowserGameCover: View {
                     }
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: compact ? 8 : 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius ?? (compact ? 8 : 12), style: .continuous))
             .accessibilityHidden(true)
             .task(id: ([entry.id, entry.artworkURL?.absoluteString ?? "", "redirects"]
                        + entry.artworkRedirectURLs.map(\.absoluteString) + ["fallbacks"]
@@ -626,11 +626,20 @@ struct AddBrowserGameSheet: View {
     @State private var link: String
     @State private var saving = false
     @State private var error: String?
+    @State private var showWebsite: Bool
+    private let beganWithCatalogEntry: Bool
 
     init(initialName: String = "", initialURL: String = "", onSave: @escaping (String, String) async throws -> Void) {
         self.onSave = onSave
         _name = State(initialValue: initialName)
         _link = State(initialValue: initialURL)
+        let isCatalogEntry = BrowserGameCatalog.entry(forSavedURL: initialURL) != nil
+        beganWithCatalogEntry = isCatalogEntry
+        _showWebsite = State(initialValue: !isCatalogEntry)
+    }
+
+    private var catalogEntry: BrowserGameCatalogEntry? {
+        BrowserGameCatalog.entry(forSavedURL: link.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     private var validName: Bool {
@@ -640,49 +649,90 @@ struct AddBrowserGameSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
-                BrowserGameArtwork(seed: link, size: 42)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Add a browser game").font(.title2.weight(.semibold))
-                    Text("A shortcut in Collection. Play in your usual browser.")
-                        .font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 20) {
+            if let entry = catalogEntry {
+                BrowserGameCover(entry: entry, cornerRadius: 10)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(catalogEntry == nil ? "Add a browser game" : "Add to Collection")
+                    .font(.system(size: 18, weight: .semibold))
+                Text("A saved shortcut, ready to play in your browser.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Name").font(.system(size: 12, weight: .medium))
+                    TextField("Game name", text: $name).textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Game name").disabled(saving)
+                }
+                if beganWithCatalogEntry {
+                    DisclosureGroup(isExpanded: $showWebsite) {
+                        websiteField.padding(.top, 6)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text("Website").font(.system(size: 12, weight: .medium))
+                            Spacer(minLength: 8)
+                            Text(BrowserGameLink.validatedURL(link)?.host ?? "Edit link")
+                                .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                    }
+                    .disabled(saving)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Website").font(.system(size: 12, weight: .medium))
+                        websiteField
+                    }
+                }
+                if !link.isEmpty && BrowserGameLink.validatedURL(link) == nil {
+                    Text("Enter a public HTTPS link without sign-in details.")
+                        .font(.system(size: 11)).foregroundStyle(.orange)
+                }
+                Text(catalogEntry?.requiresOwnFiles == true
+                     ? "This game needs files you own. Your browser handles the game and sign-in."
+                     : "Use a site you trust. Your browser handles the game and sign-in.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let error {
+                    Text(error).font(.system(size: 11)).foregroundStyle(.red)
+                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            TextField("Game name", text: $name).textFieldStyle(.roundedBorder)
-                .accessibilityLabel("Game name")
-            TextField("https://game-website.com", text: $link).textFieldStyle(.roundedBorder)
-                .accessibilityLabel("HTTPS game link")
-            Text("Use a public game page from a site you trust, without account or sign-in details in its link. Some community ports need game files you already own. Your browser handles the game and its sign-in.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if !link.isEmpty && BrowserGameLink.validatedURL(link) == nil {
-                Text("Enter an HTTPS website link without spaces, credentials or a custom port.")
-                    .font(.caption).foregroundStyle(.orange)
-            }
-            if let error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-            HStack {
+
+            HStack(spacing: 10) {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).disabled(saving)
-                Button {
-                    saving = true
-                    error = nil
-                    Task { @MainActor in
-                        defer { saving = false }
-                        do {
-                            try await onSave(name.trimmingCharacters(in: .whitespacesAndNewlines), link.trimmingCharacters(in: .whitespacesAndNewlines))
-                            dismiss()
-                        } catch { self.error = error.localizedDescription }
+                Button(action: save) {
+                    HStack(spacing: 6) {
+                        if saving { ProgressView().controlSize(.small) }
+                        Text(saving ? "Adding…" : "Add to Collection")
                     }
-                } label: {
-                    if saving { ProgressView().controlSize(.small).frame(width: 92) }
-                    else { Text("Add to Collection") }
+                    .frame(minWidth: 112)
                 }
                 .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
                 .disabled(saving || !validName || BrowserGameLink.validatedURL(link) == nil)
             }
         }
-        .padding(24).frame(width: 470)
+        .padding(22).frame(width: 430)
         .interactiveDismissDisabled(saving)
+    }
+
+    private var websiteField: some View {
+        TextField("https://game-website.com", text: $link).textFieldStyle(.roundedBorder)
+            .accessibilityLabel("HTTPS game link").disabled(saving)
+    }
+
+    private func save() {
+        guard !saving, validName, BrowserGameLink.validatedURL(link) != nil else { return }
+        saving = true
+        error = nil
+        Task { @MainActor in
+            defer { saving = false }
+            do {
+                try await onSave(name.trimmingCharacters(in: .whitespacesAndNewlines), link.trimmingCharacters(in: .whitespacesAndNewlines))
+                dismiss()
+            } catch { self.error = error.localizedDescription }
+        }
     }
 }
 

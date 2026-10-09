@@ -1423,7 +1423,10 @@ final class CaskrunModel: ObservableObject {
         editingBrowserGames = true
         Task {
             defer { editingBrowserGames = false }
-            do { browserGames = try await callAsync(["remove-browser-game", game.id], as: BrowserGames.self).games }
+            do {
+                browserGames = try await callAsync(["remove-browser-game", game.id], as: BrowserGames.self).games
+                BrowserLaunchService.shared.removePreference(for: game.url)
+            }
             catch { message = error.localizedDescription }
         }
     }
@@ -1433,7 +1436,11 @@ final class CaskrunModel: ObservableObject {
             if !isQuitting { message = "This browser game needs a valid public HTTPS address." }
             return
         }
-        if !NSWorkspace.shared.open(url) { message = "macOS could not open your default browser." }
+        Task { @MainActor in
+            guard !isQuitting else { return }
+            do { try await BrowserLaunchService.shared.open(url.absoluteString) }
+            catch { if !isQuitting { message = error.localizedDescription } }
+        }
     }
 
     func loadGameIcon(_ game: SteamGame, in bottle: Bottle) {
@@ -3365,19 +3372,10 @@ struct CaskrunApp: App {
             .padding(.horizontal, 18).padding(.top, 12).padding(.bottom, 8)
             Divider().padding(.horizontal, 18)
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    CollectionArtwork(item: item).frame(height: 152).clipped()
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                    Text(game.name).font(.title3.weight(.semibold))
-                    Text(item.subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                    Button("Play in browser") { model.openBrowserGame(game) }
-                        .buttonStyle(.borderedProminent).disabled(model.isQuitting)
-                    Text("Opens in your default browser. Closing Caskrun does not close browser tabs.")
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Button("Remove from Collection", role: .destructive) {
-                        model.removeBrowserGame(game)
-                    }.disabled(model.editingBrowserGames)
-                }
+                BrowserGameInspectorContent(game: game, isQuitting: model.isQuitting,
+                                            isEditing: model.editingBrowserGames,
+                                            onPlay: { model.openBrowserGame(game) },
+                                            onRemove: { model.removeBrowserGame(game) })
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(18)
             }
@@ -3580,36 +3578,14 @@ struct CaskrunApp: App {
                 if entries.isEmpty { ContentUnavailableView.search(text: catalogSearch) }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 240, maximum: 360), spacing: 16)], spacing: 16) {
                     ForEach(entries) { game in
-                        VStack(alignment: .leading, spacing: 12) {
-                            BrowserGameCover(entry: game)
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(game.name).font(.headline).lineLimit(2)
-                                    .frame(minHeight: 34, alignment: .topLeading)
-                                Text(game.url.host ?? "").font(.system(size: 10)).foregroundStyle(.secondary)
-                            }
-                            Text(game.detail).font(.caption).foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true).frame(minHeight: 45, alignment: .topLeading)
-                            if game.requiresOwnFiles { Label("Bring your own game files", systemImage: "folder").font(.caption) }
-                            if game.kind == .unverified {
-                                Label("Link unverified", systemImage: "questionmark.circle").font(.caption).foregroundStyle(.secondary)
-                            }
-                            HStack {
-                                Button(game.kind == .collection ? "Browse games" : game.kind == .unverified ? "Visit website" : "Play in browser") {
-                                    model.openBrowserGame(BrowserGame(id: game.id, name: game.name, url: game.url.absoluteString, created_at: 0))
-                                }.buttonStyle(.borderless)
-                                Spacer()
-                                if model.browserGames.contains(where: { $0.url == game.url.absoluteString }) {
-                                    Label("On Collection", systemImage: "checkmark").font(.caption).foregroundStyle(.secondary)
-                                } else {
-                                    Button("Add to Collection") { browserGameRequest = AddBrowserGameRequest(name: game.name, url: game.url.absoluteString) }
-                                        .buttonStyle(.bordered)
-                                }
-                            }
-                            Link("Source", destination: game.sourceURL).font(.system(size: 10)).foregroundStyle(.secondary)
-                        }
-                        .padding(12).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 16))
-                        .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.06), lineWidth: 1) }
+                        BrowserDiscoverCard(entry: game,
+                                            isSaved: model.browserGames.contains { $0.url == game.url.absoluteString },
+                                            onPlay: {
+                            model.openBrowserGame(BrowserGame(id: game.id, name: game.name,
+                                                             url: game.url.absoluteString, created_at: 0))
+                        }, onAdd: {
+                            browserGameRequest = AddBrowserGameRequest(name: game.name, url: game.url.absoluteString)
+                        })
                     }
                 }
                 Text("Community ports and recreations are separate from official releases. Each site handles your game files and saves. Gameplay is untested.")
