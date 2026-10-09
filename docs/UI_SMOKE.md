@@ -411,9 +411,10 @@ editing and Website disclosure followed by Cancel, sidebar wheel scrolling from
 flat Collection grid. The original two Collection entries stayed intact. A live
 browser menu exposed a general HTTPS handler, which prompted the HTML-viewer
 filter and its regression checks. The final signed app displayed the revised
-full-width chooser and its visible arrow. macOS locked before the final filtered
-menu list and final grid alignment could be visually rechecked; those last visual
-checks remain for an unlocked session. Actual browser launch, gameplay and
+full-width chooser and its visible arrow. A later unlocked check verified the
+final menu lists the installed Chrome browsers and Safari, excluding the chat
+client. The menu was dismissed without changing the preference, and Discover's
+full-picture grid was visually rechecked. Actual browser launch, gameplay and
 cross-session preference behaviour remain for user testing.
 
 The final ARM64 app and DMG passed compilation, catalogue, deep/strict signature,
@@ -422,3 +423,26 @@ unchanged. Superseded generated apps, packages and test binaries were removed
 after identity, reference, checksum and zero-owner checks. Referenced real-bottle
 runtimes were preserved. No Windows app, browser game or PS5 engine was launched.
 The final app remains running with the browser-game inspector open.
+
+## Mixed Collection alignment — 9 October 2026
+
+Apps and games now share an artwork area and centred title/caption alignment.
+Original app icons stay 48px, without a surrounding panel, and sit at the bottom
+of the common artwork space so their names remain close. Browser pictures remain
+fully fitted. Selection highlights only the name; the enclosing grey/blue game
+panel and outline are removed. Fixed title, caption and status space keep rows
+stable when names wrap or a running status appears. Click routing, artwork loading,
+actions and inspectors are unchanged.
+
+The signed package displayed the original Steam icon beside the saved browser
+game, with aligned names and captions both in the full grid and beside the open
+inspector. Single clicks opened each item's correct sidebar. Closing Windows
+details returned to the same unselected two-item Collection. No app or game was
+launched, and the existing entries and browser preference stayed intact.
+
+Swift compilation, catalogue validation, ARM64 app/core checks, deep/strict
+signature and DMG/checksum verification passed. Core and engine receipts remain
+unchanged. Native Quit completed before the guarded app replacement. The previous
+generated app and superseded package were removed after identity, reference,
+checksum and idle checks. The current app remains open on Collection; actual
+gameplay and the AnyPS5 Wine experiment are still untested.

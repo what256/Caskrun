@@ -152,3 +152,37 @@ licence/source notices and atomic replacement. Never update an engine with an
 owned running session. Unsupported or unreviewed packages should not have a
 working Download action. This panel, downloads and extra adapters remain
 proposals pending implementation; they are not part of the browser UI update.
+
+## AnyPS5 on Mac: feasibility and first experiment
+
+Upstream's [tested compatibility list](https://github.com/boykopovar/AnyPS5/blob/main/docs/user/COMPATIBILITY.md)
+currently records Dreaming Sarah as playable on Windows; Linux is marked unknown.
+This is an upstream report, not a Caskrun result. Neither the relinker nor a
+converted game was run for this review.
+
+Sharing Unix conventions does not provide binary compatibility. The
+[build instructions](https://github.com/boykopovar/AnyPS5/blob/main/docs/dev/BUILD.md)
+allow the converter to run on Apple Silicon, but its outputs stay x86-64 Linux
+ELF or Windows PE, with target-specific system libraries. The
+[relinker implementation](https://github.com/boykopovar/AnyPS5/blob/main/core/relinker/main.cpp)
+selects only these two output formats; the
+[library export patcher](https://github.com/boykopovar/AnyPS5/blob/main/core/libs/nid/src/BinaryPatcherFactory.cpp)
+also handles only ELF and PE. A native Mac output requires Mach-O generation and
+linking, ported system-library behaviour, and a supported CPU execution path.
+Keeping x86-64 and investigating Rosetta would be smaller than adding an ARM
+translation backend. This is an engineering assessment, not implemented support.
+
+The smaller first experiment is Windows output plus Windows-built AnyPS5
+libraries through an isolated Caskrun Wine/Rosetta bottle, using a user-owned
+title already working upstream. The project's
+[graphics pipeline](https://github.com/boykopovar/AnyPS5/blob/main/docs/dev/ARCHITECTURE.md)
+targets Vulkan/SPIR-V. [MoltenVK](https://github.com/KhronosGroup/MoltenVK) provides
+a Vulkan subset over Metal, so required features need checking before treating
+that as a viable bridge. Current D3D Metal/DXMT settings do not by themselves
+implement this game's Vulkan requirements.
+
+Compare rendering, frame times, audio, input, saves, relaunch and shutdown before
+claiming Windows-like behaviour. A Windows result on different hardware cannot
+establish equal Mac performance. The Wine experiment, native Mac output and
+performance comparison remain untested; no conversion control is added to the
+app by this research.

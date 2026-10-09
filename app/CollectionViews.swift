@@ -228,45 +228,37 @@ private struct CollectionCard: View {
     let onOpen: () -> Void
     @State private var hovered = false
 
+    private var caption: String {
+        if item.kind == .app { return "Windows app" }
+        return item.subtitle.isEmpty ? item.platform.title : item.subtitle
+    }
+
     var body: some View {
         Button(action: onSelect) {
-            if item.kind == .app {
-                VStack(spacing: 5) {
-                    CollectionArtwork(item: item)
+            VStack(spacing: 7) {
+                CollectionArtwork(item: item)
+                VStack(spacing: 3) {
                     Text(item.name)
                         .font(.system(size: 12, weight: .semibold)).lineLimit(2)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 8).padding(.vertical, 3)
                         .foregroundStyle(isSelected || hovered ? Color.accentColor : Color.primary)
-                        .background(isSelected ? Color.accentColor.opacity(0.10) : .clear, in: Capsule())
-                        .frame(maxWidth: 120)
+                        .background(isSelected ? Color.accentColor.opacity(0.10) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 36, alignment: .top)
+                    Text(caption)
+                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                        .frame(height: 12)
+                    Text(item.status.isEmpty ? " " : item.status)
+                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                        .frame(height: 12)
+                        .accessibilityHidden(item.status.isEmpty)
                 }
-                .padding(.top, 8).frame(width: 120, height: 116, alignment: .top)
-                .frame(maxWidth: .infinity, alignment: .center).contentShape(Rectangle())
-            } else {
-                VStack(alignment: .leading, spacing: 9) {
-                    CollectionArtwork(item: item)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(item.name).font(.system(size: 12, weight: .semibold)).lineLimit(2)
-                            .frame(height: 32, alignment: .topLeading)
-                        Text(item.subtitle.isEmpty ? item.platform.title : item.subtitle)
-                            .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                        if !item.status.isEmpty {
-                            Text(item.status).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                        }
-                    }
-                    .padding(.horizontal, 3)
-                }
-                .padding(8)
-                .foregroundStyle(Color.primary)
-                .background(isSelected ? Color.accentColor.opacity(0.08) : Color.primary.opacity(hovered ? 0.035 : 0),
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(isSelected ? Color.accentColor.opacity(0.3) : .clear)
-                }
-                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
+            .padding(.horizontal, 4).padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain).onHover { hovered = $0 }
         .help(item.cardHelp)
@@ -282,15 +274,19 @@ struct CollectionArtwork: View {
 
     var body: some View {
         if item.kind == .app {
-            Group {
-                if let icon = item.icon {
-                    Image(nsImage: icon).resizable().interpolation(.high).scaledToFit()
-                } else {
-                    Image(systemName: "app").font(.system(size: 28, weight: .light)).foregroundStyle(.tertiary)
+            Color.clear
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .overlay(alignment: .bottom) {
+                    Group {
+                        if let icon = item.icon {
+                            Image(nsImage: icon).resizable().interpolation(.high).scaledToFit()
+                        } else {
+                            Image(systemName: "app").font(.system(size: 28, weight: .light)).foregroundStyle(.tertiary)
+                        }
+                    }
+                    .frame(width: 48, height: 48)
                 }
-            }
-            .frame(width: 48, height: 48).frame(width: 56, height: 56)
-            .accessibilityHidden(true)
+                .accessibilityHidden(true)
         } else if item.platform == .browser, let url = item.browserURL,
            let entry = BrowserGameCatalog.entry(forSavedURL: url) {
             BrowserGameCover(entry: entry)
