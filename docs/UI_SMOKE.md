@@ -220,3 +220,26 @@ The candidate's app signature, ARM64 architecture, bundled catalogue and DMG
 checksum were verified. The signed core hash and engine component manifest
 match the preceding package; graphics defaults remain unchanged. Native visual
 verification was initially blocked by the locked Mac.
+
+After the Mac was unlocked, the older app completed its native Quit command
+and the candidate replaced the standard local app after signature and idle
+checks. One Caskrun UI process opened. Home retained the existing bottle folder;
+Discover retained all eight stores and only its Stores / Browser games filters.
+The expanded three-column grid showed scene previews for BO1, Kino, Cheese
+Cube, Vibe Slops II, Surfd, Halo CE, Diablo and WASM Arcade. Picture-free entries
+showed title cards. Search narrowed Halo, WASM Arcade, Hextris and BO1 correctly;
+own-file badges, Browse games and unverified Visit website actions were visible.
+
+A temporary BO1 bookmark changed its card to On Home and displayed the same
+picture as a smaller Home preview. Removing that fixture through the native
+confirmation returned Home to its original bottle-only state. No game or
+installer was opened and no graphics setting was changed. The previous
+generated app was removed after identity, signature and zero-owner checks;
+engine builds still referenced by existing bottles were preserved.
+
+Moon initially retained its title fallback. A narrow in-memory request using
+the production headers returned a valid 1,352,360-byte PNG, 1024 by 1024 pixels,
+and thumbnail decoding succeeded within the existing limits. That probe does
+not identify the earlier request's failure or prove that every remote preview
+loads reliably. No image asset or request log was retained. Narrow-window
+layout and browser gameplay remain for broader user testing.
