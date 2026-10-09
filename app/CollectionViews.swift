@@ -165,32 +165,44 @@ struct CollectionGrid: View {
         }
     }
 
-    @ViewBuilder private var emptyState: some View {
-        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            ContentUnavailableView.search(text: query).frame(maxWidth: .infinity, minHeight: 190)
-        } else {
-            VStack(alignment: .leading, spacing: 12) {
-                Image(systemName: platform.symbol).font(.system(size: 25)).foregroundStyle(.secondary)
-                Text(platform == .ps5 ? "Your PS5 games" : platform == .browser ? "Your browser games"
-                     : kind == .app ? "Your apps" : "Your collection")
-                    .font(.title3.weight(.semibold))
-                Text(emptyDescription).font(.subheadline).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button(platform == .ps5 ? "Import PS5 game" : platform == .browser ? "Find browser games" : "Explore Discover",
-                       action: platform == .ps5 ? onImportPS5 : onDiscover)
-                    .buttonStyle(.bordered)
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(emptyTitle).font(.system(size: 14, weight: .semibold))
+            Text(emptyDescription).font(.system(size: 12)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if isEmptyTypeFilter && query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Button("Show all items") { kind = nil }
+                    .font(.system(size: 12, weight: .medium)).buttonStyle(.borderless)
+                    .padding(.top, 3)
             }
-            .padding(22).frame(maxWidth: .infinity, minHeight: 190, alignment: .leading)
-            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 18))
-            .padding(.horizontal, 24).padding(.bottom, 24)
         }
+        .frame(maxWidth: 440, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 24)
+    }
+
+    private var isEmptyTypeFilter: Bool {
+        guard kind != nil else { return false }
+        return entries.contains { platform == .all || $0.platform == platform }
+            || (kind == .app && (platform == .ps5 || platform == .browser))
+    }
+
+    private var emptyTitle: String {
+        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "No results" }
+        if isEmptyTypeFilter { return kind == .app ? "No apps in this view" : "No games in this view" }
+        if platform == .ps5 { return "No PS5 games yet" }
+        if platform == .browser { return "No browser games yet" }
+        return kind == .app ? "No apps yet" : "Your collection starts here"
     }
 
     private var emptyDescription: String {
-        if platform == .ps5 { return "Import a game you own. PS5 launching needs a compatible engine and is still experimental." }
-        if platform == .browser { return "Save a game from Discover or add your own link. It opens in your usual browser." }
-        if kind == .app { return "Installed launchers and saved Windows apps appear here. Add an app using the + menu." }
-        return "Your games, apps and browser links appear together here. Add something using the + menu or Discover."
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !search.isEmpty { return "Nothing in this view matches “\(search)”." }
+        if isEmptyTypeFilter { return "Change the item filter to see the rest of your collection." }
+        if platform == .ps5 { return "Import a game you own with the + menu." }
+        if platform == .browser { return "Save a game from Discover, or add your own link with +." }
+        if kind == .app { return "Add an app from Discover or the + menu." }
+        return "Add games and apps from Discover or the + menu."
     }
 
     private func select(_ item: CollectionItem) {

@@ -355,3 +355,19 @@ Launcher and bottle icons now load bounded in-memory bytes instead of retaining
 an AppKit file mapping. After that fix, the displayed Steam icon held no bottle
 files and native Quit Caskrun completed normally. Core ownership checks and
 engine bytes were preserved. The final app remains open for user testing.
+
+## Compact Collection empty states — 9 October 2026
+
+PS5 and Browser Collection no longer show a full-width grey onboarding card,
+large duplicate icon or discovery/import button. A compact heading and one line
+of guidance point to the existing Discover and + controls. Search and type-filter
+empty results use the same quiet layout; an empty Apps/Games filter offers
+Show all items rather than an unrelated import action.
+
+The signed ARM64 package displayed both compact empty views. Selecting Apps
+inside PS5 showed No apps in this view, and Show all items restored its normal
+empty state. The package passed compilation, catalog, signature, architecture,
+DMG and checksum checks; core and runtime receipts were unchanged. No game,
+installer or Windows tool was launched, and user data was left intact. Caskrun
+remained open on PS5 Collection. The previous generated app and superseded
+package were removed after identity and idle checks.
