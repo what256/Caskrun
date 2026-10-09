@@ -3104,10 +3104,12 @@ struct CaskrunApp: App {
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 34, height: 34)
-                    .background(.primary.opacity(hoveredInstall ? 0.13 : 0.065), in: Circle())
+                    .foregroundStyle(.primary)
             }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .menuStyle(.borderlessButton).menuIndicator(.hidden)
+            .frame(width: 34, height: 34)
+            .background(.primary.opacity(hoveredInstall ? 0.13 : 0.065), in: Circle())
+            .contentShape(Circle())
             .help("Add games, apps or import a bottle")
             .accessibilityLabel("Add games, apps or import a bottle")
             .onHover { hoveredInstall = $0 }

@@ -371,3 +371,16 @@ DMG and checksum checks; core and runtime receipts were unchanged. No game,
 installer or Windows tool was launched, and user data was left intact. Caskrun
 remained open on PS5 Collection. The previous generated app and superseded
 package were removed after identity and idle checks.
+
+## Header Add control — 9 October 2026
+
+The floating header's Add menu now applies its 34px circular background to the
+menu itself, so the native borderless control displays the intended round
+button. The small plus symbol, subtle idle/hover fill and menu actions remain.
+
+The signed ARM64 app displayed the circular control, and clicking it opened
+all nine existing Add actions. Escape dismissed the menu. Compilation,
+catalog, signature, architecture, DMG and checksum checks passed; core and
+engine receipts were unchanged. No Windows app or game was launched. Caskrun
+was left open on Discover. Superseded generated build products were removed
+after identity, reference and idle checks.
