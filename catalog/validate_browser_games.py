@@ -8,6 +8,7 @@ from urllib.parse import unquote, urlsplit
 
 CATALOG = Path(__file__).with_name("browser-games.json")
 FIELDS = {"id", "name", "detail", "url", "sourceURL", "symbol", "requiresOwnFiles"}
+OPTIONAL_FIELDS = {"artworkURL", "artworkRedirectURLs", "kind"}
 
 
 def checked_url(value):
@@ -46,7 +47,7 @@ def validate(data):
         raise ValueError("Browser catalog must contain 1–64 entries")
     ids, urls = set(), set()
     for item in entries:
-        if not isinstance(item, dict) or set(item) != FIELDS:
+        if not isinstance(item, dict) or not FIELDS.issubset(item) or set(item) - FIELDS - OPTIONAL_FIELDS:
             raise ValueError("Unknown or missing browser game fields")
         for field, limit in (("id", 64), ("name", 160), ("detail", 512), ("symbol", 64)):
             value = item[field]
@@ -60,6 +61,23 @@ def validate(data):
         if item["url"] in urls or type(item["requiresOwnFiles"]) is not bool:
             raise ValueError("Duplicate browser game URL or invalid own-files flag")
         urls.add(item["url"])
+        kind = item.get("kind", "game")
+        if not isinstance(kind, str) or kind not in {"game", "collection", "unverified"}:
+            raise ValueError("Unknown browser entry kind")
+        artwork = item.get("artworkURL")
+        redirects = item.get("artworkRedirectURLs", [])
+        if not isinstance(redirects, list) or len(redirects) > 3 or any(not isinstance(url, str) for url in redirects):
+            raise ValueError("Invalid artwork redirects")
+        if len(set(redirects)) != len(redirects) or (artwork is None and redirects):
+            raise ValueError("Duplicate or orphaned artwork redirects")
+        if artwork is not None:
+            checked_url(artwork)
+            if "#" in artwork or artwork in redirects:
+                raise ValueError("Invalid artwork URL")
+        for redirect in redirects:
+            checked_url(redirect)
+            if "#" in redirect:
+                raise ValueError("Artwork URLs cannot contain fragments")
     return len(entries)
 
 

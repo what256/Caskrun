@@ -11,10 +11,42 @@ class BrowserCatalogTests(unittest.TestCase):
         cls.catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
 
     def test_curated_links_include_explicit_own_files_port(self):
-        self.assertEqual(validate(self.catalog), 5)
+        self.assertEqual(validate(self.catalog), len(self.catalog["entries"]))
+        self.assertGreater(len(self.catalog["entries"]), 20)
         vice = next(item for item in self.catalog["entries"] if item["id"] == "vice-city-community-port")
         self.assertTrue(vice["requiresOwnFiles"])
         self.assertIn("own game files", vice["detail"])
+
+    def test_optional_cover_metadata_keeps_legacy_entries_valid(self):
+        data = copy.deepcopy(self.catalog)
+        for entry in data["entries"]:
+            for field in ("artworkURL", "artworkRedirectURLs", "kind"):
+                entry.pop(field, None)
+        self.assertEqual(validate(data), len(data["entries"]))
+        data["entries"][0]["artworkURL"] = "https://games.example.org/cover.jpg"
+        data["entries"][0]["artworkRedirectURLs"] = ["https://images.example.org/cover.jpg"]
+        self.assertEqual(validate(data), len(data["entries"]))
+
+    def test_artwork_rejects_credentials_fragments_and_invalid_redirects(self):
+        values = (
+            {"artworkURL": "http://games.example.org/a.png"},
+            {"artworkURL": "https://games.example.org/a.png?token=secret"},
+            {"artworkURL": "https://games.example.org/a.png#"},
+            {"artworkRedirectURLs": ["https://images.example.org/a.png"]},
+            {"artworkURL": "https://games.example.org/a.png", "artworkRedirectURLs": ["https://games.example.org/a.png"]},
+            {"artworkURL": "https://games.example.org/a.png", "artworkRedirectURLs": ["https://images.example.org/a.png"] * 2},
+            {"artworkURL": "https://games.example.org/a.png", "artworkRedirectURLs": [f"https://images.example.org/{i}.png" for i in range(4)]},
+            {"artworkURL": "https://games.example.org/a.png", "artworkRedirectURLs": ["https://images.example.org/a.png?password=secret"]},
+            {"kind": "installer"},
+            {"kind": ["game"]},
+        )
+        for value in values:
+            data = copy.deepcopy(self.catalog)
+            for field in ("artworkURL", "artworkRedirectURLs", "kind"):
+                data["entries"][0].pop(field, None)
+            data["entries"][0].update(value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate(data)
 
     def test_schema_and_unknown_fields_refused(self):
         for version in (0, 2, True, "1"):

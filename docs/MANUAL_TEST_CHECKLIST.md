@@ -82,6 +82,10 @@ public binary licence/distribution review are release gates.
   Steam must handle ownership, sign-in, agreements and download confirmation.
 - Add a browser game from Discover or a public HTTPS link. Confirm Home opens
   one default-browser tab; removing the shortcut preserves browser game data.
+- Check scene previews and title fallbacks at narrow and wide window sizes.
+  A saved known game should reuse its picture on Home; a custom link must not
+  cause an artwork request. Check own-file badges, collection Browse games and
+  unverified Visit website labels. Website reachability is not a gameplay test.
 - In an idle DXMT bottle, try the frame target and optional MetalFX spatial
   scales with a real game. Compare performance, image quality and UI scaling.
   Reset to application controlled / Off afterwards; existing defaults remain

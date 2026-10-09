@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import SwiftUI
 
 struct BrowserGame: Codable, Identifiable, Sendable {
@@ -14,6 +15,10 @@ struct BrowserGames: Decodable, Sendable {
     let games: [BrowserGame]
 }
 
+enum BrowserGameCatalogKind: String, Decodable, Sendable {
+    case game, collection, unverified
+}
+
 struct BrowserGameCatalogEntry: Decodable, Identifiable, Sendable {
     let id: String
     let name: String
@@ -22,6 +27,32 @@ struct BrowserGameCatalogEntry: Decodable, Identifiable, Sendable {
     let sourceURL: URL
     let symbol: String
     let requiresOwnFiles: Bool
+    let artworkURL: URL?
+    let artworkRedirectURLs: [URL]
+    let kind: BrowserGameCatalogKind
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, detail, url, sourceURL, symbol, requiresOwnFiles, artworkURL, artworkRedirectURLs, kind
+    }
+
+    init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        id = try fields.decode(String.self, forKey: .id)
+        name = try fields.decode(String.self, forKey: .name)
+        detail = try fields.decode(String.self, forKey: .detail)
+        url = try fields.decode(URL.self, forKey: .url)
+        sourceURL = try fields.decode(URL.self, forKey: .sourceURL)
+        symbol = try fields.decode(String.self, forKey: .symbol)
+        requiresOwnFiles = try fields.decode(Bool.self, forKey: .requiresOwnFiles)
+        artworkURL = try fields.decodeIfPresent(URL.self, forKey: .artworkURL)
+        artworkRedirectURLs = fields.contains(.artworkRedirectURLs)
+            ? try fields.decode([URL].self, forKey: .artworkRedirectURLs) : []
+        kind = fields.contains(.kind) ? try fields.decode(BrowserGameCatalogKind.self, forKey: .kind) : .game
+        guard BrowserGameCoverPolicy.validArtworkMetadata(url: artworkURL, redirects: artworkRedirectURLs) else {
+            throw DecodingError.dataCorruptedError(forKey: .artworkURL, in: fields,
+                                                   debugDescription: "Invalid browser game artwork URLs")
+        }
+    }
 }
 
 enum BrowserGameCatalog {
@@ -45,12 +76,270 @@ enum BrowserGameCatalog {
                           && entry.detail.utf8.count <= 512 && !entry.symbol.isEmpty
                           && BrowserGameLink.validatedURL(entry.url.absoluteString) != nil
                           && BrowserGameLink.validatedURL(entry.sourceURL.absoluteString) != nil
+                          && BrowserGameCoverPolicy.validArtworkMetadata(url: entry.artworkURL, redirects: entry.artworkRedirectURLs)
                   }) else { throw CocoaError(.coderInvalidValue) }
             return (document.entries, nil)
         } catch {
             return ([], "The browser game catalog could not be read. You can still add your own game link.")
         }
     }()
+
+    static func entry(forSavedURL url: String, in entries: [BrowserGameCatalogEntry] = loaded.entries) -> BrowserGameCatalogEntry? {
+        // A custom bookmark with a similar host or path does not inherit the
+        // catalogue's artwork authority. Only the exact public game URL does.
+        entries.first { $0.url.absoluteString == url }
+    }
+}
+
+/// Artwork comes only from reviewed, explicit catalogue metadata. Adding a
+/// custom bookmark never causes Caskrun to crawl that site or load its images.
+struct BrowserGameCoverSource: Sendable {
+    let url: URL
+    let allowedURLs: Set<String>
+
+    init?(entry: BrowserGameCatalogEntry, catalog: [BrowserGameCatalogEntry]) {
+        guard let approved = catalog.first(where: { $0.id == entry.id }),
+              approved.url == entry.url, approved.artworkURL == entry.artworkURL,
+              approved.artworkRedirectURLs == entry.artworkRedirectURLs,
+              let url = approved.artworkURL,
+              BrowserGameCoverPolicy.validArtworkMetadata(url: url, redirects: approved.artworkRedirectURLs) else { return nil }
+        self.url = url
+        allowedURLs = Set(([url] + approved.artworkRedirectURLs).map(\.absoluteString))
+    }
+}
+
+enum BrowserGameCoverPolicy {
+    static let maximumBytes = 2 * 1024 * 1024
+    static let maximumRedirects = 3
+    static let maximumDimension = 8192
+    static let maximumPixels = 32_000_000
+    static let thumbnailDimension = 960
+    static let acceptedTypes: [String: String] = [
+        "image/png": "public.png", "image/jpeg": "public.jpeg", "image/webp": "org.webmproject.webp"
+    ]
+
+    static func checkedArtworkURL(_ url: URL) -> Bool {
+        url.fragment == nil && BrowserGameLink.validatedURL(url.absoluteString) == url
+    }
+
+    static func validArtworkMetadata(url: URL?, redirects: [URL]) -> Bool {
+        guard redirects.count <= maximumRedirects, Set(redirects).count == redirects.count,
+              redirects.allSatisfy(checkedArtworkURL) else { return false }
+        guard let url else { return redirects.isEmpty }
+        return checkedArtworkURL(url) && !redirects.contains(url)
+    }
+
+    static func request(for url: URL, allowedURLs: Set<String>) -> URLRequest? {
+        guard checkedArtworkURL(url), allowedURLs.contains(url.absoluteString) else { return nil }
+        // Rebuilding each redirect drops cookies, authorization and a Referer
+        // which may have been attached to the server's redirect request.
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 10)
+        request.httpMethod = "GET"
+        request.httpShouldHandleCookies = false
+        request.setValue("image/png,image/jpeg,image/webp", forHTTPHeaderField: "Accept")
+        request.setValue("Caskrun/0.1", forHTTPHeaderField: "User-Agent")
+        return request
+    }
+
+    static func sessionConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        configuration.timeoutIntervalForRequest = 10
+        configuration.timeoutIntervalForResource = 15
+        configuration.httpMaximumConnectionsPerHost = 2
+        return configuration
+    }
+
+    static func accepts(_ response: HTTPURLResponse, source: BrowserGameCoverSource) -> Bool {
+        guard response.statusCode == 200, let url = response.url,
+              checkedArtworkURL(url), source.allowedURLs.contains(url.absoluteString),
+              response.expectedContentLength < 0 || response.expectedContentLength <= maximumBytes,
+              let mime = response.mimeType?.lowercased(), acceptedTypes[mime] != nil else { return false }
+        return true
+    }
+
+    static func boundedDimensions(width: Int, height: Int) -> Bool {
+        width >= 64 && height >= 64 && width <= maximumDimension && height <= maximumDimension
+            && width * height <= maximumPixels
+    }
+
+    static func thumbnail(_ data: Data, mimeType: String) -> Data? {
+        guard !data.isEmpty, data.count <= maximumBytes,
+              let expectedType = acceptedTypes[mimeType.lowercased()],
+              let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let actualType = CGImageSourceGetType(source) as String?, actualType == expectedType,
+              CGImageSourceGetCount(source) > 0,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              boundedDimensions(width: width, height: height) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: thumbnailDimension
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, "public.png" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return output as Data
+    }
+}
+
+private final class BrowserGameCoverRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let allowedURLs: Set<String>
+    private let lock = NSLock()
+    private var redirects = 0
+
+    init(source: BrowserGameCoverSource) { allowedURLs = source.allowedURLs }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        lock.lock()
+        redirects += 1
+        let withinLimit = redirects <= BrowserGameCoverPolicy.maximumRedirects
+        lock.unlock()
+        completionHandler(withinLimit ? request.url.flatMap { BrowserGameCoverPolicy.request(for: $0, allowedURLs: allowedURLs) } : nil)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        // TLS trust uses the system verifier; website or proxy account challenges
+        // cannot draw on a user's saved credentials.
+        completionHandler(challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust
+                          ? .performDefaultHandling : .cancelAuthenticationChallenge, nil)
+    }
+}
+
+private actor BrowserGameCoverStore {
+    static let shared = BrowserGameCoverStore()
+    private var cache: [String: Data] = [:]
+    private var cacheOrder: [String] = []
+    private var cacheBytes = 0
+    private let maximumCacheBytes = 24 * 1024 * 1024
+    private var active = 0
+
+    private func remember(_ data: Data, key: String) {
+        guard data.count <= maximumCacheBytes else { return }
+        if let previous = cache.removeValue(forKey: key) { cacheBytes -= previous.count }
+        cacheOrder.removeAll { $0 == key }
+        while cacheBytes + data.count > maximumCacheBytes || cacheOrder.count >= 40 {
+            let oldest = cacheOrder.removeFirst()
+            if let removed = cache.removeValue(forKey: oldest) { cacheBytes -= removed.count }
+        }
+        cache[key] = data
+        cacheOrder.append(key)
+        cacheBytes += data.count
+    }
+
+    func load(_ entry: BrowserGameCatalogEntry) async -> Data? {
+        guard let source = BrowserGameCoverSource(entry: entry, catalog: BrowserGameCatalog.loaded.entries),
+              let request = BrowserGameCoverPolicy.request(for: source.url, allowedURLs: source.allowedURLs) else { return nil }
+        let key = source.url.absoluteString
+        guard !Task.isCancelled else { return nil }
+        if let data = cache[key] {
+            cacheOrder.removeAll { $0 == key }
+            cacheOrder.append(key)
+            return data
+        }
+        while active >= 3 {
+            do { try await Task.sleep(for: .milliseconds(40)) } catch { return nil }
+        }
+        guard !Task.isCancelled else { return nil }
+        if let data = cache[key] { return data }
+        active += 1
+        defer { active -= 1 }
+        let delegate = BrowserGameCoverRedirects(source: source)
+        let session = URLSession(configuration: BrowserGameCoverPolicy.sessionConfiguration(), delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        return await withTaskCancellationHandler {
+            do {
+                let (bytes, response) = try await session.bytes(for: request)
+                guard let http = response as? HTTPURLResponse, BrowserGameCoverPolicy.accepts(http, source: source),
+                      let mimeType = http.mimeType else { return nil }
+                var data = Data()
+                for try await byte in bytes {
+                    guard !Task.isCancelled, data.count < BrowserGameCoverPolicy.maximumBytes else { return nil }
+                    data.append(byte)
+                }
+                guard !Task.isCancelled else { return nil }
+                let thumbnail = await Task.detached(priority: .utility) {
+                    BrowserGameCoverPolicy.thumbnail(data, mimeType: mimeType)
+                }.value
+                guard !Task.isCancelled, let thumbnail else { return nil }
+                remember(thumbnail, key: key)
+                return thumbnail
+            } catch { return nil }
+        } onCancel: {
+            // This also interrupts a stalled body/header read, which cannot
+            // reach the per-byte cancellation check until data arrives.
+            session.invalidateAndCancel()
+        }
+    }
+}
+
+/// Landscape pictures for Discover, separate from the compact Home shortcut.
+struct BrowserGameCover: View {
+    let entry: BrowserGameCatalogEntry
+    var compact = false
+    @State private var image: NSImage?
+
+    private var tint: Color {
+        let seed = entry.id.utf8.reduce(UInt64(5381)) { ($0 &* 33) &+ UInt64($1) }
+        return Color(hue: Double(seed % 360) / 360, saturation: 0.52, brightness: 0.56)
+    }
+
+    var body: some View {
+        Rectangle()
+            .fill(LinearGradient(colors: [tint.opacity(0.65), tint, .black.opacity(0.86)],
+                                 startPoint: .topLeading, endPoint: .bottomTrailing))
+            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .overlay {
+                GeometryReader { geometry in
+                    if let image {
+                        Image(nsImage: image).resizable().scaledToFill()
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .clipped()
+                    } else {
+                        ZStack(alignment: .bottomLeading) {
+                            Circle().stroke(.white.opacity(0.12), lineWidth: 28)
+                                .frame(width: geometry.size.width * 0.7)
+                                .offset(x: geometry.size.width * 0.52, y: -geometry.size.height * 0.24)
+                            Text(entry.name).font(.system(size: compact ? 12 : 23, weight: .bold, design: .rounded))
+                                .lineLimit(compact ? 2 : 3).minimumScaleFactor(0.75).foregroundStyle(.white.opacity(0.94))
+                                .padding(compact ? 8 : 18)
+                        }
+                        .frame(width: geometry.size.width, height: geometry.size.height, alignment: .bottomLeading)
+                    }
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: compact ? 8 : 12, style: .continuous))
+            .accessibilityHidden(true)
+            .task(id: entry.id + ":" + (entry.artworkURL?.absoluteString ?? "")) {
+                image = nil
+                guard let bytes = await BrowserGameCoverStore.shared.load(entry), !Task.isCancelled else { return }
+                image = NSImage(data: bytes)
+            }
+    }
+}
+
+private struct BrowserGameHomeArtwork: View {
+    let game: BrowserGame
+
+    var body: some View {
+        if let entry = BrowserGameCatalog.entry(forSavedURL: game.url) {
+            BrowserGameCover(entry: entry, compact: true).frame(width: 96, height: 54)
+        } else {
+            BrowserGameArtwork(seed: game.url)
+        }
+    }
 }
 
 /// Mirrors the core's conservative bookmark policy. The core remains the
@@ -202,7 +491,7 @@ struct BrowserGameTile: View {
             if opensOnSingleClick ? clicks < 2 : clicks >= 2 { onOpen() }
         } label: {
             VStack(spacing: 8) {
-                BrowserGameArtwork(seed: game.url)
+                BrowserGameHomeArtwork(game: game)
                 Text(game.name).font(.system(size: 13, weight: .semibold)).lineLimit(2)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(isSelected || hovered ? Color.accentColor : Color.primary)

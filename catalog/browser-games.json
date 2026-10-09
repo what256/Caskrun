@@ -2,49 +2,259 @@
   "schemaVersion": 1,
   "entries": [
     {
+      "id": "bo1-zombies",
+      "name": "BO1 Zombies · community",
+      "detail": "Community browser Zombies maps. A fan project, separate from the official Black Ops release.",
+      "url": "https://vel.gg/bo1z",
+      "sourceURL": "https://vel.gg/bo1z",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://vel.gg/bo1z/art/og-mapselect.png"
+    },
+    {
       "id": "moon-zombies",
       "name": "Moon Zombies",
-      "detail": "Community browser shooter. Opens on the developer's website.",
+      "detail": "Community Zombies recreation set on the Moon. Opens on the project website.",
       "url": "https://moon-zombies.pages.dev/",
       "sourceURL": "https://moon-zombies.pages.dev/",
-      "symbol": "moon.stars.fill",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://moon-zombies.pages.dev/ui/loadscreen_zombie_moon.png"
+    },
+    {
+      "id": "kino-der-toten",
+      "name": "Kino der Toten · community",
+      "detail": "Community browser Zombies survival. A recreation, not an official Call of Duty release.",
+      "url": "https://kino-der-toten.pages.dev/",
+      "sourceURL": "https://kino-der-toten.pages.dev/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://kino-der-toten.pages.dev/social/kino-preview-v1.png"
+    },
+    {
+      "id": "cheese-cube-zombies",
+      "name": "Cheese Cube · Zombies",
+      "detail": "Community recreation of a BO3 custom Zombies map, with browser solo and multiplayer options.",
+      "url": "https://cheese-cube.pages.dev/zm_ccube",
+      "sourceURL": "https://cheese-cube.pages.dev/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://cheese-cube.pages.dev/zm_ccube/menu/preview.jpg"
+    },
+    {
+      "id": "vibe-slops-ii",
+      "name": "Vibe Slops II · BO2-inspired",
+      "detail": "Claude of Duty: Vibe Slops II is a community browser FPS using a BO2 map export. It is not the full official Black Ops 2 game.",
+      "url": "https://vibeslops.luckeysystems.com/",
+      "sourceURL": "https://vibeslops.luckeysystems.com/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://vibeslops.luckeysystems.com/social/og-cover.png"
+    },
+    {
+      "id": "mw2-community",
+      "name": "Modern Warfare 2 · community link",
+      "detail": "User-supplied browser-game link. The site was rate-limited during review; its identity, requirements and gameplay remain unverified.",
+      "url": "https://ovz-game-production.up.railway.app/",
+      "sourceURL": "https://ovz-game-production.up.railway.app/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "kind": "unverified"
+    },
+    {
+      "id": "skate-3-fan",
+      "name": "Skate 3 · fan project",
+      "detail": "Unofficial fan project. Bring your own converted Skate 3 game copy; the website handles setup.",
+      "url": "https://skate.aaddpp.lol/",
+      "sourceURL": "https://skate.aaddpp.lol/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": true
+    },
+    {
+      "id": "skate-rust",
+      "name": "Skate × Rust · community",
+      "detail": "Community browser skating game with private-session and bot options. Linked from the project website.",
+      "url": "https://global-terror-skate-rust.fvc3less.workers.dev/full.html",
+      "sourceURL": "https://global-terror.net/",
+      "symbol": "gamecontroller",
       "requiresOwnFiles": false
     },
     {
       "id": "surfd",
       "name": "Surfd",
-      "detail": "Browser surfing game with keyboard and mouse controls.",
+      "detail": "Source-style browser surfing with keyboard and mouse controls.",
       "url": "https://surfd.net/",
       "sourceURL": "https://surfd.net/",
-      "symbol": "wind",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://surfd.net/social/surfd-card-v2.png"
+    },
+    {
+      "id": "halo-ce-community",
+      "name": "Halo CE · community port",
+      "detail": "Independent browser port. Bring your own Halo Xbox XISO; the project does not provide game data.",
+      "url": "https://mitchellhynes.com/halo/",
+      "sourceURL": "https://mitchellhynes.com/halo/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": true,
+      "artworkURL": "https://mitchellhynes.com/halo/assets/ui/shell/halo-ce-ring-menu.jpg"
+    },
+    {
+      "id": "halo-ce-mobile",
+      "name": "Halo CE Mobile · community port",
+      "detail": "Unofficial browser port with mobile controls. Bring your own Halo Xbox disc image; no game data is included.",
+      "url": "https://hcemobile.com/",
+      "sourceURL": "https://hcemobile.com/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": true
+    },
+    {
+      "id": "pes6-web",
+      "name": "PES6 Web Online · community",
+      "detail": "Community PSP PES6 browser port with controller, touch and online controls. Unaffiliated with Konami.",
+      "url": "https://pes6.optijuegos.net/",
+      "sourceURL": "https://pes6.optijuegos.net/",
+      "symbol": "gamecontroller",
       "requiresOwnFiles": false
     },
     {
       "id": "vice-city-community-port",
       "name": "Vice City · community port",
-      "detail": "Bring your own game files. This community port is unaffiliated with Rockstar Games.",
+      "detail": "Bring your own game files. This community browser port is unaffiliated with Rockstar Games.",
       "url": "https://joncodeofficial.github.io/gta-vice-city-wasm/",
       "sourceURL": "https://joncodeofficial.github.io/gta-vice-city-wasm/",
-      "symbol": "car.fill",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": true,
+      "artworkURL": "https://joncodeofficial.github.io/gta-vice-city-wasm/cover.png"
+    },
+    {
+      "id": "simpsons-hit-run",
+      "name": "The Simpsons: Hit & Run · community",
+      "detail": "Community WebAssembly entry. The site controls game setup and data; gameplay and file requirements remain unverified.",
+      "url": "https://shar-wasm.cjoseph.workers.dev/?skipmovie",
+      "sourceURL": "https://shar-wasm.cjoseph.workers.dev/?skipmovie",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/covers/hit-and-run-896.webp"
+    },
+    {
+      "id": "quakeworld",
+      "name": "QuakeWorld · multiplayer",
+      "detail": "Unofficial browser QuakeWorld multiplayer preservation project. This is not a complete single-player campaign.",
+      "url": "https://q1.pieter.com/",
+      "sourceURL": "https://q1.pieter.com/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://q1.pieter.com/assets/og.jpg?v=2"
+    },
+    {
+      "id": "quake-ii",
+      "name": "Quake II · multiplayer",
+      "detail": "Unofficial browser Quake II multiplayer preservation project.",
+      "url": "https://q2.pieter.com/",
+      "sourceURL": "https://q2.pieter.com/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://q2.pieter.com/assets/og.jpg"
+    },
+    {
+      "id": "quake-iii",
+      "name": "Quake III Arena · multiplayer",
+      "detail": "Unofficial Quake III browser multiplayer project with desktop, mobile and gamepad controls.",
+      "url": "https://q3.pieter.com/",
+      "sourceURL": "https://q3.pieter.com/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://q3.pieter.com/assets/og.jpg"
+    },
+    {
+      "id": "return-castle-wolfenstein",
+      "name": "Return to Castle Wolfenstein · multiplayer",
+      "detail": "Unofficial iortcw browser multiplayer port. The site reports an approximately 380 MB first load and recommends desktop Chrome.",
+      "url": "https://rtcw.pieter.com/",
+      "sourceURL": "https://rtcw.pieter.com/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://rtcw.pieter.com/assets/og.jpg?v=1"
+    },
+    {
+      "id": "urban-terror",
+      "name": "Urban Terror · multiplayer",
+      "detail": "Unofficial Urban Terror browser multiplayer preservation. This link is Urban Terror, not Unreal Tournament.",
+      "url": "https://ut.pieter.com/",
+      "sourceURL": "https://ut.pieter.com/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://ut.pieter.com/assets/og.jpg?v=1"
+    },
+    {
+      "id": "half-life-pixelsuft",
+      "name": "Half-Life · Xash3D browser port",
+      "detail": "Community Xash3D FWGS browser port with local game-data ZIP input. Bring your own game files.",
+      "url": "https://pixelsuft.github.io/hl/",
+      "sourceURL": "https://github.com/Pixelsuft/hl",
+      "symbol": "gamecontroller",
       "requiresOwnFiles": true
+    },
+    {
+      "id": "webxash",
+      "name": "Half-Life / CS 1.6 · WebXash",
+      "detail": "Bring your own Valve or cstrike game folders for the full games. The site also offers demo packages.",
+      "url": "https://x8bitrain.github.io/webXash/",
+      "sourceURL": "https://github.com/x8BitRain/webXash",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": true
+    },
+    {
+      "id": "diablo-web",
+      "name": "Diablo · browser port",
+      "detail": "Community Diablo browser port. Shareware is available; the full game requires your own DIABDAT.MPQ.",
+      "url": "https://johnimril.github.io/diablo_web/",
+      "sourceURL": "https://github.com/d07RiV/diabloweb",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://johnimril.github.io/diablo_web/og-image.png"
+    },
+    {
+      "id": "hedgewars-web",
+      "name": "Hedgewars · community link",
+      "detail": "User-supplied link. HTTPS certificate validation failed during review; current availability and gameplay are unverified.",
+      "url": "https://webwars.link/",
+      "sourceURL": "https://webwars.link/",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "kind": "unverified"
+    },
+    {
+      "id": "wasm-arcade",
+      "name": "WASM Arcade · game collection",
+      "detail": "Browse a community archive of browser ports, including GTA, Minecraft and other games. Requirements vary by title.",
+      "url": "https://wasmarcade.com/pc-games",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/og/site-v2.png",
+      "kind": "collection"
     },
     {
       "id": "hextris",
       "name": "Hextris",
-      "detail": "Fast puzzle game from the original Hextris developers.",
+      "detail": "Original Hextris puzzle game. Its HTTPS certificate had expired during this review; current availability is unverified.",
       "url": "https://hextris.io/",
       "sourceURL": "https://github.com/Hextris/hextris",
-      "symbol": "hexagon.fill",
-      "requiresOwnFiles": false
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "kind": "unverified"
     },
     {
       "id": "2048",
       "name": "2048",
-      "detail": "The tile puzzle on its original creator's website.",
+      "detail": "The tile puzzle on its original creator’s website.",
       "url": "https://play2048.co/",
       "sourceURL": "https://play2048.co/about",
-      "symbol": "square.grid.2x2.fill",
-      "requiresOwnFiles": false
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://play2048.co/ogImage.jpg"
     }
   ]
 }

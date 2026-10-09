@@ -3744,8 +3744,8 @@ struct CaskrunApp: App {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("One click away").font(.title2.weight(.semibold))
-                        Text("Games that run in your browser. Save a favourite to Home.").font(.subheadline).foregroundStyle(.secondary)
+                        Text("Browser games").font(.title2.weight(.semibold))
+                        Text("Find a game. Save a favourite. Play in your browser.").font(.subheadline).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("Add a game link…") { browserGameRequest = AddBrowserGameRequest() }.buttonStyle(.bordered)
@@ -3755,20 +3755,23 @@ struct CaskrunApp: App {
                     catalogSearch.isEmpty || $0.name.localizedStandardContains(catalogSearch) || $0.detail.localizedStandardContains(catalogSearch)
                 }
                 if entries.isEmpty { ContentUnavailableView.search(text: catalogSearch) }
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible())], spacing: 12) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 240, maximum: 360), spacing: 16)], spacing: 16) {
                     ForEach(entries) { game in
                         VStack(alignment: .leading, spacing: 12) {
-                            HStack(spacing: 12) {
-                                BrowserGameArtwork(seed: game.url.absoluteString, size: 42)
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(game.name).font(.headline)
-                                    Text(game.url.host ?? "").font(.system(size: 10)).foregroundStyle(.secondary)
-                                }
+                            BrowserGameCover(entry: game)
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(game.name).font(.headline).lineLimit(2)
+                                    .frame(minHeight: 34, alignment: .topLeading)
+                                Text(game.url.host ?? "").font(.system(size: 10)).foregroundStyle(.secondary)
                             }
-                            Text(game.detail).font(.caption).foregroundStyle(.secondary).frame(minHeight: 32, alignment: .topLeading)
+                            Text(game.detail).font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true).frame(minHeight: 45, alignment: .topLeading)
                             if game.requiresOwnFiles { Label("Bring your own game files", systemImage: "folder").font(.caption) }
+                            if game.kind == .unverified {
+                                Label("Link unverified", systemImage: "questionmark.circle").font(.caption).foregroundStyle(.secondary)
+                            }
                             HStack {
-                                Button("Play in browser") {
+                                Button(game.kind == .collection ? "Browse games" : game.kind == .unverified ? "Visit website" : "Play in browser") {
                                     model.openBrowserGame(BrowserGame(id: game.id, name: game.name, url: game.url.absoluteString, created_at: 0))
                                 }.buttonStyle(.borderless)
                                 Spacer()
@@ -3781,11 +3784,12 @@ struct CaskrunApp: App {
                             }
                             Link("Source", destination: game.sourceURL).font(.system(size: 10)).foregroundStyle(.secondary)
                         }
-                        .padding(18).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(12).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 16))
+                        .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.06), lineWidth: 1) }
                     }
                 }
-                Text("Community ports are separate from official commercial releases. Availability and browser requirements are set by each site.")
+                Text("Community ports and recreations are separate from official releases. Each site handles your game files and saves. Gameplay is untested.")
                     .font(.caption).foregroundStyle(.secondary)
             }.padding(24)
         }

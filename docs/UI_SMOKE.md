@@ -198,3 +198,25 @@ entries; switching both content filters passed the on-screen check. No
 Windows app, browser game, installation or bottle mutation was started.
 The local DMG was updated, the known temporary rollback was removed after
 zero-owner checks, and Caskrun was left open on Discover.
+
+## Browser scene catalogue — 9 October 2026
+
+The browser catalogue expands from five entries to 26 game and collection
+links. Seventeen entries carry reviewed remote scene pictures; missing or
+rejected previews use title cards. Discover keeps its compact Stores / Browser
+games filter row and uses responsive picture cards. Known saved links reuse a
+small scene preview on Home; arbitrary custom bookmarks keep their existing
+fallback and trigger no image crawl. Own-file badges, collection actions and
+unverified-link labels remain explicit. GTA 5 is omitted because the supplied
+Wayback URL has no original destination.
+
+Focused checks passed: **68 Swift cover-policy checks**, **89 existing browser
+and interaction checks**, and **7 Python catalogue tests**. These cover exact
+artwork authority, legacy metadata, unsafe URLs/redirects, session privacy,
+byte/image bounds, downsampling and exact saved-link matching. The full ARM64
+SwiftUI app compiled. These checks do not establish browser gameplay.
+
+The candidate's app signature, ARM64 architecture, bundled catalogue and DMG
+checksum were verified. The signed core hash and engine component manifest
+match the preceding package; graphics defaults remain unchanged. Native visual
+verification was initially blocked by the locked Mac.
