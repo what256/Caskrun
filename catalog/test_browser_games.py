@@ -20,12 +20,19 @@ class BrowserCatalogTests(unittest.TestCase):
     def test_optional_cover_metadata_keeps_legacy_entries_valid(self):
         data = copy.deepcopy(self.catalog)
         for entry in data["entries"]:
-            for field in ("artworkURL", "artworkRedirectURLs", "kind"):
+            for field in ("artworkURL", "artworkRedirectURLs", "artworkFallbackURLs", "kind"):
                 entry.pop(field, None)
         self.assertEqual(validate(data), len(data["entries"]))
         data["entries"][0]["artworkURL"] = "https://games.example.org/cover.jpg"
         data["entries"][0]["artworkRedirectURLs"] = ["https://images.example.org/cover.jpg"]
+        data["entries"][0]["artworkFallbackURLs"] = ["https://fallback.example.org/cover.jpg"]
         self.assertEqual(validate(data), len(data["entries"]))
+
+    def test_bundled_entries_all_have_reviewed_picture_references(self):
+        for entry in self.catalog["entries"]:
+            with self.subTest(game=entry["id"]):
+                self.assertTrue(entry.get("artworkURL"), "Bundled browser entries need a game picture")
+                checked_url(entry["artworkURL"])
 
     def test_artwork_rejects_credentials_fragments_and_invalid_redirects(self):
         values = (
@@ -37,12 +44,21 @@ class BrowserCatalogTests(unittest.TestCase):
             {"artworkURL": "https://games.example.org/a.png", "artworkRedirectURLs": ["https://images.example.org/a.png"] * 2},
             {"artworkURL": "https://games.example.org/a.png", "artworkRedirectURLs": [f"https://images.example.org/{i}.png" for i in range(4)]},
             {"artworkURL": "https://games.example.org/a.png", "artworkRedirectURLs": ["https://images.example.org/a.png?password=secret"]},
+            {"artworkFallbackURLs": ["https://images.example.org/a.png"]},
+            {"artworkURL": "https://games.example.org/a.png", "artworkFallbackURLs": ["https://games.example.org/a.png"]},
+            {"artworkURL": "https://games.example.org/a.png", "artworkFallbackURLs": ["https://images.example.org/a.png"] * 2},
+            {"artworkURL": "https://games.example.org/a.png", "artworkFallbackURLs": ["https://images.example.org/a.png", "https://images.example.org/b.png", "https://images.example.org/c.png"]},
+            {"artworkURL": "https://games.example.org/a.png", "artworkFallbackURLs": ["http://images.example.org/a.png"]},
+            {"artworkURL": "https://games.example.org/a.png", "artworkFallbackURLs": ["https://images.example.org/a.png?token=private"]},
+            {"artworkURL": "https://games.example.org/a.png", "artworkFallbackURLs": None},
+            {"artworkURL": "https://games.example.org/a.png", "artworkFallbackURLs": ["https://images.example.org/a.png#anchor"]},
+            {"artworkURL": "https://games.example.org/a.png", "artworkRedirectURLs": ["https://images.example.org/a.png"], "artworkFallbackURLs": ["https://images.example.org/a.png"]},
             {"kind": "installer"},
             {"kind": ["game"]},
         )
         for value in values:
             data = copy.deepcopy(self.catalog)
-            for field in ("artworkURL", "artworkRedirectURLs", "kind"):
+            for field in ("artworkURL", "artworkRedirectURLs", "artworkFallbackURLs", "kind"):
                 data["entries"][0].pop(field, None)
             data["entries"][0].update(value)
             with self.subTest(value=value), self.assertRaises(ValueError):

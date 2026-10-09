@@ -29,10 +29,11 @@ struct BrowserGameCatalogEntry: Decodable, Identifiable, Sendable {
     let requiresOwnFiles: Bool
     let artworkURL: URL?
     let artworkRedirectURLs: [URL]
+    let artworkFallbackURLs: [URL]
     let kind: BrowserGameCatalogKind
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, detail, url, sourceURL, symbol, requiresOwnFiles, artworkURL, artworkRedirectURLs, kind
+        case id, name, detail, url, sourceURL, symbol, requiresOwnFiles, artworkURL, artworkRedirectURLs, artworkFallbackURLs, kind
     }
 
     init(from decoder: Decoder) throws {
@@ -47,8 +48,10 @@ struct BrowserGameCatalogEntry: Decodable, Identifiable, Sendable {
         artworkURL = try fields.decodeIfPresent(URL.self, forKey: .artworkURL)
         artworkRedirectURLs = fields.contains(.artworkRedirectURLs)
             ? try fields.decode([URL].self, forKey: .artworkRedirectURLs) : []
+        artworkFallbackURLs = fields.contains(.artworkFallbackURLs)
+            ? try fields.decode([URL].self, forKey: .artworkFallbackURLs) : []
         kind = fields.contains(.kind) ? try fields.decode(BrowserGameCatalogKind.self, forKey: .kind) : .game
-        guard BrowserGameCoverPolicy.validArtworkMetadata(url: artworkURL, redirects: artworkRedirectURLs) else {
+        guard BrowserGameCoverPolicy.validArtworkMetadata(url: artworkURL, redirects: artworkRedirectURLs, fallbacks: artworkFallbackURLs) else {
             throw DecodingError.dataCorruptedError(forKey: .artworkURL, in: fields,
                                                    debugDescription: "Invalid browser game artwork URLs")
         }
@@ -76,7 +79,7 @@ enum BrowserGameCatalog {
                           && entry.detail.utf8.count <= 512 && !entry.symbol.isEmpty
                           && BrowserGameLink.validatedURL(entry.url.absoluteString) != nil
                           && BrowserGameLink.validatedURL(entry.sourceURL.absoluteString) != nil
-                          && BrowserGameCoverPolicy.validArtworkMetadata(url: entry.artworkURL, redirects: entry.artworkRedirectURLs)
+                          && BrowserGameCoverPolicy.validArtworkMetadata(url: entry.artworkURL, redirects: entry.artworkRedirectURLs, fallbacks: entry.artworkFallbackURLs)
                   }) else { throw CocoaError(.coderInvalidValue) }
             return (document.entries, nil)
         } catch {
@@ -96,15 +99,26 @@ enum BrowserGameCatalog {
 struct BrowserGameCoverSource: Sendable {
     let url: URL
     let allowedURLs: Set<String>
+    let fallbackURLs: [URL]
 
     init?(entry: BrowserGameCatalogEntry, catalog: [BrowserGameCatalogEntry]) {
         guard let approved = catalog.first(where: { $0.id == entry.id }),
               approved.url == entry.url, approved.artworkURL == entry.artworkURL,
               approved.artworkRedirectURLs == entry.artworkRedirectURLs,
+              approved.artworkFallbackURLs == entry.artworkFallbackURLs,
               let url = approved.artworkURL,
-              BrowserGameCoverPolicy.validArtworkMetadata(url: url, redirects: approved.artworkRedirectURLs) else { return nil }
+              BrowserGameCoverPolicy.validArtworkMetadata(url: url, redirects: approved.artworkRedirectURLs, fallbacks: approved.artworkFallbackURLs) else { return nil }
         self.url = url
         allowedURLs = Set(([url] + approved.artworkRedirectURLs).map(\.absoluteString))
+        fallbackURLs = approved.artworkFallbackURLs
+    }
+
+    private init(url: URL) { self.url = url; allowedURLs = [url.absoluteString]; fallbackURLs = [] }
+
+    var chain: [BrowserGameCoverSource] { [self] + fallbackURLs.map { BrowserGameCoverSource(url: $0) } }
+    var cacheKey: String {
+        (["primary", url.absoluteString, "allowed"] + allowedURLs.sorted()
+         + ["fallbacks"] + fallbackURLs.map(\.absoluteString)).joined(separator: "\n")
     }
 }
 
@@ -115,18 +129,47 @@ enum BrowserGameCoverPolicy {
     static let maximumPixels = 32_000_000
     static let thumbnailDimension = 960
     static let acceptedTypes: [String: String] = [
-        "image/png": "public.png", "image/jpeg": "public.jpeg", "image/webp": "org.webmproject.webp"
+        "image/png": "public.png", "image/jpeg": "public.jpeg", "image/webp": "org.webmproject.webp", "image/avif": "public.avif"
     ]
+    static let maximumAttempts = 3
+
+    static func shouldRetry(_ error: Error) -> Bool {
+        if let failure = error as? BrowserGameCoverDownloadError, case let .httpStatus(status) = failure {
+            return status == 408 || status == 429 || (500...599).contains(status)
+        }
+        guard let network = error as? URLError else { return false }
+        return [.timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+                .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable].contains(network.code)
+    }
+
+    static func isSecurityFailure(_ error: Error) -> Bool {
+        if let failure = error as? BrowserGameCoverDownloadError {
+            switch failure {
+            case .authenticationDenied: return true
+            case let .httpStatus(status): return status == 401 || status == 403
+            default: return false
+            }
+        }
+        guard let network = error as? URLError else { return false }
+        return [.serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot,
+                .serverCertificateNotYetValid, .secureConnectionFailed, .clientCertificateRejected,
+                .clientCertificateRequired, .userAuthenticationRequired, .userCancelledAuthentication,
+                .appTransportSecurityRequiresSecureConnection].contains(network.code)
+    }
+
+    static func retryDelay(afterAttempt attempt: Int) -> UInt64 { attempt == 0 ? 350_000_000 : 900_000_000 }
 
     static func checkedArtworkURL(_ url: URL) -> Bool {
         url.fragment == nil && BrowserGameLink.validatedURL(url.absoluteString) == url
     }
 
-    static func validArtworkMetadata(url: URL?, redirects: [URL]) -> Bool {
+    static func validArtworkMetadata(url: URL?, redirects: [URL], fallbacks: [URL] = []) -> Bool {
         guard redirects.count <= maximumRedirects, Set(redirects).count == redirects.count,
-              redirects.allSatisfy(checkedArtworkURL) else { return false }
-        guard let url else { return redirects.isEmpty }
-        return checkedArtworkURL(url) && !redirects.contains(url)
+              redirects.allSatisfy(checkedArtworkURL), fallbacks.count <= 2,
+              Set(fallbacks).count == fallbacks.count, fallbacks.allSatisfy(checkedArtworkURL),
+              Set(redirects).isDisjoint(with: Set(fallbacks)) else { return false }
+        guard let url else { return redirects.isEmpty && fallbacks.isEmpty }
+        return checkedArtworkURL(url) && !redirects.contains(url) && !fallbacks.contains(url)
     }
 
     static func request(for url: URL, allowedURLs: Set<String>) -> URLRequest? {
@@ -136,7 +179,7 @@ enum BrowserGameCoverPolicy {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 10)
         request.httpMethod = "GET"
         request.httpShouldHandleCookies = false
-        request.setValue("image/png,image/jpeg,image/webp", forHTTPHeaderField: "Accept")
+        request.setValue("image/png,image/jpeg,image/webp,image/avif", forHTTPHeaderField: "Accept")
         request.setValue("Caskrun/0.1", forHTTPHeaderField: "User-Agent")
         return request
     }
@@ -192,12 +235,106 @@ enum BrowserGameCoverPolicy {
     }
 }
 
-private final class BrowserGameCoverRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    private let allowedURLs: Set<String>
+enum BrowserGameCoverDownloadError: Error {
+    case rejectedResponse, overflow, authenticationDenied, httpStatus(Int)
+}
+
+/// URLSession delivers chunks; reject the whole response before retaining a
+/// chunk which would cross the encoded-image limit.
+struct BrowserGameCoverBuffer {
+    private(set) var data = Data()
+
+    mutating func append(_ chunk: Data) throws {
+        guard chunk.count <= BrowserGameCoverPolicy.maximumBytes - data.count else {
+            throw BrowserGameCoverDownloadError.overflow
+        }
+        data.append(chunk)
+    }
+}
+
+private final class BrowserGameCoverDownload: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let source: BrowserGameCoverSource
     private let lock = NSLock()
     private var redirects = 0
+    private var buffer = BrowserGameCoverBuffer()
+    private var acceptedResponse = false
+    private var terminal: Result<Data, Error>?
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var task: URLSessionDataTask?
 
-    init(source: BrowserGameCoverSource) { allowedURLs = source.allowedURLs }
+    init(source: BrowserGameCoverSource) { self.source = source }
+
+    func read(session: URLSession, request: URLRequest) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if let terminal {
+                lock.unlock()
+                continuation.resume(with: terminal)
+                return
+            }
+            self.continuation = continuation
+            lock.unlock()
+            let task = session.dataTask(with: request)
+            lock.lock()
+            let alreadyFinished = terminal != nil
+            if !alreadyFinished { self.task = task }
+            lock.unlock()
+            if alreadyFinished { task.cancel() }
+            else { task.resume() }
+        }
+    }
+
+    private func finish(_ result: Result<Data, Error>) {
+        lock.lock()
+        guard terminal == nil else { lock.unlock(); return }
+        terminal = result
+        let continuation = continuation
+        self.continuation = nil
+        let task = task
+        self.task = nil
+        lock.unlock()
+        if case .failure = result { task?.cancel() }
+        continuation?.resume(with: result)
+    }
+
+    func cancel() { finish(.failure(CancellationError())) }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let http = response as? HTTPURLResponse else {
+            finish(.failure(BrowserGameCoverDownloadError.rejectedResponse)); completionHandler(.cancel); return
+        }
+        guard http.statusCode == 200 else {
+            finish(.failure(BrowserGameCoverDownloadError.httpStatus(http.statusCode))); completionHandler(.cancel); return
+        }
+        guard BrowserGameCoverPolicy.accepts(http, source: source) else {
+            finish(.failure(BrowserGameCoverDownloadError.rejectedResponse)); completionHandler(.cancel); return
+        }
+        lock.lock()
+        let unfinished = terminal == nil
+        if unfinished {
+            acceptedResponse = true
+            responseMIME = http.mimeType
+        }
+        lock.unlock()
+        completionHandler(unfinished ? .allow : .cancel)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        guard terminal == nil, acceptedResponse else { lock.unlock(); return }
+        do { try buffer.append(data); lock.unlock() }
+        catch { lock.unlock(); finish(.failure(error)) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error { finish(.failure(error)); return }
+        lock.lock()
+        let result: Result<Data, Error> = acceptedResponse
+            ? .success(buffer.data) : .failure(BrowserGameCoverDownloadError.rejectedResponse)
+        lock.unlock()
+        finish(result)
+    }
 
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
@@ -206,25 +343,83 @@ private final class BrowserGameCoverRedirects: NSObject, URLSessionTaskDelegate,
         redirects += 1
         let withinLimit = redirects <= BrowserGameCoverPolicy.maximumRedirects
         lock.unlock()
-        completionHandler(withinLimit ? request.url.flatMap { BrowserGameCoverPolicy.request(for: $0, allowedURLs: allowedURLs) } : nil)
+        completionHandler(withinLimit ? request.url.flatMap { BrowserGameCoverPolicy.request(for: $0, allowedURLs: source.allowedURLs) } : nil)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         // TLS trust uses the system verifier; website or proxy account challenges
         // cannot draw on a user's saved credentials.
-        completionHandler(challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust
-                          ? .performDefaultHandling : .cancelAuthenticationChallenge, nil)
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+            completionHandler(.performDefaultHandling, nil)
+        } else {
+            finish(.failure(BrowserGameCoverDownloadError.authenticationDenied))
+            completionHandler(.cancelAuthenticationChallenge, nil)
+        }
+    }
+
+    static func thumbnail(source: BrowserGameCoverSource) async -> BrowserGameCoverResult {
+        guard let request = BrowserGameCoverPolicy.request(for: source.url, allowedURLs: source.allowedURLs), !Task.isCancelled else {
+            return .failure(retryable: false)
+        }
+        let receiver = BrowserGameCoverDownload(source: source)
+        let session = URLSession(configuration: BrowserGameCoverPolicy.sessionConfiguration(), delegate: receiver, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        return await withTaskCancellationHandler {
+            do {
+                let data = try await receiver.read(session: session, request: request)
+                guard !Task.isCancelled else { return .failure(retryable: false) }
+                // Only a validated response can finish successfully. MIME is
+                // checked once more against the actual encoded source type.
+                guard let mimeType = receiver.mimeType else { return .failure(retryable: false) }
+                let thumbnail = await Task.detached(priority: .utility) {
+                    BrowserGameCoverPolicy.thumbnail(data, mimeType: mimeType)
+                }.value
+                guard !Task.isCancelled, let thumbnail else { return .failure(retryable: false) }
+                return .success(thumbnail)
+            } catch {
+                return .failure(retryable: !Task.isCancelled && BrowserGameCoverPolicy.shouldRetry(error),
+                                securityFailure: BrowserGameCoverPolicy.isSecurityFailure(error))
+            }
+        } onCancel: {
+            receiver.cancel()
+            session.invalidateAndCancel()
+        }
+    }
+
+    private var responseMIME: String?
+    private var mimeType: String? {
+        lock.lock(); defer { lock.unlock() }
+        return responseMIME
     }
 }
 
-private actor BrowserGameCoverStore {
+enum BrowserGameCoverResult: Sendable {
+    case success(Data), failure(retryable: Bool, securityFailure: Bool = false)
+}
+
+actor BrowserGameCoverStore {
     static let shared = BrowserGameCoverStore()
+    private struct Flight {
+        let id: UUID
+        let task: Task<Void, Never>
+        var waiters: [UUID: CheckedContinuation<Data?, Never>]
+    }
+    private let catalog: @Sendable () -> [BrowserGameCatalogEntry]
+    private let transport: @Sendable (BrowserGameCoverSource) async -> BrowserGameCoverResult
     private var cache: [String: Data] = [:]
     private var cacheOrder: [String] = []
     private var cacheBytes = 0
     private let maximumCacheBytes = 24 * 1024 * 1024
     private var active = 0
+    private var flights: [String: Flight] = [:]
+    var waitingCount: Int { flights.values.reduce(0) { $0 + $1.waiters.count } }
+
+    init(catalog: @escaping @Sendable () -> [BrowserGameCatalogEntry] = { BrowserGameCatalog.loaded.entries },
+         transport: @escaping @Sendable (BrowserGameCoverSource) async -> BrowserGameCoverResult = { await BrowserGameCoverDownload.thumbnail(source: $0) }) {
+        self.catalog = catalog
+        self.transport = transport
+    }
 
     private func remember(_ data: Data, key: String) {
         guard data.count <= maximumCacheBytes else { return }
@@ -240,48 +435,89 @@ private actor BrowserGameCoverStore {
     }
 
     func load(_ entry: BrowserGameCatalogEntry) async -> Data? {
-        guard let source = BrowserGameCoverSource(entry: entry, catalog: BrowserGameCatalog.loaded.entries),
-              let request = BrowserGameCoverPolicy.request(for: source.url, allowedURLs: source.allowedURLs) else { return nil }
-        let key = source.url.absoluteString
+        guard let source = BrowserGameCoverSource(entry: entry, catalog: catalog()) else { return nil }
+        let key = source.cacheKey
         guard !Task.isCancelled else { return nil }
         if let data = cache[key] {
             cacheOrder.removeAll { $0 == key }
             cacheOrder.append(key)
             return data
         }
-        while active >= 3 {
-            do { try await Task.sleep(for: .milliseconds(40)) } catch { return nil }
+        let waiter = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(returning: nil); return }
+                if var flight = flights[key] {
+                    flight.waiters[waiter] = continuation
+                    flights[key] = flight
+                } else {
+                    let id = UUID()
+                    let task = Task {
+                        let data = await fetch(source)
+                        complete(key: key, flight: id, data: data)
+                    }
+                    flights[key] = Flight(id: id, task: task, waiters: [waiter: continuation])
+                }
+            }
+        } onCancel: {
+            Task { await self.cancel(key: key, waiter: waiter) }
         }
-        guard !Task.isCancelled else { return nil }
-        if let data = cache[key] { return data }
+    }
+
+    private func cancel(key: String, waiter: UUID) {
+        guard var flight = flights[key], let continuation = flight.waiters.removeValue(forKey: waiter) else { return }
+        if flight.waiters.isEmpty {
+            flights.removeValue(forKey: key)
+            flight.task.cancel()
+        } else { flights[key] = flight }
+        continuation.resume(returning: nil)
+    }
+
+    private func complete(key: String, flight id: UUID, data: Data?) {
+        guard let flight = flights[key], flight.id == id else { return }
+        flights.removeValue(forKey: key)
+        if let data { remember(data, key: key) }
+        for continuation in flight.waiters.values { continuation.resume(returning: data) }
+    }
+
+    private func fetch(_ source: BrowserGameCoverSource) async -> Data? {
+        var blockedHosts: Set<String> = []
+        for asset in source.chain {
+            guard let host = asset.url.host?.lowercased(), !blockedHosts.contains(host) else { continue }
+            attempts: for attempt in 0..<BrowserGameCoverPolicy.maximumAttempts {
+                guard !Task.isCancelled else { return nil }
+                switch await download(asset) {
+                case let .success(data): return data
+                case let .failure(retryable, securityFailure):
+                    guard !Task.isCancelled else { return nil }
+                    if securityFailure {
+                        // Do not revisit a host involved in a failed TLS or
+                        // authentication request, even through another image.
+                        blockedHosts.formUnion(asset.allowedURLs.compactMap { URL(string: $0)?.host?.lowercased() })
+                        break attempts
+                    }
+                    if retryable, attempt + 1 < BrowserGameCoverPolicy.maximumAttempts {
+                        do { try await Task.sleep(nanoseconds: BrowserGameCoverPolicy.retryDelay(afterAttempt: attempt)) }
+                        catch { return nil }
+                    } else {
+                        // A different explicitly reviewed public asset can
+                        // succeed when this site's response is unavailable.
+                        break attempts
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private func download(_ source: BrowserGameCoverSource) async -> BrowserGameCoverResult {
+        while active >= 3 {
+            do { try await Task.sleep(for: .milliseconds(40)) } catch { return .failure(retryable: false) }
+        }
+        guard !Task.isCancelled else { return .failure(retryable: false) }
         active += 1
         defer { active -= 1 }
-        let delegate = BrowserGameCoverRedirects(source: source)
-        let session = URLSession(configuration: BrowserGameCoverPolicy.sessionConfiguration(), delegate: delegate, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        return await withTaskCancellationHandler {
-            do {
-                let (bytes, response) = try await session.bytes(for: request)
-                guard let http = response as? HTTPURLResponse, BrowserGameCoverPolicy.accepts(http, source: source),
-                      let mimeType = http.mimeType else { return nil }
-                var data = Data()
-                for try await byte in bytes {
-                    guard !Task.isCancelled, data.count < BrowserGameCoverPolicy.maximumBytes else { return nil }
-                    data.append(byte)
-                }
-                guard !Task.isCancelled else { return nil }
-                let thumbnail = await Task.detached(priority: .utility) {
-                    BrowserGameCoverPolicy.thumbnail(data, mimeType: mimeType)
-                }.value
-                guard !Task.isCancelled, let thumbnail else { return nil }
-                remember(thumbnail, key: key)
-                return thumbnail
-            } catch { return nil }
-        } onCancel: {
-            // This also interrupts a stalled body/header read, which cannot
-            // reach the per-byte cancellation check until data arrives.
-            session.invalidateAndCancel()
-        }
+        return await transport(source)
     }
 }
 
@@ -290,16 +526,11 @@ struct BrowserGameCover: View {
     let entry: BrowserGameCatalogEntry
     var compact = false
     @State private var image: NSImage?
-
-    private var tint: Color {
-        let seed = entry.id.utf8.reduce(UInt64(5381)) { ($0 &* 33) &+ UInt64($1) }
-        return Color(hue: Double(seed % 360) / 360, saturation: 0.52, brightness: 0.56)
-    }
+    @State private var loading = true
 
     var body: some View {
         Rectangle()
-            .fill(LinearGradient(colors: [tint.opacity(0.65), tint, .black.opacity(0.86)],
-                                 startPoint: .topLeading, endPoint: .bottomTrailing))
+            .fill(Color(nsColor: .controlBackgroundColor))
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .overlay {
                 GeometryReader { geometry in
@@ -308,22 +539,24 @@ struct BrowserGameCover: View {
                             .frame(width: geometry.size.width, height: geometry.size.height)
                             .clipped()
                     } else {
-                        ZStack(alignment: .bottomLeading) {
-                            Circle().stroke(.white.opacity(0.12), lineWidth: 28)
-                                .frame(width: geometry.size.width * 0.7)
-                                .offset(x: geometry.size.width * 0.52, y: -geometry.size.height * 0.24)
-                            Text(entry.name).font(.system(size: compact ? 12 : 23, weight: .bold, design: .rounded))
-                                .lineLimit(compact ? 2 : 3).minimumScaleFactor(0.75).foregroundStyle(.white.opacity(0.94))
-                                .padding(compact ? 8 : 18)
+                        VStack(spacing: compact ? 3 : 8) {
+                            if loading { ProgressView().controlSize(.small) }
+                            Text(loading ? "Loading preview…" : compact ? "Preview unavailable" : "Picture temporarily unavailable")
+                                .font(.system(size: compact ? 9 : 12)).foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center).padding(.horizontal, compact ? 4 : 12)
                         }
-                        .frame(width: geometry.size.width, height: geometry.size.height, alignment: .bottomLeading)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
                     }
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: compact ? 8 : 12, style: .continuous))
             .accessibilityHidden(true)
-            .task(id: entry.id + ":" + (entry.artworkURL?.absoluteString ?? "")) {
+            .task(id: ([entry.id, entry.artworkURL?.absoluteString ?? "", "redirects"]
+                       + entry.artworkRedirectURLs.map(\.absoluteString) + ["fallbacks"]
+                       + entry.artworkFallbackURLs.map(\.absoluteString)).joined(separator: "\n")) {
                 image = nil
+                loading = true
+                defer { if !Task.isCancelled { loading = false } }
                 guard let bytes = await BrowserGameCoverStore.shared.load(entry), !Task.isCancelled else { return }
                 image = NSImage(data: bytes)
             }

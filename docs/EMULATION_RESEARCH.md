@@ -46,3 +46,54 @@ These tools are not universal one-click game converters. Prefer importing finish
 ## Proposed future scope
 
 Start with native Mac ports or optional external engine adapters, a pinned engine version and one validated title. Verify rendering, saves, controllers and shutdown before claiming support. Use user-owned game files and any required BIOS; bundle no games, BIOS, firmware or proprietary assets. Review each engine and dependency licence before redistribution.
+
+## Recommended Caskrun implementation
+
+For Apple Silicon, start with an optional KytyPS5 Mac adapter. This is a proposed
+feature, not an implemented or tested Caskrun engine. The current upstream
+[Mac build and launch instructions](https://github.com/KytyPS5/KytyPS5#building-on-macos)
+document an x86-64 executable running under Rosetta 2, with MoltenVK alongside
+it. This avoids introducing AnyPS5's additional conversion and Wine path in the
+first version.
+
+### 1. Import and launch
+
+- Add **Import PS5 game** to the existing + menu. Keep game cards on Home;
+  no additional Library screen is needed.
+- Accept an explicitly selected game folder, ELF or `.zar` dump using the
+  [upstream input formats](https://github.com/KytyPS5/KytyPS5#running). Preserve
+  the original files and use local game artwork when available.
+- Attach a user-installed engine initially. Validate its executable,
+  architecture, engine version, Rosetta prerequisite and graphics dependencies.
+  Keep its records and settings separate from Wine bottles.
+- Invoke the documented `kyty_emulator --game` command with an argument array.
+  The inspector should show engine-specific controls and an Experimental label.
+- Track only Caskrun-started sessions, including identity, window focus, logs,
+  stopping and full Quit. Unrelated emulator sessions must remain untouched.
+
+This integration can be developed and checked with original test fixtures, but
+an import or launched process does not establish game compatibility.
+
+### 2. Validate one title, then manage the engine
+
+Test one user-owned title on Apple Silicon: cold start, rendering, audio,
+controllers, save/load, relaunch, performance, window/Dock identity and shutdown.
+Record the exact engine version. Keep compatibility status unknown until those
+checks succeed.
+
+After that, consider a managed download pinned to an
+[official release](https://github.com/KytyPS5/KytyPS5/releases), with a reviewed
+package hash, atomic updates and rollback. Review bundled component licences
+and preserve corresponding engine source and notices for any binary Caskrun
+redistributes. No games or proprietary firmware are included.
+
+### 3. Investigate AnyPS5 separately
+
+An optional later workflow would convert a user-selected PS5 executable and its
+modules into a complete Windows output, then attach that output to a dedicated
+Caskrun bottle. The [AnyPS5 build](https://github.com/boykopovar/AnyPS5/blob/main/docs/dev/BUILD.md)
+and [runtime layout](https://github.com/boykopovar/AnyPS5/blob/main/docs/user/USAGE.md)
+must be satisfied first, including its Windows library toolchain. Wine,
+Rosetta and graphics compatibility then require a separate real-title test.
+Conversion completion and technology-coverage counters are not acceptance
+criteria for playable games.

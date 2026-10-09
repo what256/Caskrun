@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlsplit
 
 CATALOG = Path(__file__).with_name("browser-games.json")
 FIELDS = {"id", "name", "detail", "url", "sourceURL", "symbol", "requiresOwnFiles"}
-OPTIONAL_FIELDS = {"artworkURL", "artworkRedirectURLs", "kind"}
+OPTIONAL_FIELDS = {"artworkURL", "artworkRedirectURLs", "artworkFallbackURLs", "kind"}
 
 
 def checked_url(value):
@@ -66,6 +66,7 @@ def validate(data):
             raise ValueError("Unknown browser entry kind")
         artwork = item.get("artworkURL")
         redirects = item.get("artworkRedirectURLs", [])
+        fallbacks = item.get("artworkFallbackURLs", [])
         if not isinstance(redirects, list) or len(redirects) > 3 or any(not isinstance(url, str) for url in redirects):
             raise ValueError("Invalid artwork redirects")
         if len(set(redirects)) != len(redirects) or (artwork is None and redirects):
@@ -78,6 +79,14 @@ def validate(data):
             checked_url(redirect)
             if "#" in redirect:
                 raise ValueError("Artwork URLs cannot contain fragments")
+        if not isinstance(fallbacks, list) or len(fallbacks) > 2 or any(not isinstance(url, str) for url in fallbacks):
+            raise ValueError("Invalid artwork fallbacks")
+        if len(set(fallbacks)) != len(fallbacks) or (artwork is None and fallbacks):
+            raise ValueError("Duplicate or orphaned artwork fallbacks")
+        for fallback in fallbacks:
+            checked_url(fallback)
+            if "#" in fallback or fallback == artwork or fallback in redirects:
+                raise ValueError("Invalid artwork fallback URL")
     return len(entries)
 
 

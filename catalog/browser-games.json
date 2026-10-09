@@ -9,7 +9,10 @@
       "sourceURL": "https://vel.gg/bo1z",
       "symbol": "gamecontroller",
       "requiresOwnFiles": false,
-      "artworkURL": "https://vel.gg/bo1z/art/og-mapselect.png"
+      "artworkURL": "https://vel.gg/bo1z/art/og-mapselect.png",
+      "artworkFallbackURLs": [
+        "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/42700/capsule_616x353.jpg?t=1780962720"
+      ]
     },
     {
       "id": "moon-zombies",
@@ -19,7 +22,11 @@
       "sourceURL": "https://moon-zombies.pages.dev/",
       "symbol": "gamecontroller",
       "requiresOwnFiles": false,
-      "artworkURL": "https://moon-zombies.pages.dev/ui/loadscreen_zombie_moon.png"
+      "artworkURL": "https://moon-zombies.pages.dev/ui/loadscreen_zombie_moon.png",
+      "artworkFallbackURLs": [
+        "https://vel.gg/bo1z/art/mapselect-panel-moon.webp",
+        "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/42700/capsule_616x353.jpg?t=1780962720"
+      ]
     },
     {
       "id": "kino-der-toten",
@@ -29,7 +36,10 @@
       "sourceURL": "https://kino-der-toten.pages.dev/",
       "symbol": "gamecontroller",
       "requiresOwnFiles": false,
-      "artworkURL": "https://kino-der-toten.pages.dev/social/kino-preview-v1.png"
+      "artworkURL": "https://vel.gg/bo1z/art/mapselect-panel-kino.webp",
+      "artworkFallbackURLs": [
+        "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/42700/capsule_616x353.jpg?t=1780962720"
+      ]
     },
     {
       "id": "cheese-cube-zombies",
@@ -39,7 +49,10 @@
       "sourceURL": "https://cheese-cube.pages.dev/",
       "symbol": "gamecontroller",
       "requiresOwnFiles": false,
-      "artworkURL": "https://cheese-cube.pages.dev/zm_ccube/menu/preview.jpg"
+      "artworkURL": "https://cheese-cube.pages.dev/zm_ccube/menu/preview.jpg",
+      "artworkFallbackURLs": [
+        "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/311210/capsule_616x353.jpg?t=1780963650"
+      ]
     },
     {
       "id": "vibe-slops-ii",
@@ -49,7 +62,10 @@
       "sourceURL": "https://vibeslops.luckeysystems.com/",
       "symbol": "gamecontroller",
       "requiresOwnFiles": false,
-      "artworkURL": "https://vibeslops.luckeysystems.com/social/og-cover.png"
+      "artworkURL": "https://vibeslops.luckeysystems.com/social/og-cover.png",
+      "artworkFallbackURLs": [
+        "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/202970/capsule_616x353.jpg?t=1780962925"
+      ]
     },
     {
       "id": "mw2-community",
@@ -59,7 +75,8 @@
       "sourceURL": "https://ovz-game-production.up.railway.app/",
       "symbol": "gamecontroller",
       "requiresOwnFiles": false,
-      "kind": "unverified"
+      "kind": "unverified",
+      "artworkURL": "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/10180/capsule_616x353.jpg?t=1780962606"
     },
     {
       "id": "skate-3-fan",
@@ -68,7 +85,8 @@
       "url": "https://skate.aaddpp.lol/",
       "sourceURL": "https://skate.aaddpp.lol/",
       "symbol": "gamecontroller",
-      "requiresOwnFiles": true
+      "requiresOwnFiles": true,
+      "artworkURL": "https://media.contentapi.ea.com/content/dam/gin/images/2017/01/skate-3-key-art.jpg.adapt.crop16x9.575p.jpg"
     },
     {
       "id": "skate-rust",
@@ -77,7 +95,8 @@
       "url": "https://global-terror-skate-rust.fvc3less.workers.dev/full.html",
       "sourceURL": "https://global-terror.net/",
       "symbol": "gamecontroller",
-      "requiresOwnFiles": false
+      "requiresOwnFiles": false,
+      "artworkURL": "https://global-terror-skate-rust.fvc3less.workers.dev/rust-loading.webp"
     },
     {
       "id": "surfd",
@@ -106,7 +125,8 @@
       "url": "https://hcemobile.com/",
       "sourceURL": "https://hcemobile.com/",
       "symbol": "gamecontroller",
-      "requiresOwnFiles": true
+      "requiresOwnFiles": true,
+      "artworkURL": "https://hcemobile.com/art/ring.jpg"
     },
     {
       "id": "pes6-web",
@@ -115,7 +135,12 @@
       "url": "https://pes6.optijuegos.net/",
       "sourceURL": "https://pes6.optijuegos.net/",
       "symbol": "gamecontroller",
-      "requiresOwnFiles": false
+      "requiresOwnFiles": false,
+      "artworkURL": "https://i.3djuegos.com/juegos/1506/pro_evolution_soccer_6/fotos/set/pro_evolution_soccer_6-165043.jpg",
+      "artworkFallbackURLs": [
+        "https://i.3djuegos.com/juegos/1506/pro_evolution_soccer_6/fotos/ficha/pro_evolution_soccer_6-1681866.webp",
+        "https://i.3djuegos.com/juegos/1506/pro_evolution_soccer_6/fotos/ficha/pro_evolution_soccer_6-1681866.jpg"
+      ]
     },
     {
       "id": "vice-city-community-port",
@@ -194,7 +219,8 @@
       "url": "https://pixelsuft.github.io/hl/",
       "sourceURL": "https://github.com/Pixelsuft/hl",
       "symbol": "gamecontroller",
-      "requiresOwnFiles": true
+      "requiresOwnFiles": true,
+      "artworkURL": "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/70/capsule_616x353.jpg?t=1745368462"
     },
     {
       "id": "webxash",
@@ -203,7 +229,8 @@
       "url": "https://x8bitrain.github.io/webXash/",
       "sourceURL": "https://github.com/x8BitRain/webXash",
       "symbol": "gamecontroller",
-      "requiresOwnFiles": true
+      "requiresOwnFiles": true,
+      "artworkURL": "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/10/capsule_616x353.jpg?t=1745368572"
     },
     {
       "id": "diablo-web",
@@ -223,7 +250,8 @@
       "sourceURL": "https://webwars.link/",
       "symbol": "gamecontroller",
       "requiresOwnFiles": false,
-      "kind": "unverified"
+      "kind": "unverified",
+      "artworkURL": "https://www.hedgewars.org/images/screenshots/1_0_0-bazooka.png"
     },
     {
       "id": "wasm-arcade",
@@ -244,7 +272,8 @@
       "sourceURL": "https://github.com/Hextris/hextris",
       "symbol": "gamecontroller",
       "requiresOwnFiles": false,
-      "kind": "unverified"
+      "kind": "unverified",
+      "artworkURL": "https://hextris.github.io/presskit/computer/1.PNG"
     },
     {
       "id": "2048",

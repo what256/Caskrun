@@ -54,24 +54,56 @@ accept agreements or test gameplay. Certificate validation was not bypassed.
 
 ## Scene previews
 
-Seventeen entries have explicit remote scene/cover URLs in `browser-games.json`.
-Most are preview images published by their game site. The Hit & Run preview is
-from WASM Arcade's game-cover catalogue. No blanket asset-reuse licence was
-established; images are not copied into this repository or the app bundle.
-An entry without an approved image, or whose image fails validation, shows a
-title card. No favicon scraping or invented publisher logos are used.
+All 26 entries have explicit remote scene/cover URLs in `browser-games.json`.
+Most are pictures published by their game site. The Hit & Run preview is from
+WASM Arcade's game-cover catalogue. Original game covers are used where a
+community port has no suitable scene picture; a cover does not establish the
+port's identity, official endorsement or playable compatibility. No blanket
+asset-reuse licence was established; images are not copied into this repository
+or the app bundle. Loading/error states are neutral and no longer substitute
+coloured title cards. No favicon scraping or invented publisher logos are used.
 
-Discover loads only the exact reviewed artwork URL and any explicitly reviewed
-redirect targets. Home can reuse a preview when a saved URL exactly matches a
+Additional picture provenance:
+
+| Entry | Picture source | Scope |
+| --- | --- | --- |
+| MW2 community link | [Official Steam store](https://store.steampowered.com/app/10180/Call_of_Duty_Modern_Warfare_2_2009/) | Original 2009 game cover; the browser link remains unverified. |
+| Skate 3 fan project | [EA Skate 3](https://www.ea.com/games/skate/skate-3?setLocale=en-us) | Original game key art, not a fan-port screenshot. |
+| Skate × Rust | [Project loading scene](https://global-terror-skate-rust.fvc3less.workers.dev/rust-loading.webp) | Exact background referenced by the game's loading stylesheet. |
+| Halo CE Mobile | [Project ring picture](https://hcemobile.com/art/ring.jpg) | Exact background referenced by the game's stylesheet. |
+| PES6 | [3DJuegos original game gallery](https://www.3djuegos.com/juegos/pro-evolution-soccer-6/imagenes/) | Original Pro Evolution Soccer 6 Xbox 360 scene in 16:9; replaces the website's unrelated background, not a PSP browser-port screenshot. |
+| Half-Life Xash3D port | [Valve Steam store](https://store.steampowered.com/app/70/HalfLife/) | Original Half-Life cover, not a port screenshot. |
+| WebXash | [Valve Counter-Strike store](https://store.steampowered.com/app/10/CounterStrike/) | Original Counter-Strike cover, not a port screenshot. |
+| Hedgewars | [Official media gallery](https://www.hedgewars.org/media.html) | Native-game screenshot credited to Wuzzy; webwars remains unverified. |
+| Hextris | [Original press kit](https://hextris.github.io/presskit/info.html) | Original computer title-screen screenshot. |
+| Kino der Toten | [BO1 community project's Kino map preview](https://vel.gg/bo1z/art/mapselect-panel-kino.webp) | Smaller Kino scene; replaces an image that exceeded the download limit. |
+
+BO1, Moon and Kino also have the [original Black Ops cover](https://store.steampowered.com/app/42700/Call_of_Duty_Black_Ops/)
+as a reviewed backup. Moon first tries the BO1 community project's Moon map
+preview. Cheese Cube and Vibe Slops II have original
+[Black Ops III](https://store.steampowered.com/app/311210/Call_of_Duty_Black_Ops_III/)
+and [Black Ops II](https://store.steampowered.com/app/202970/Call_of_Duty_Black_Ops_II/)
+covers respectively. PES6 has its [original PS2 cover](https://www.3djuegos.com/juegos/pro-evolution-soccer-6/caratula/)
+in reviewed WebP and JPEG versions as backups. These are original-game pictures, not screenshots proving
+that the browser project implements the complete commercial game.
+
+Discover loads only the exact reviewed artwork URL, its explicitly reviewed
+redirect targets and up to two separate reviewed backup pictures. Backup
+requests allow only their own exact URL, without inheriting the primary
+picture's redirect authority. Home can reuse a preview when a saved URL exactly matches a
 bundled catalogue entry. Custom bookmarks never cause site crawling or artwork
 requests. The loader sends no account credentials, cookies or referring-page
 header, uses system HTTPS verification and keeps a bounded in-memory cache with
 no disk writes. Viewing a preview still contacts its image host.
 
-The loader accepts only checked PNG, JPEG or WebP responses, caps downloads at
+The loader accepts only checked PNG, JPEG, WebP or AVIF responses, caps downloads at
 2 MiB and dimensions at 8192 per axis / 32 million pixels, and downscales to
 960 pixels. Three requests may run at once; the cache is limited to 24 MiB and
-40 images. Cancellation and request deadlines release abandoned requests.
+40 images. Concurrent views share reviewed picture downloads, with bounded
+retries for transient failures. A failed picture can use its reviewed backup
+chain; TLS or account failures are not retried, and backups at the affected
+host are skipped. Cancellation and request deadlines release
+abandoned requests without interrupting another view still using the picture.
 
 ## Validation and saved-link privacy
 

@@ -243,3 +243,43 @@ and thumbnail decoding succeeded within the existing limits. That probe does
 not identify the earlier request's failure or prove that every remote preview
 loads reliably. No image asset or request log was retained. Narrow-window
 layout and browser gameplay remain for broader user testing.
+
+## Complete browser picture references — 9 October 2026
+
+All 26 catalogue entries now have reviewed remote game-picture references;
+the nine entries without artwork use project scenes or original game covers.
+Generated coloured title cards are removed. Neutral progress/error states
+remain when a remote picture cannot be obtained. Six community entries also
+have explicit reviewed backup pictures, each with its own exact URL authority.
+
+The old per-byte asynchronous body reader made a valid large Moon picture
+slow to consume. The bounded chunk reader loaded it in a narrow production
+probe in about 0.3 seconds. Kino's old picture returned 2,444,372 bytes, above
+the unchanged 2 MiB limit; its smaller replacement loaded through the final
+production loader in about 0.2 seconds. No image files were retained.
+
+Focused checks passed: **143 Swift cover checks**, **89 existing browser and
+interaction checks**, and **8 Python catalogue tests**. They cover metadata
+authority, byte/image bounds, AVIF decoding, shared requests, bounded retries,
+fallback exhaustion, cancellation and TLS/auth failure handling. These are
+picture and interface checks, not gameplay or emulator compatibility tests.
+
+The first candidate's visual check displayed game pictures for MW2, Skate 3,
+Skate × Rust, Halo CE Mobile, Half-Life, WebXash, Hedgewars and Hextris. It also
+identified Kino's oversized image and an unrelated background used by PES6's
+website, which were corrected before the final package.
+
+The final signed ARM64 package passed signature, architecture, catalogue,
+DMG and checksum checks. The core hash and engine component receipt match
+the preceding build. Its standard local app reopened with the existing Steam
+bottle, all eight store actions and the same Home / Discover navigation.
+Moon and Kino displayed their scenes; PES6 displayed the larger 16:9 original
+football-game screenshot instead of the unrelated background or cropped cover.
+The other added pictures were checked on screen in the preceding candidate
+using the same final loader and sources. No game or installer was launched,
+and graphics settings were unchanged. Caskrun was left open on Browser games.
+
+Owned test probes, generated rollback apps and superseded candidate packages
+were removed after ownership and identity checks. No game artwork was retained
+on disk. Builds still referenced by real bottles were preserved. The expanded
+PS5 document is a future integration plan; no emulator was installed or run.
