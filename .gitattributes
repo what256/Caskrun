@@ -7,3 +7,5 @@
 # Unified diffs mark an empty context line with a single space.
 *.patch whitespace=-blank-at-eol
 *.png binary
+# Preserve the upstream license's original blank-line whitespace.
+runtime-patches/licenses/COPYING.LIB whitespace=-blank-at-eol

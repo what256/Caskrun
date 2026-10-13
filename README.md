@@ -1,10 +1,21 @@
 # Caskrun
 
-**Demo — in active development.** Caskrun is still in the demo phase. More features and improvements are coming; Windows apps and games are not guaranteed to work yet. The repository is private during this early development phase.
+**Open-source demo — in active development.** More features and improvements are coming; Windows apps and games are not guaranteed to work yet. This repository publishes source and development tools. There is no public binary release yet.
 
 Caskrun is a new, independent Apple Silicon macOS app for collecting games and apps, managing Wine bottles and installing Windows software. It is **not affiliated with CodeWeavers** and contains no CrossOver application code or assets. The name is provisional pending a publication trademark check. Windows x86/x64 apps remain a compatibility target on Apple Silicon; Intel Mac hardware is outside the project scope.
 
 The Caskrun app and core compile only for ARM64. The first Wine compatibility experiment uses an x86_64 Wine process through Rosetta **on an Apple Silicon Mac**; this does not add Intel Mac support.
+
+## Start here
+
+| Area | Current scope |
+| --- | --- |
+| Collection and Discover | Native interface for Windows apps, installed-game discoveries and browser bookmarks |
+| Windows compatibility | Experimental Wine launcher; installer completion, sign-in and gameplay are separate validation stages |
+| Graphics | WineD3D by default; optional DXMT and High Resolution controls with the reviewed development runtime |
+| PS5 | An optional local KytyPS5 adapter has fixture validation only. A separate AnyPS5 experiment ran PS5 DOOM homebrew through Wine; it is not integrated into the app and does not establish retail-game compatibility. |
+
+Start with [Build](#build) for a source-only app, [feature gaps](docs/FEATURE_GAPS.md) for remaining work, or [contributing](CONTRIBUTING.md) to help. Use [SECURITY.md](SECURITY.md) for private security reports.
 
 ## Current demo
 
@@ -20,8 +31,8 @@ The Caskrun app and core compile only for ARM64. The first Wine compatibility ex
 - **Collection / Discover** share the small floating navigation capsule and + menu. Collection is a flat grid of saved Windows apps, installed Steam/Epic/GOG games, browser bookmarks and explicitly imported PS5 games. One filter menu switches All, Windows, PS5 or Browser and Games or Apps. A click opens details without entering a bottle folder; double-click or Command-O opens the item. The right panel keeps Windows graphics, tools and bottle controls. Discover remains the place to add stores and browser games; there is no separate Library, Game reports or Settings screen.
 - Read-only Steam, Epic and GOG manifest readers populate Collection automatically while it is visible and when the app becomes active. Discovery is bounded and restricted to each bottle’s real C: drive; it does not sign in or synchronize an account’s full owned library. Steam games launch through their saved Steam client. Epic/GOG game cards open their saved store, rather than claiming a direct game launch. Presence on disk does not establish compatibility. See [library boundaries](docs/GAME_COMPATIBILITY.md).
 - The + menu can request installation using a Steam store link or AppID through an existing saved Steam client or a new Steam bottle. The user signs in, owns the game and completes installation inside Steam; Caskrun does not import credentials or bypass ownership. The reviewed community snapshot remains in source, but the compatibility browser is no longer exposed. See [compatibility evidence](docs/GAME_COMPATIBILITY.md).
-- Discover offers 26 browser-game and collection links, each with a reviewed game picture. Original game covers are used where a community port has no suitable scene preview. Known saved links reuse their pictures on Collection. Picture downloads are shared and retry transient failures; loading or failed requests no longer show coloured title cards. Community ports, own-file requirements and unverified links are labelled. Games open in the default browser; custom public HTTPS bookmarks stay local and do not trigger artwork crawling. Caskrun does not bundle commercial game assets or run websites in Wine. Gameplay remains untested. See [browser links and provenance](catalog/BROWSER_GAMES.md) and [future emulator research](docs/EMULATION_RESEARCH.md).
-- **Experimental PS5 adapter:** import your own game folder, ELF or ZAR file without moving it, then explicitly attach a complete local KytyPS5 Mac folder or app. Imports and the engine record stay in private local metadata, separate from Wine bottles. Caskrun checks supported Mach-O architecture, Rosetta prerequisites and a matching local MoltenVK library, then uses the documented argument-array launch. Imported pictures come from local `icon0.png` when available. Focus, bounded logs, Stop and full Quit track only processes Caskrun started. Original fixture checks cover metadata and process behavior; no emulator or PS5 game has been launched. AnyPS5 conversion is still research, not an installed feature. See [PS5 scope and remaining checks](docs/EMULATION_RESEARCH.md).
+- Discover offers 26 browser-game and collection links, each with a reviewed game picture. Original game covers are used where a community port has no suitable scene preview. Known saved links reuse their pictures on Collection. Picture downloads are shared and retry transient failures; loading or failed requests no longer show coloured title cards. Community ports, own-file requirements and unverified links are labelled. Games open in the default browser or a per-game selected installed browser; custom public HTTPS bookmarks stay local and do not trigger artwork crawling. Caskrun does not bundle commercial game assets or run websites in Wine. Gameplay remains untested. See [browser links and provenance](catalog/BROWSER_GAMES.md) and [future emulator research](docs/EMULATION_RESEARCH.md).
+- **Experimental PS5 adapter:** import your own game folder, ELF or ZAR file without moving it, then explicitly attach a complete local KytyPS5 Mac folder or app. Imports and the engine record stay in private local metadata, separate from Wine bottles. Caskrun checks supported Mach-O architecture, Rosetta prerequisites and a matching local MoltenVK library, then uses the documented argument-array launch. Imported pictures come from local `icon0.png` when available. Focus, bounded logs, Stop and full Quit track only processes Caskrun started. Original fixture checks cover metadata and process behavior; no emulator or PS5 game has been launched through this adapter. The separate AnyPS5/Wine experiment ran public PS5 DOOM homebrew with rendering, keyboard/mouse input, save/load and relaunch verified. Sound, physical controllers and retail games remain unvalidated; AnyPS5 is not integrated into Caskrun. See [PS5 adapter scope](docs/EMULATION_RESEARCH.md) and [AnyPS5 results](docs/ANYPS5_WINE.md).
 - Optional DXMT controls provide an application-controlled or bounded frame target and MetalFX spatial output scaling. The original x64/x86 probe matrix passed on the development Mac, including renderer ownership, drawing, readback, window lifecycle and refused edits while running. Those API checks do not establish displayed game FPS, image quality or a performance advantage. Automatic still selects WineD3D; High Resolution stays optional and off by default. See [DXMT options and remaining tests](docs/DXMT_OPTIONS.md).
 - Closing the main window keeps Caskrun available in the macOS menu bar. **Quit Caskrun** waits for Caskrun-owned Windows apps and experimental PS5 engine processes to stop, refuses to exit when shutdown cannot be verified, and leaves unrelated processes alone. Browser tabs belong to the browser and stay open. The menu offers saved Windows apps, Open Caskrun, Collection, Discover, bottle controls, file installation, About and Quit. Earlier Wine shutdown and menu checks are recorded separately from the new PS5 fixture checks.
 - Wine's Desktop and native shortcut locations are isolated inside each Caskrun bottle. A fresh real-Wine bottle created a private Desktop mapping, and the packaged app migrated the existing Caskrun Steam bottle's exact legacy Desktop link on launch without creating another host Desktop shortcut. Automatic shortcut conversion still needs a complete test.
@@ -49,12 +60,14 @@ These are development goals, without a promised release date. See [feature gaps]
 
 ## Build
 
-Requires an Apple Silicon Mac, macOS 14 or later, Xcode command-line tools, Rust/Cargo, and the `aarch64-apple-darwin` Rust target.
+Requires an Apple Silicon Mac, macOS 14 or later, Xcode command-line tools, Python 3, Rust/Cargo with edition-2024 support, and the `aarch64-apple-darwin` Rust target. If using rustup, add the target with `rustup target add aarch64-apple-darwin`.
 
 ```sh
 ./scripts/build.sh
 open .build/Caskrun.app
 ```
+
+Run these commands from the repository root. The source build opens the interface but **does not bundle Wine**. Windows installation and launching require an independently obtained compatible Wine runtime; the core discovers `wine` on its process `PATH` or accepts `CASKRUN_WINE`. The native app prefers a bundled engine when one exists. Reviewed runtime builds and their prerequisites are documented in [runtime notes](docs/LOCAL_WINE_RUNTIME.md) and [DXMT app integration](docs/DXMT_APP_INTEGRATION.md). Rosetta is required for the x86_64 development engine. A generic Wine installation does not provide the project's reviewed DXMT or native Dock identity behavior.
 
 The build stays in `.build/`; the script does not install into `/Applications`.
 Builds refuse to replace a Caskrun app while its own process or bundled Wine runtime is in use. To prepare a separate app while Steam keeps running from `.build/Caskrun.app`, set `CASKRUN_BUILD_OUTPUT_DIR="$PWD/.build/candidate"` for `build.sh` or `CASKRUN_PACKAGE_OUTPUT_DIR="$PWD/.build/candidate"` for `package-dmg.sh`.
@@ -89,11 +102,11 @@ The current source passes **420 Rust unit tests and 6 integration tests, with 2 
 
 See [docs/FEATURES.md](docs/FEATURES.md) for the feature inventory and validation limits. [assets/caskrun-icon.png](assets/caskrun-icon.png) retains the original Caskrun mark for Finder and Dock; [assets/caskrun-menubar-template.png](assets/caskrun-menubar-template.png) is its monochrome menu-bar cutout. The floating capsule has Collection, Discover and a + menu. Command-F reveals search; Command-3 opens bottle management. [UI validation](docs/UI_SMOKE.md) records each layout and its checks. The build script generates the app’s `.icns` sizes.
 
-Caskrun itself is available under MIT (`LICENSE`). Wine and other runtime components keep their own licenses; their binaries are excluded from this source repository and are included only in the local development DMG with notices and source references.
+Caskrun's original app and core are available under MIT ([LICENSE](LICENSE)). Separately licensed patches, data and runtime components retain their own terms; see [third-party notices](THIRD_PARTY_NOTICES.md). Runtime binaries are excluded from this source repository and are included only in the local development DMG with notices and source references.
 
 
 ## Contributing and source license
 
-Caskrun's original app, core, catalog metadata and build tooling are MIT-licensed. The separately attributed Highball compatibility snapshot is CC0-1.0; see [data provenance](docs/GAME_COMPATIBILITY.md) and its bundled licence. The Wine patches in `runtime-patches/` are LGPL-2.1-or-later; see [third-party notices](THIRD_PARTY_NOTICES.md). This source repository excludes local builds, runtimes, installers, bottles, logs, and release images. No demo binary is distributed through GitHub yet.
+Caskrun's original app, core, catalog metadata and build tooling are MIT-licensed. The separately attributed Highball compatibility snapshot is CC0-1.0; see [data provenance](docs/GAME_COMPATIBILITY.md) and its bundled licence. Wine and DXMT patches are LGPL-2.1-or-later; the separately attributed AnyPS5 patches are GPL-2.0-only. See [third-party notices](THIRD_PARTY_NOTICES.md) and [AnyPS5 patch terms](runtime-patches/anyps5/README.md). This source repository excludes local builds, runtimes, installers, bottles, logs, and release images. No demo binary is distributed through GitHub yet.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before committing. The local privacy checks protect staged files and outgoing Git history; local author identity and private match terms stay in `.git/`.

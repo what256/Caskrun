@@ -1,11 +1,19 @@
-# Original Wine patches
+# Wine, DXMT and experimental AnyPS5 patches
 
-The patches in this directory are Caskrun-authored changes to independently
-downloaded upstream Wine. They are offered under Wine's LGPL-2.1-or-later
-license so the complete modified Wine source can be redistributed under the
-same terms. The rest of Caskrun keeps its own repository license.
+`wine-*.patch` and `dxmt-*.patch` are Caskrun-authored changes to independently
+downloaded upstream Wine and DXMT. They are offered under their respective
+projects' LGPL-2.1-or-later license; the complete [LGPL 2.1 text](licenses/COPYING.LIB)
+is included unchanged from Wine 11.0. Preserve the copyright and license
+notices in the upstream source when applying or redistributing these changes.
 
-The source patches apply to **Wine 11.0 only**. When Caskrun opts a verified
+The [experimental AnyPS5 subdirectory](anyps5/README.md) is separately
+GPL-2.0-only and includes its own COPYING file. Original MIT-licensed helpers
+and plist templates retain Caskrun's repository license. These source patches
+do not include third-party runtimes, publisher artwork or game data.
+
+## Wine patches
+
+The Wine source patches apply to **Wine 11.0 only**. When Caskrun opts a verified
 Steam launch into `CASKRUN_STEAM_MODE=1`, `wine-11.0-steam-cef-commandline.patch`
 appends `--in-process-gpu --disable-gpu` to `steamwebhelper.exe` children
 started by `steam.exe`. It does not alter Steam's binaries or disable the CEF

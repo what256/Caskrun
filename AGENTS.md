@@ -10,7 +10,7 @@
 
 ## GitHub publication and privacy
 
-- GitHub visibility remains private until the user explicitly asks to make it public. Describe the project as a demo in active development; more features are coming.
+- The user has authorized public source publication. Describe the project as a demo in active development; more features are coming. Publish reviewed source only; binary releases require a separate privacy and runtime-license review.
 - Never commit personal information, credentials, local home paths, device or real bottle identifiers, user data, logs, screenshots, downloaded binaries, or build products.
 - Use the neutral local identity configured by `scripts/setup-publication-privacy.py`. Run commits with `TZ=UTC` and retain the commit/push hooks in `.githooks/`.
 - Review `scripts/check-publication-privacy.py --staged` before a commit and `--revision HEAD` before uploading. Private terms are stored only in Git's local directory, never source files.

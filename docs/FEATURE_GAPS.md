@@ -4,6 +4,8 @@ Audited **2026-09-23** against Caskrun's SwiftUI app, Rust core, catalog, and [f
 
 CodeWeavers' public guide describes the intended user journey: find an app, click **Install**, accept any required component prompts, then launch its icon from Home or its bottle. The [Steam walkthrough](https://support.codeweavers.com/en_US/installing-steam-in-crossover) says its install profile selects the bottle type, dependencies, and download locations; the user signs in **inside Steam**, then selects games in Steam. The [Mac user guide](https://support.codeweavers.com/en_US/crossover-mac-user-guide) makes bottle and install-detail changes optional for listed apps. Caskrun should match that simplicity with original code, assets, and recipes from independently licensed sources. The user should not need to locate Wine or configure a bottle to install a supported app.
 
+Current source and validation status are maintained in [the feature inventory](FEATURES.md) and [launcher results](LAUNCHER_VALIDATION.md). The older workflow rows below retain their audit context. A separate [AnyPS5/Wine PS5 DOOM experiment](ANYPS5_WINE.md) passed rendering, input, save/load and relaunch; it is not integrated into the app.
+
 ## Current validation
 
 The October Collection update replaces Home with a flat game/app grid, one

@@ -1,6 +1,8 @@
 # Retro gaming and console ports
 
-Research snapshot: **9 October 2026**. The demo now has an optional external KytyPS5 adapter and local imports; actual console emulation remains the selected engine’s responsibility, and game conversion is not implemented. No extension, emulator, game or BIOS was installed or executed for this work.
+Research snapshot: **9 October 2026**. The demo has an optional external KytyPS5 adapter and local imports; actual console emulation remains the selected engine’s responsibility, and game conversion is not integrated into the app. No extension, emulator, game or BIOS was installed or executed for this initial research.
+
+**Follow-up:** a separate pinned AnyPS5/Wine experiment ran public PS5 DOOM homebrew on Apple Silicon, verifying rendering, keyboard/mouse input, save/load, close and relaunch. Audible output, physical controllers, retail games and Caskrun integration remain unvalidated. See [the measured AnyPS5 results](ANYPS5_WINE.md). Upstream facts and counters below retain their dated review scope.
 
 ## RetroBrowser+
 
@@ -14,7 +16,7 @@ A possible first step is an optional link to the official store listing. This is
 
 [AnyPS5](https://github.com/boykopovar/AnyPS5) is licensed GPL-2.0-only. It relinks PS5 executables into Windows or Linux formats and implements replacement system libraries.
 
-Its [build instructions](https://github.com/boykopovar/AnyPS5/blob/main/docs/dev/BUILD.md) explicitly support building the **relinker tool** on macOS, including Apple Silicon. Outputs remain x86-64 Windows PE or Linux ELF; this mode does **not** provide macOS game execution. Running Windows output through Caskrun would add another untested Wine, CPU translation and graphics compatibility path.
+Its [build instructions](https://github.com/boykopovar/AnyPS5/blob/main/docs/dev/BUILD.md) explicitly support building the **relinker tool** on macOS, including Apple Silicon. Outputs remain x86-64 Windows PE or Linux ELF; this mode does **not** provide macOS game execution. Running Windows output adds Wine, CPU translation and graphics compatibility requirements. The separate PS5 DOOM homebrew experiment validates one narrow path; it is not a general native Mac runtime or an integrated Caskrun feature.
 
 The [progress page](https://boykopovar.github.io/AnyPS5/) reported the following at review:
 
@@ -88,7 +90,7 @@ redistributes. No games or proprietary firmware are included.
 
 ### 3. Investigate AnyPS5 separately
 
-An optional later workflow would convert a user-selected PS5 executable and its
+The separate [AnyPS5 investigation](ANYPS5_WINE.md) completed the public PS5 DOOM homebrew test. An optional integrated workflow would convert a user-selected PS5 executable and its
 modules into a complete Windows output, then attach that output to a dedicated
 Caskrun bottle. The [AnyPS5 build](https://github.com/boykopovar/AnyPS5/blob/main/docs/dev/BUILD.md)
 and [runtime layout](https://github.com/boykopovar/AnyPS5/blob/main/docs/user/USAGE.md)
