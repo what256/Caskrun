@@ -1,6 +1,6 @@
 # Public source demo
 
-Caskrun is in the demo phase, and public source publication was authorized on
+Caskrun is in the demo phase. Its reviewed source became public on
 13 October 2026. More features and improvements are coming. Its original source
 is MIT-licensed; Wine and DXMT patches keep their LGPL-2.1-or-later license,
 AnyPS5 patches are GPL-2.0-only, and the reviewed Highball data snapshot is CC0.
@@ -36,3 +36,20 @@ No local build or development DMG is part of this source publication. Test-only
 game/runtime packages, captures, logs, private configuration and pre-publication
 history remain excluded. The commit and push hooks continue to check later
 changes; contributors should review their own data before submitting it.
+
+## Publication result — 13 October 2026
+
+Before changing visibility, the review covered all 35 commits reachable from
+the published source, both remote branches and both closed pull-request heads.
+The source-history scan checked 387 historical file entries. No personal-data
+or credential findings remained in the reviewed publication scope. The signed-in
+repository page also confirmed that no packages were published.
+
+Anonymous access to the public repository and its reviewed README was verified.
+GitHub secret scanning, secret push protection and private vulnerability reporting
+were enabled. Actions retains read-only default token permissions and cannot
+approve pull requests. These settings supplement the local privacy checks;
+secret scanning does not detect every kind of personal information.
+
+This publication contains source only. No application binary, DMG, game dump,
+runtime package or test capture was released.
