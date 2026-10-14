@@ -1,0 +1,165 @@
+/* Original inert Caskrun fixture: production methods are inserted by the Python harness.
+ * No user app, clipboard, credential or screen is read or changed. */
+#import <AppKit/AppKit.h>
+#import <objc/runtime.h>
+#include <assert.h>
+#include <stdbool.h>
+#include <math.h>
+#define CGEventGetLocation(event) CGPointMake(140,80)
+static CGPoint cgpoint_win_from_mac(CGPoint point){return point;}
+
+typedef void *macdrv_window;
+typedef struct {int type;macdrv_window window;struct{unsigned int vkey;unsigned long time_ms;void *foreground;bool context_menu;}native_text_edit;struct{int button;bool pressed;int x,y;unsigned long time_ms;}mouse_button;}macdrv_event;
+enum {MOUSE_BUTTON=10,NATIVE_TEXT_EDIT_ACTION=33};
+static BOOL steam_enabled,helper_process,native_enabled,missing_event;
+static BOOL CaskrunSteamDockEnabled(void){return steam_enabled;}
+static BOOL CaskrunIsWindowsProcess(NSString *name){return helper_process && [name isEqualToString:@"steamwebhelper.exe"];}
+static BOOL CaskrunNativeDockEnabled(void){return native_enabled;}
+static int posted,popup_count,button_count,field_focus,action_focus;
+static BOOL buttons[2];
+static unsigned int last_action;
+static macdrv_event *macdrv_create_event(int type,id window){macdrv_event *e=calloc(1,sizeof(*e));e->type=type;e->window=(void*)window;return e;}
+static void macdrv_release_event(macdrv_event *event){free(event);}
+static void *macdrv_get_window_hwnd(macdrv_window window){(void)window;return (void*)321;}
+@interface MacDrvEvent:NSObject { @public macdrv_event *event; }
+@end
+@implementation MacDrvEvent
+@end
+@interface WineEventQueue:NSObject
+{ NSMutableArray *events; NSLock *eventsLock; }
+-(BOOL)hasMouseButtonEvents;
+-(void)fixtureAddType:(int)type;
+-(NSUInteger)fixtureEventCount;
+-(void)fixtureClear;
+-(void)postEvent:(macdrv_event*)event;
+@end
+@implementation WineEventQueue
+-(id)init{self=[super init];if(self){events=[NSMutableArray new];eventsLock=[NSLock new];}return self;}
+-(void)fixtureAddType:(int)type{MacDrvEvent *queued=[MacDrvEvent new];queued->event=calloc(1,sizeof(*queued->event));queued->event->type=type;[events addObject:queued];}
+-(NSUInteger)fixtureEventCount{return events.count;}
+-(void)fixtureClear{for(MacDrvEvent *queued in events) free(queued->event);[events removeAllObjects];}
+@@QUEUE_PEEK@@
+-(void)postEvent:(macdrv_event*)event{if(event->type==MOUSE_BUTTON){assert(button_count<2);assert(event->mouse_button.button==1);assert(event->mouse_button.x==140&&event->mouse_button.y==80);buttons[button_count++]=event->mouse_button.pressed;if(event->mouse_button.pressed)field_focus=event->mouse_button.x>=100?2:1;return;}assert(event->type==33);assert(event->native_text_edit.foreground==(void*)321);last_action=event->native_text_edit.vkey;action_focus=field_focus;posted++;}
+@end
+@interface WineWindow:NSObject
+@property BOOL visible,closing,disabled,noForeground;
+@property NSRect frame;
+@property(retain) WineEventQueue *queue;
+@property(retain) NSView *contentView;
+-(WineWindow*)ancestorWineWindow;
+-(NSRect)contentRectForFrameRect:(NSRect)rect;
+-(NSPoint)convertPointToScreen:(NSPoint)point;
+@end
+@implementation WineWindow
+-(BOOL)isVisible{return self.visible;}
+-(WineWindow*)ancestorWineWindow{return self;}
+-(NSRect)contentRectForFrameRect:(NSRect)rect{return rect;}
+-(NSPoint)convertPointToScreen:(NSPoint)point{return point;}
+@end
+@interface TestApplication:NSObject
+@property(retain) WineWindow *keyWindow;
+@end
+@implementation TestApplication
+@end
+static TestApplication *testApp;
+#define NSApp testApp
+@interface FakeMouseEvent:NSEvent
+@property NSEventType fakeType;
+@property(retain) WineWindow *fakeWindow;
+@property NSPoint fakePoint;
+@end
+@implementation FakeMouseEvent
+-(CGEventRef)CGEvent{return missing_event?NULL:(CGEventRef)1;}
+-(NSEventType)type{return _fakeType;}
+-(NSWindow*)window{return (NSWindow*)_fakeWindow;}
+-(NSPoint)locationInWindow{return _fakePoint;}
+-(NSEventModifierFlags)modifierFlags{return 0;}
+-(NSTimeInterval)timestamp{return 1;}
+-(NSInteger)windowNumber{return 0;}
+-(NSInteger)eventNumber{return 1;}
+-(NSInteger)clickCount{return 1;}
+@end
+static NSCursor *fixtureCursors[4];
+@interface NSCursor(CaskrunFixture)
++(NSCursor*)fixtureIBeam;
++(NSCursor*)fixtureVertical;
++(NSCursor*)fixtureArrow;
++(NSCursor*)fixtureHand;
+@end
+@implementation NSCursor(CaskrunFixture)
++(NSCursor*)fixtureIBeam{return fixtureCursors[0];}
++(NSCursor*)fixtureVertical{return fixtureCursors[1];}
++(NSCursor*)fixtureArrow{return fixtureCursors[2];}
++(NSCursor*)fixtureHand{return fixtureCursors[3];}
+@end
+static NSMenu *capturedMenu;
+@interface NSMenu(CaskrunFixture)
++(void)fixturePopup:(NSMenu*)menu withEvent:(NSEvent*)event forView:(NSView*)view;
+@end
+@implementation NSMenu(CaskrunFixture)
++(void)fixturePopup:(NSMenu*)menu withEvent:(NSEvent*)event forView:(NSView*)view{(void)event;(void)view;capturedMenu=menu;popup_count++;}
+@end
+@interface WineApplicationController:NSObject<NSMenuItemValidation>
+{
+@public
+ WineWindow *mouseCaptureWindow;
+ BOOL caskrunConsumedRightButton,clippingCursor,forceNextMouseMoveAbsolute;
+ NSUInteger unmatchedMouseDowns;
+ NSCursor *cursor;
+ NSMutableSet *windowsBeingDragged;
+}
+@property(readonly) BOOL clippingCursor;
+-(BOOL)caskrunTextEditingEnabled;
+-(NSMenu*)caskrunTextMenuForWindow:(WineWindow*)window;
+-(void)caskrunNativeTextEdit:(NSMenuItem*)item;
+-(BOOL)caskrunHandleTextContextEvent:(NSEvent*)event;
+-(void)handleMouseButton:(NSEvent*)event;
+-(double)ticksForEventTime:(NSTimeInterval)eventTime;
+@end
+@implementation WineApplicationController
+-(BOOL)clippingCursor{return clippingCursor;}
+-(double)ticksForEventTime:(NSTimeInterval)eventTime{(void)eventTime;return 42;}
+-(void)handleMouseButton:(NSEvent*)event{
+ assert(button_count<2);buttons[button_count++]=event.type==NSEventTypeRightMouseDown;
+ if(event.type==NSEventTypeRightMouseDown)field_focus=event.locationInWindow.x>=100?2:1;
+}
+@@PRODUCTION_METHODS@@
+@end
+static FakeMouseEvent *event(NSEventType type,WineWindow *window,CGFloat x){
+ FakeMouseEvent *event=[FakeMouseEvent new];event.fakeType=type;event.fakeWindow=window;event.fakePoint=NSMakePoint(x,80);return event;
+}
+int main(void){@autoreleasepool {
+ for(int i=0;i<4;i++) fixtureCursors[i]=(NSCursor*)[NSObject new];
+ method_exchangeImplementations(class_getClassMethod([NSCursor class],@selector(IBeamCursor)),class_getClassMethod([NSCursor class],@selector(fixtureIBeam)));
+ method_exchangeImplementations(class_getClassMethod([NSCursor class],@selector(IBeamCursorForVerticalLayout)),class_getClassMethod([NSCursor class],@selector(fixtureVertical)));
+ method_exchangeImplementations(class_getClassMethod([NSCursor class],@selector(arrowCursor)),class_getClassMethod([NSCursor class],@selector(fixtureArrow)));
+ method_exchangeImplementations(class_getClassMethod([NSCursor class],@selector(pointingHandCursor)),class_getClassMethod([NSCursor class],@selector(fixtureHand)));
+ method_exchangeImplementations(class_getClassMethod([NSMenu class],@selector(popUpContextMenu:withEvent:forView:)),class_getClassMethod([NSMenu class],@selector(fixturePopup:withEvent:forView:)));
+ WineEventQueue *peek=[WineEventQueue new];assert(![peek hasMouseButtonEvents]);[peek fixtureAddType:6];assert(![peek hasMouseButtonEvents]);[peek fixtureAddType:10];for(int i=0;i<512;i++) assert([peek hasMouseButtonEvents]);assert(peek.fixtureEventCount==2);[peek fixtureClear];assert(![peek hasMouseButtonEvents]);
+ testApp=[TestApplication new];WineWindow *window=[WineWindow new];window.visible=YES;window.frame=NSMakeRect(0,0,240,160);window.queue=[WineEventQueue new];testApp.keyWindow=window;
+ WineApplicationController *controller=[WineApplicationController new];controller->windowsBeingDragged=[NSMutableSet new];controller->cursor=[NSCursor IBeamCursor];steam_enabled=helper_process=YES;
+ controller->unmatchedMouseDowns=NSEventMaskRightMouseDown;field_focus=1;
+ assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);
+ assert(!controller->unmatchedMouseDowns);assert(popup_count==1 && button_count==2 && buttons[0] && !buttons[1]);assert(field_focus==2);
+ assert(capturedMenu.numberOfItems==5);
+ NSMenuItem *paste=capturedMenu.itemArray[2];assert([paste.title isEqualToString:@"Paste"]);assert(paste.tag=='V');assert([paste.keyEquivalent isEqualToString:@"v"]);assert(paste.keyEquivalentModifierMask==NSEventModifierFlagCommand);
+ [controller caskrunNativeTextEdit:paste];assert(posted==1&&last_action=='V'&&action_focus==2);
+ assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDragged,window,140)]);
+ assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseUp,window,140)]);assert(!controller->caskrunConsumedRightButton);assert(button_count==2);
+ assert(![controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseUp,window,140)]);
+ /* A menu tracker-consumed release cannot poison the next normal press. */
+ controller->caskrunConsumedRightButton=YES;controller->cursor=[NSCursor arrowCursor];
+ assert(![controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);assert(!controller->caskrunConsumedRightButton);
+ controller->cursor=[NSCursor IBeamCursor];
+ for(int i=0;i<11;i++){
+  missing_event=NO;steam_enabled=helper_process=YES;controller->mouseCaptureWindow=nil;controller->clippingCursor=NO;[controller->windowsBeingDragged removeAllObjects];controller->cursor=[NSCursor IBeamCursor];window.visible=YES;window.closing=window.disabled=window.noForeground=NO;testApp.keyWindow=window;
+  switch(i){case 0:steam_enabled=NO;break;case 1:helper_process=NO;break;case 2:controller->mouseCaptureWindow=window;break;case 3:controller->clippingCursor=YES;break;case 4:[controller->windowsBeingDragged addObject:@1];break;case 5:controller->cursor=[NSCursor pointingHandCursor];break;case 6:window.closing=YES;break;case 7:window.visible=NO;break;case 8:testApp.keyWindow=nil;break;case 9:controller->cursor=nil;break;case 10:missing_event=YES;break;}
+  assert(![controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);assert(popup_count==1);
+ }
+ missing_event=NO;testApp.keyWindow=window;window.visible=YES;window.closing=NO;controller->cursor=[NSCursor IBeamCursor];controller->clippingCursor=NO;
+ assert(![controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,300)]);assert(popup_count==1);
+ window.closing=YES;[controller caskrunNativeTextEdit:paste];assert(posted==1);
+ window.closing=NO;testApp.keyWindow=nil;[controller caskrunNativeTextEdit:paste];assert(posted==1);
+ puts("queue peek preserves events");
+ puts("two-field targeting, native menu, paired releases and 14 context/action refusals passed");
+}return 0;}

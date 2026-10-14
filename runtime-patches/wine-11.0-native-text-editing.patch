@@ -1,0 +1,350 @@
+--- a/dlls/winemac.drv/cocoa_app.h
++++ b/dlls/winemac.drv/cocoa_app.h
+@@ -35,7 +35,7 @@
+ @protocol WineClipCursorHandler;
+ 
+ 
+-@interface WineApplicationController : NSObject <NSApplicationDelegate>
++@interface WineApplicationController : NSObject <NSApplicationDelegate, NSMenuItemValidation>
+ {
+     CFRunLoopSourceRef requestSource;
+     NSMutableArray* requests;
+@@ -66,6 +66,7 @@
+     BOOL forceNextMouseMoveAbsolute;
+     double mouseMoveDeltaX, mouseMoveDeltaY;
+     NSUInteger unmatchedMouseDowns;
++    BOOL caskrunConsumedRightButton;
+ 
+     NSTimeInterval lastScrollTime;
+     double accumScrollX, accumScrollY;
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -319,6 +319,119 @@
+         [super dealloc];
+     }
+ 
++    /* These original Caskrun menu items forward Windows editing shortcuts;
++     * AppKit never reads a password, a text value, or the clipboard. */
++    - (BOOL) caskrunTextEditingEnabled
++    {
++        return CaskrunNativeDockEnabled() ||
++               (CaskrunSteamDockEnabled() && CaskrunIsWindowsProcess(@"steamwebhelper.exe"));
++    }
++
++    - (NSMenu*) caskrunTextMenuForWindow:(WineWindow*)window
++    {
++        static const char * const titles[] = { "Cut", "Copy", "Paste", "Select All" };
++        static const char * const keys[] = { "x", "c", "v", "a" };
++        static const unsigned int actions[] = { 'X', 'C', 'V', 'A' };
++        NSMenu *menu = [[[NSMenu alloc] initWithTitle:@"Edit"] autorelease];
++        unsigned int i;
++
++        for (i = 0; i < sizeof(actions) / sizeof(actions[0]); i++)
++        {
++            NSMenuItem *item;
++            if (i == 3) [menu addItem:[NSMenuItem separatorItem]];
++            item = [menu addItemWithTitle:[NSString stringWithUTF8String:titles[i]]
++                                  action:@selector(caskrunNativeTextEdit:) keyEquivalent:[NSString stringWithUTF8String:keys[i]]];
++            item.target = self;
++            item.tag = actions[i];
++            item.keyEquivalentModifierMask = NSEventModifierFlagCommand;
++            if (window) item.representedObject = window; /* retain original target through modal tracking */
++        }
++        return menu;
++    }
++
++    - (BOOL) validateMenuItem:(NSMenuItem*)item
++    {
++        if (item.action == @selector(caskrunNativeTextEdit:))
++        {
++            WineWindow *window = item.representedObject ?: (WineWindow*)NSApp.keyWindow;
++            return [self caskrunTextEditingEnabled] && [window isKindOfClass:[WineWindow class]] &&
++                   window == NSApp.keyWindow && window.isVisible && !window.closing && !window.disabled && !window.noForeground &&
++                   !mouseCaptureWindow && !self.clippingCursor;
++        }
++        return YES;
++    }
++
++    - (void) caskrunNativeTextEdit:(NSMenuItem*)item
++    {
++        WineWindow *window = item.representedObject ?: (WineWindow*)NSApp.keyWindow;
++        macdrv_event *event;
++        WineWindow *ancestor;
++
++        if (![self validateMenuItem:item]) return;
++        ancestor = [window ancestorWineWindow];
++        event = macdrv_create_event(NATIVE_TEXT_EDIT_ACTION, window);
++        event->native_text_edit.vkey = (unsigned int)item.tag;
++        event->native_text_edit.context_menu = item.representedObject != nil;
++        event->native_text_edit.foreground = macdrv_get_window_hwnd((macdrv_window)ancestor);
++        event->native_text_edit.time_ms = [self ticksForEventTime:NSProcessInfo.processInfo.systemUptime];
++        [window.queue postEvent:event];
++        macdrv_release_event(event);
++    }
++
++    - (BOOL) caskrunHandleTextContextEvent:(NSEvent*)event
++    {
++        WineWindow *window;
++        NSRect contentRect;
++        NSPoint point;
++        CGPoint targetPoint;
++        CGEventRef mouseEvent;
++        unsigned int i;
++
++        if (event.type == NSEventTypeRightMouseUp && caskrunConsumedRightButton)
++        {
++            caskrunConsumedRightButton = NO;
++            return YES;
++        }
++        if (event.type == NSEventTypeRightMouseDragged && caskrunConsumedRightButton) return YES;
++        if (event.type != NSEventTypeRightMouseDown) return NO;
++        /* NSMenu's modal tracker can consume the release itself. A fresh
++         * physical press starts a new pair and must not inherit that state. */
++        caskrunConsumedRightButton = NO;
++        if (!CaskrunSteamDockEnabled() || !CaskrunIsWindowsProcess(@"steamwebhelper.exe") ||
++            mouseCaptureWindow || self.clippingCursor || [windowsBeingDragged count] || !cursor ||
++            (cursor != [NSCursor IBeamCursor] && cursor != [NSCursor IBeamCursorForVerticalLayout])) return NO;
++        window = (WineWindow*)event.window;
++        if (![window isKindOfClass:[WineWindow class]] || window != NSApp.keyWindow ||
++            !window.isVisible || window.closing || window.disabled || window.noForeground) return NO;
++        contentRect = [window contentRectForFrameRect:window.frame];
++        point = [window convertPointToScreen:event.locationInWindow];
++        if (!NSPointInRect(point, contentRect)) return NO;
++
++        /* Let the Windows text surface target the field under this click
++         * before an edit action is queued. Pair it immediately: NSMenu can
++         * consume the physical release while tracking. Neither a dangling
++         * button nor editing the previously focused field is acceptable. */
++        mouseEvent = [event CGEvent];
++        if (!mouseEvent) return NO;
++        targetPoint = cgpoint_win_from_mac(CGEventGetLocation(mouseEvent));
++        unmatchedMouseDowns &= ~NSEventMaskRightMouseDown;
++        for (i = 0; i < 2; i++)
++        {
++            macdrv_event *click = macdrv_create_event(MOUSE_BUTTON, window);
++            click->mouse_button.button = 1;
++            click->mouse_button.pressed = i == 0;
++            click->mouse_button.x = floor(targetPoint.x);
++            click->mouse_button.y = floor(targetPoint.y);
++            click->mouse_button.time_ms = [self ticksForEventTime:event.timestamp];
++            [window.queue postEvent:click];
++            macdrv_release_event(click);
++        }
++        forceNextMouseMoveAbsolute = TRUE;
++        caskrunConsumedRightButton = YES;
++        [NSMenu popUpContextMenu:[self caskrunTextMenuForWindow:window] withEvent:event forView:window.contentView];
++        return YES; /* physical release is consumed after the balanced targeting pair */
++    }
++
+     - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+     {
+         /* Steam's visible login belongs to steamwebhelper.exe. Keep that
+@@ -397,6 +510,13 @@
+             [item setTitle:CaskrunNativeDockEnabled() && [bundleName length] ? bundleName : WineLocalizedString(STRING_MENU_WINE)];
+             [item setSubmenu:submenu];
+             [mainMenu addItem:item];
++
++            if ([self caskrunTextEditingEnabled])
++            {
++                item = [[[NSMenuItem alloc] initWithTitle:@"Edit" action:nil keyEquivalent:@""] autorelease];
++                item.submenu = [self caskrunTextMenuForWindow:nil];
++                [mainMenu addItem:item];
++            }
+ 
+             // Window menu
+             submenu = [[[NSMenu alloc] initWithTitle:WineLocalizedString(STRING_MENU_WINDOW)] autorelease];
+@@ -1917,6 +2037,7 @@
+         BOOL ret = FALSE;
+         NSEventType type = [anEvent type];
+ 
++        if ([self caskrunHandleTextContextEvent:anEvent]) return YES;
+         if (type == NSEventTypeFlagsChanged)
+             self.lastFlagsChanged = anEvent;
+         else if (type == NSEventTypeMouseMoved || type == NSEventTypeLeftMouseDragged ||
+--- a/dlls/winemac.drv/cocoa_event.m
++++ b/dlls/winemac.drv/cocoa_event.m
+@@ -289,6 +289,18 @@
+ 
+         [eventsLock unlock];
+         return ret;
++    }
++
++    /* Inspect without consuming: a native text action must not overtake
++     * the right-button pair that selects its Windows text target. */
++    - (BOOL) hasMouseButtonEvents
++    {
++        BOOL found = NO;
++        [eventsLock lock];
++        for (MacDrvEvent *queued in events)
++            if (queued->event->type == MOUSE_BUTTON) { found = YES; break; }
++        [eventsLock unlock];
++        return found;
+     }
+ 
+     - (void) discardEventsPassingTest:(BOOL (^)(macdrv_event* event))block
+@@ -588,6 +600,13 @@
+     [[WineApplicationController sharedController] unregisterEventQueue:q];
+     [threadDict removeObjectForKey:WineEventQueueThreadDictionaryKey];
+ }
++}
++
++/* A read-only, thread-safe check; no events or retained objects escape. */
++int macdrv_queue_has_mouse_button_events(macdrv_event_queue q)
++{
++    WineEventQueue *queue = (WineEventQueue*)q;
++    return [queue hasMouseButtonEvents];
+ }
+ 
+ /***********************************************************************
+--- a/dlls/winemac.drv/cocoa_window.h
++++ b/dlls/winemac.drv/cocoa_window.h
+@@ -88,6 +88,7 @@
+ 
+ @property (retain, readonly, nonatomic) WineEventQueue* queue;
+ @property (readonly, nonatomic) BOOL disabled;
++@property (readonly, nonatomic) BOOL closing;
+ @property (readonly, nonatomic) BOOL noForeground;
+ @property (readonly, nonatomic) BOOL preventsAppActivation;
+ @property (readonly, nonatomic) BOOL floating;
+--- a/dlls/winemac.drv/macdrv_cocoa.h
++++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -302,6 +302,7 @@
+     WINDOW_MINIMIZE_REQUESTED,
+     WINDOW_RESIZE_ENDED,
+     WINDOW_RESTORE_REQUESTED,
++    NATIVE_TEXT_EDIT_ACTION, /* append: preserve all existing event ordinals */
+     NUM_EVENT_TYPES
+ };
+ 
+@@ -403,6 +404,12 @@
+             bool    keep_frame;
+             CGRect  frame;
+         }                                           window_restore_requested;
++        struct {
++            unsigned int    vkey;
++            unsigned long   time_ms;
++            void           *foreground;
++            bool            context_menu;
++        }                                           native_text_edit;
+     };
+ } macdrv_event;
+ 
+@@ -452,6 +459,7 @@
+ extern macdrv_event_queue macdrv_create_event_queue(macdrv_event_handler handler);
+ extern void macdrv_destroy_event_queue(macdrv_event_queue queue);
+ extern int macdrv_get_event_queue_fd(macdrv_event_queue queue);
++extern int macdrv_queue_has_mouse_button_events(macdrv_event_queue queue);
+ 
+ extern int macdrv_copy_event_from_queue(macdrv_event_queue queue,
+         macdrv_event_mask mask, macdrv_event **event);
+--- a/dlls/winemac.drv/macdrv.h
++++ b/dlls/winemac.drv/macdrv.h
+@@ -246,6 +246,7 @@
+ extern void macdrv_keyboard_changed(const macdrv_event *event);
+ extern void macdrv_key_event(HWND hwnd, const macdrv_event *event);
+ extern void macdrv_hotkey_press(const macdrv_event *event);
++extern void macdrv_native_text_edit(HWND hwnd, const macdrv_event *event);
+ extern HKL macdrv_get_hkl_from_source(TISInputSourceRef input_source);
+ 
+ extern void macdrv_displays_changed(const macdrv_event *event);
+--- a/dlls/winemac.drv/event.c
++++ b/dlls/winemac.drv/event.c
+@@ -76,6 +76,7 @@
+         "WINDOW_MINIMIZE_REQUESTED",
+         "WINDOW_RESIZE_ENDED",
+         "WINDOW_RESTORE_REQUESTED",
++        "NATIVE_TEXT_EDIT_ACTION",
+     };
+     C_ASSERT(ARRAYSIZE(event_names) == NUM_EVENT_TYPES);
+ 
+@@ -101,6 +102,7 @@
+         event_mask |= event_mask_for_type(KEY_PRESS);
+         event_mask |= event_mask_for_type(KEY_RELEASE);
+         event_mask |= event_mask_for_type(KEYBOARD_CHANGED);
++        event_mask |= event_mask_for_type(NATIVE_TEXT_EDIT_ACTION);
+     }
+ 
+     if (mask & QS_MOUSEBUTTON)
+@@ -400,6 +402,9 @@
+     case HOTKEY_PRESS:
+         macdrv_hotkey_press(event);
+         break;
++    case NATIVE_TEXT_EDIT_ACTION:
++        macdrv_native_text_edit(hwnd, event);
++        break;
+     case IM_SET_TEXT:
+         macdrv_im_set_text(event);
+         break;
+--- a/dlls/winemac.drv/keyboard.c
++++ b/dlls/winemac.drv/keyboard.c
+@@ -1030,6 +1030,70 @@
+  *
+  * Handler for HOTKEY_PRESS events.
+  */
++/* Native menu actions carry keys only, never clipboard or field contents.
++ * Target the same Wine root that owned the Cocoa menu, so a delayed action
++ * cannot edit a newly focused Windows application.  Hardware inputs are
++ * explicitly addressed to that root and every modifier is restored. */
++void macdrv_native_text_edit(HWND hwnd, const macdrv_event *event)
++{
++    static const struct {
++        WORD vkey, scan;
++    } modifiers[] = {
++        { VK_LSHIFT, 0x2a }, { VK_RSHIFT, 0x136 }, /* server uses extended bit to select RSHIFT */
++        { VK_LCONTROL, 0x1d }, { VK_RCONTROL, 0x11d },
++        { VK_LMENU, 0x38 }, { VK_RMENU, 0x138 },
++        { VK_LWIN, 0x15b }, { VK_RWIN, 0x15c },
++    };
++    struct macdrv_thread_data *data = macdrv_thread_data();
++    GUITHREADINFO info = { .cbSize = sizeof(info) };
++    HWND root, foreground;
++    BYTE keystate[256];
++    WORD vkey = event->native_text_edit.vkey, scan = 0;
++    unsigned int i;
++    BOOL added_control;
++
++    if (vkey != 'A' && vkey != 'C' && vkey != 'V' && vkey != 'X') return;
++    if (event->native_text_edit.context_menu &&
++        (macdrv_queue_has_mouse_button_events(data->queue) ||
++         ((NtUserGetQueueStatus(QS_MOUSEBUTTON) >> 16) & QS_MOUSEBUTTON))) return;
++    if (!hwnd || !event->native_text_edit.foreground) return;
++    root = NtUserGetAncestor(hwnd, GA_ROOT);
++    foreground = NtUserGetForegroundWindow();
++    if (!root || root != foreground || foreground != event->native_text_edit.foreground) return;
++    if (!NtUserGetGUIThreadInfo(NtUserGetWindowThread(foreground, NULL), &info) ||
++        !info.hwndFocus || NtUserGetAncestor(info.hwndFocus, GA_ROOT) != root ||
++        (info.flags & (GUI_INMENUMODE | GUI_INMOVESIZE))) return;
++    if (!NtUserGetAsyncKeyboardState(keystate)) return;
++    if (keystate[vkey] & 0x80) return; /* do not release a physically held letter */
++    for (i = 0; i < ARRAY_SIZE(data->keyc2vkey); i++)
++        if (data->keyc2vkey[i] == vkey) { scan = data->keyc2scan[i]; break; }
++    if (!scan || root != NtUserGetForegroundWindow()) return;
++
++    for (i = 0; i < ARRAY_SIZE(modifiers); i++)
++        if (modifiers[i].vkey != VK_LCONTROL && modifiers[i].vkey != VK_RCONTROL &&
++            (keystate[modifiers[i].vkey] & 0x80))
++            macdrv_send_keyboard_input(root, modifiers[i].vkey, modifiers[i].scan & 0xff,
++                                       KEYEVENTF_KEYUP | ((modifiers[i].scan & 0x100) ? KEYEVENTF_EXTENDEDKEY : 0),
++                                       event->native_text_edit.time_ms);
++    added_control = !(keystate[VK_LCONTROL] & 0x80) && !(keystate[VK_RCONTROL] & 0x80);
++    if (added_control)
++        macdrv_send_keyboard_input(root, VK_LCONTROL, 0x1d, 0, event->native_text_edit.time_ms);
++    macdrv_send_keyboard_input(root, vkey, scan & 0xff, (scan & 0x100) ? KEYEVENTF_EXTENDEDKEY : 0,
++                               event->native_text_edit.time_ms);
++    macdrv_send_keyboard_input(root, vkey, scan & 0xff,
++                               KEYEVENTF_KEYUP | ((scan & 0x100) ? KEYEVENTF_EXTENDEDKEY : 0),
++                               event->native_text_edit.time_ms);
++    if (added_control)
++        macdrv_send_keyboard_input(root, VK_LCONTROL, 0x1d, KEYEVENTF_KEYUP,
++                                   event->native_text_edit.time_ms);
++    for (i = 0; i < ARRAY_SIZE(modifiers); i++)
++        if (modifiers[i].vkey != VK_LCONTROL && modifiers[i].vkey != VK_RCONTROL &&
++            (keystate[modifiers[i].vkey] & 0x80))
++            macdrv_send_keyboard_input(root, modifiers[i].vkey, modifiers[i].scan & 0xff,
++                                       (modifiers[i].scan & 0x100) ? KEYEVENTF_EXTENDEDKEY : 0,
++                                       event->native_text_edit.time_ms);
++}
++
+ void macdrv_hotkey_press(const macdrv_event *event)
+ {
+     struct macdrv_thread_data *thread_data = macdrv_thread_data();

@@ -489,6 +489,7 @@ private final class CaskrunAppDelegate: NSObject, NSApplicationDelegate {
 private final class CaskrunWindowBridge: NSObject {
     static let shared = CaskrunWindowBridge()
     private let mainWindows = NSHashTable<NSWindow>.weakObjects()
+    private var closeDelegates: [ObjectIdentifier: CaskrunCloseToMenuBarDelegate] = [:]
     private var presentationGeneration: UInt64 = 0
     private(set) var hasPresentedMainWindow = false
 
@@ -496,19 +497,49 @@ private final class CaskrunWindowBridge: NSObject {
         super.init()
         NotificationCenter.default.addObserver(self, selector: #selector(mainWindowWillClose(_:)),
                                                name: NSWindow.willCloseNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(mainWindowDidBecomeKey(_:)),
+                                               name: NSWindow.didBecomeKeyNotification, object: nil)
     }
 
     func register(_ window: NSWindow) {
+        installCloseDelegate(for: window)
         guard !mainWindows.allObjects.contains(where: { $0 === window }) else { return }
         mainWindows.add(window)
         hasPresentedMainWindow = true
         presentationGeneration &+= 1
+        // The capture view can enter its window while SwiftUI is still setting
+        // up that window. Reattach once setup finishes without changing any of
+        // the framework's other window-delegate callbacks.
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window,
+                  self.mainWindows.allObjects.contains(where: { $0 === window }) else { return }
+            self.installCloseDelegate(for: window)
+        }
+    }
+
+    private func installCloseDelegate(for window: NSWindow) {
+        let identity = ObjectIdentifier(window)
+        let delegate = closeDelegates[identity] ?? CaskrunCloseToMenuBarDelegate(
+            window: window, previousDelegate: window.delegate,
+            hideWindow: { [weak self] _ in self?.hideMainWindow() })
+        closeDelegates[identity] = delegate
+        delegate.attach(to: window)
+    }
+
+    @objc private func mainWindowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              mainWindows.allObjects.contains(where: { $0 === window }) else { return }
+        installCloseDelegate(for: window)
     }
 
     @objc private func mainWindowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow,
               mainWindows.allObjects.contains(where: { $0 === window }) else { return }
         mainWindows.remove(window)
+        let identity = ObjectIdentifier(window)
+        // AppKit may still call the window delegate after this notification.
+        // Keep the forwarding proxy alive through that final cleanup callback.
+        DispatchQueue.main.async { [weak self] in self?.closeDelegates[identity] = nil }
         reconcileAfterWindowClose()
     }
 
@@ -525,6 +556,7 @@ private final class CaskrunWindowBridge: NSObject {
     }
 
     func hideMainWindow() {
+        presentationGeneration &+= 1
         for window in mainWindows.allObjects {
             window.orderOut(nil)
         }
@@ -560,7 +592,9 @@ private struct CaskrunWindowCapture: NSViewRepresentable {
         CaskrunWindowCaptureView(frame: .zero)
     }
 
-    func updateNSView(_ nsView: CaskrunWindowCaptureView, context: Context) {}
+    func updateNSView(_ nsView: CaskrunWindowCaptureView, context: Context) {
+        if let window = nsView.window { CaskrunWindowBridge.shared.register(window) }
+    }
 }
 
 private struct CaskrunStatusBridge: View {

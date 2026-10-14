@@ -131,8 +131,22 @@ trap cleanup EXIT
 # Build and sign the entire candidate without changing the visible app.
 CASKRUN_BUILD_OUTPUT_DIR="$WORK" "$PROJECT_ROOT/scripts/build.sh"
 ditto "$RUNTIME" "$STAGED_APP/Contents/Resources/wine-runtime"
-codesign --force --deep --sign - "$STAGED_APP"
+# build.sh signed the app's nested code, and the engine package contains its
+# own verified signatures. Re-sign only the outer app: changing a runtime
+# image here would invalidate its exact content identity and bottle records.
+codesign --force --sign - "$STAGED_APP"
 codesign --verify --deep --strict "$STAGED_APP"
+python3 -B - "$PROJECT_ROOT" "$RUNTIME" "$STAGED_APP/Contents/Resources/wine-runtime" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+repo, original, packaged = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location('dxmt_package', repo / 'scripts/package-wine-runtime-dxmt-dev.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+if module.tree_identity(original) != module.tree_identity(packaged):
+    raise SystemExit('Signing changed the exact bundled engine; preserving the old app')
+PY
 if [[ "$(lipo -archs "$STAGED_APP/Contents/MacOS/Caskrun")" != arm64 ||
       "$(lipo -archs "$STAGED_APP/Contents/MacOS/caskrun-core")" != arm64 ||
       "$(lipo -archs "$STAGED_APP/Contents/Resources/wine-runtime/runtime/bin/wine")" != x86_64 ]]; then

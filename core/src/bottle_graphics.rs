@@ -179,14 +179,18 @@ fn read_settings(dir: &Path) -> Result<(Preferences, Option<Vec<u8>>), String> {
 // dispatcher, receipts and source notices. A manifest by itself is not proof
 // that a random/custom Wine runtime supports Caskrun's selection protocol.
 fn dxmt_support(dir: &Path, wine: &Path) -> Result<(), String> {
-    let approved = runtime_migration::SWITCHABLE_WINE_11_IDENTITY;
     let record = recorded_runtime_for_prefix(dir, Some(wine))?;
     let identity = match record {
-        Some(record) if record.runtime_identity.as_deref() == Some(approved) => {
+        Some(record)
+            if record
+                .runtime_identity
+                .as_deref()
+                .is_some_and(runtime_migration::is_reviewed_switchable_runtime) =>
+        {
             if !runtime_record_matches(&record, wine)? {
                 return Err("This bottle uses a different Windows engine".into());
             }
-            approved.to_owned()
+            record.runtime_identity.unwrap()
         }
         _ => {
             runtime_identity::bundled_runtime_attestation(wine)?
@@ -194,7 +198,7 @@ fn dxmt_support(dir: &Path, wine: &Path) -> Result<(), String> {
                 .identity
         }
     };
-    if identity != approved {
+    if !runtime_migration::is_reviewed_switchable_runtime(&identity) {
         return Err("DXMT is not included in this Windows engine package".into());
     }
     let root = wine
@@ -691,6 +695,24 @@ mod tests {
         assert!(validate_receipt(&receipt).is_ok());
         receipt["backend_roots"]["dxmt"] = "../../elsewhere".into();
         assert!(validate_receipt(&receipt).is_err());
+    }
+
+    #[test]
+    fn graphics_capabilities_require_an_explicitly_reviewed_complete_package() {
+        assert!(runtime_migration::is_reviewed_switchable_runtime(
+            runtime_migration::SWITCHABLE_WINE_11_IDENTITY
+        ));
+        assert!(runtime_migration::is_reviewed_switchable_runtime(
+            runtime_migration::NATIVE_TEXT_EDITING_WINE_11_IDENTITY
+        ));
+        for identity in [
+            "wine-11.0",
+            "caskrun-switchable-graphics-v1",
+            "sha256:unknown",
+            "sha256:4d82b50b96eb5995a78d848fb67166979577cd98e36d7db72fbb08636f8f44c0",
+        ] {
+            assert!(!runtime_migration::is_reviewed_switchable_runtime(identity));
+        }
     }
 
     #[test]
