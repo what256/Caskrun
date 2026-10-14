@@ -422,7 +422,7 @@ struct CollectionArtwork: View {
     let item: CollectionItem
 
     var body: some View {
-        if item.kind == .app {
+        if item.platform != .browser {
             Color.clear
                 .aspectRatio(16.0 / 9.0, contentMode: .fit)
                 .overlay(alignment: .bottom) {
@@ -430,7 +430,8 @@ struct CollectionArtwork: View {
                         if let icon = item.icon {
                             Image(nsImage: icon).resizable().interpolation(.high).scaledToFit()
                         } else {
-                            Image(systemName: "app").font(.system(size: 28, weight: .light)).foregroundStyle(.tertiary)
+                            Image(systemName: item.kind == .app ? "app" : "gamecontroller")
+                                .font(.system(size: 28, weight: .light)).foregroundStyle(.tertiary)
                         }
                     }
                     .frame(width: 48, height: 48)

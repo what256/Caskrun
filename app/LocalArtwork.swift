@@ -84,7 +84,7 @@ actor SteamArtworkReader {
     static let shared = SteamArtworkReader()
     private var active = 0
     private var waiting: [CheckedContinuation<Void, Never>] = []
-    func read(_ path: String) async -> Data? {
+    func read(_ path: String, asIcon: Bool = false) async -> Data? {
         if active >= 2 { await withCheckedContinuation { waiting.append($0) } }
         else { active += 1 }
         defer {
@@ -94,7 +94,8 @@ actor SteamArtworkReader {
         guard !Task.isCancelled else { return nil }
         return await Task.detached(priority: .utility) {
             guard let bytes = MacAppArtwork.read(path, maximum: 8 * 1024 * 1024) else { return nil as Data? }
-            return SteamGameArtworkPolicy.thumbnail(bytes, local: true)
+            return asIcon ? SteamGameArtworkPolicy.icon(bytes, local: true)
+                          : SteamGameArtworkPolicy.thumbnail(bytes, local: true)
         }.value
     }
 }

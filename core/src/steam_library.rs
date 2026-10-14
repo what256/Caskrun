@@ -24,6 +24,9 @@ const MAX_DEPTH: usize = 16;
 const MAX_LIBRARIES: usize = 64;
 const MAX_SCAN_ENTRIES: usize = 32_768;
 const MAX_GAMES: usize = 4_096;
+const MAX_SHORTCUT_BYTES: u64 = 32 * 1024;
+const MAX_SHORTCUT_ENTRIES: usize = 4_096;
+const MAX_SHORTCUT_DEPTH: usize = 5;
 const FULLY_INSTALLED: u32 = 4;
 // Darwin O_NONBLOCK prevents a regular-file-to-FIFO race from waiting in open.
 const O_NONBLOCK: i32 = 0x0000_0004;
@@ -44,6 +47,10 @@ pub(crate) struct SteamGame {
     pub(crate) steam_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) icon_path: Option<String>,
+    /// Public Steam client-icon digest from an exact same-app shortcut. No
+    /// account identity or local path is needed to fetch this icon from Steam.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) icon_hash: Option<String>,
 }
 
 struct CheckedDrive {
@@ -258,6 +265,24 @@ fn discover_with_budget(prefix: &Path, max_read_bytes: u64) -> Result<SteamLibra
             }
         }
     }
+    if !games.is_empty() && !read_budget.exhausted {
+        let icons = shortcut_icon_associations(&drive, &mut read_budget, &mut result.truncated);
+        for game in games.values_mut() {
+            cancellation::check()?;
+            let Some(steam_root) = Path::new(&game.steam_path).parent() else {
+                continue;
+            };
+            if let Some(Some(hash)) = icons.get(&(steam_root.to_owned(), game.app_id)) {
+                game.icon_hash = Some(hash.clone());
+                if game.icon_path.is_none() {
+                    game.icon_path = checked_icon_path(
+                        &drive,
+                        &steam_root.join("steam/games").join(format!("{hash}.ico")),
+                    );
+                }
+            }
+        }
+    }
     cancellation::check()?;
     if !drive.is_current() {
         return Err("Bottle C: drive changed while reading its Steam library".into());
@@ -386,6 +411,7 @@ fn scan_library(
                 install_path: install_path.display().to_string(),
                 steam_path: steam_path.display().to_string(),
                 icon_path: cached_icon_path(drive, steam_path, app_id),
+                icon_hash: None,
             },
         );
     }
@@ -498,49 +524,227 @@ fn open_regular_library_file(path: &Path, before: &fs::Metadata) -> Option<File>
 
 fn cached_icon_path(drive: &CheckedDrive, steam_path: &Path, app_id: u32) -> Option<String> {
     let cache = steam_path.parent()?.join("appcache/librarycache");
-    // Steam now keeps named art in an app-id subdirectory. Keep legacy exact
-    // names too; never guess a hashed blob or accept another app's artwork.
-    let cover_names = [
-        "header.jpg",
-        "header.png",
-        "library_header.jpg",
-        "library_header.png",
-        "library_hero.jpg",
-        "library_600x900.jpg",
-        "library_600x900.png",
+    // Collection uses original app icons, never cropped store covers or
+    // library wordmarks. Support Steam's modern and legacy exact icon names.
+    let icon_names = [
+        "clienticon.ico",
+        "icon.ico",
+        "icon.png",
+        "icon.jpg",
+        "clienticon.png",
     ];
     let app_cache = cache.join(app_id.to_string());
-    cover_names
+    icon_names
         .into_iter()
         .map(|name| app_cache.join(name))
         .chain(
-            cover_names
+            icon_names
                 .into_iter()
                 .map(|name| cache.join(format!("{app_id}_{name}"))),
         )
-        .chain(
-            ["icon.jpg", "icon.png", "logo.png"]
-                .into_iter()
-                .map(|name| cache.join(format!("{app_id}_{name}"))),
-        )
-        .find_map(|path| {
-            if !checked_regular_file(drive, &path)
-                || !fs::symlink_metadata(&path)
-                    .is_ok_and(|metadata| metadata.len() > 0 && metadata.len() <= MAX_ICON_BYTES)
-            {
-                return None;
+        .find_map(|path| checked_icon_path(drive, &path))
+}
+
+fn checked_icon_path(drive: &CheckedDrive, path: &Path) -> Option<String> {
+    (checked_regular_file(drive, path)
+        && fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.len() > 0 && metadata.len() <= MAX_ICON_BYTES))
+    .then(|| path.display().to_string())
+}
+
+/// Steam records the original shortcut icon beside its documented AppID URI.
+/// Read those associations once, from bounded bottle-local standard shortcut
+/// locations. Never follow host Desktop mappings or arbitrary IconFile paths.
+fn shortcut_icon_associations(
+    drive: &CheckedDrive,
+    budget: &mut ReadBudget,
+    truncated: &mut bool,
+) -> BTreeMap<(PathBuf, u32), Option<String>> {
+    let mut icons = BTreeMap::new();
+    let Some(users) = checked_directory(drive, &drive.join("users")) else {
+        return icons;
+    };
+    let mut examined = 0;
+    let mut pending = vec![(users, 0usize, false)];
+    while let Some((folder, depth, shortcut_folder)) = pending.pop() {
+        if cancellation::is_requested() || budget.exhausted {
+            break;
+        }
+        let Some(folder) = checked_directory(drive, &folder) else {
+            continue;
+        };
+        let Ok((_guard, _)) = open_stable_directory(&folder) else {
+            continue;
+        };
+        let Ok(entries) = fs::read_dir(&folder) else {
+            continue;
+        };
+        let mut children = Vec::new();
+        for entry in entries {
+            if examined >= MAX_SHORTCUT_ENTRIES {
+                *truncated = true;
+                return icons;
             }
-            Some(path.display().to_string())
-        })
+            examined += 1;
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !shortcut_folder {
+                if metadata.file_type().is_dir() {
+                    // Only real account directories. Existing profile aliases
+                    // are skipped, so each account is examined once.
+                    children.push((path.join("Desktop"), 0, true));
+                    children.push((
+                        path.join("AppData/Roaming/Microsoft/Windows/Start Menu/Programs"),
+                        0,
+                        true,
+                    ));
+                }
+            } else if metadata.file_type().is_dir() && depth < MAX_SHORTCUT_DEPTH {
+                children.push((path, depth + 1, true));
+            } else if metadata.file_type().is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("url"))
+                && let Some(bytes) = read_checked_bytes(drive, &path, budget, MAX_SHORTCUT_BYTES)
+                && let Some(text) = shortcut_text(bytes)
+                && let Some((root, app_id, hash)) = shortcut_icon_association(drive, &text)
+            {
+                icons
+                    .entry((root, app_id))
+                    .and_modify(|existing| {
+                        if existing.as_deref() != Some(hash.as_str()) {
+                            *existing = None;
+                        }
+                    })
+                    .or_insert(Some(hash));
+            }
+        }
+        // Deterministic bounded scan independent of directory enumeration order.
+        children.sort();
+        pending.extend(children.into_iter().rev());
+    }
+    icons
+}
+
+fn shortcut_text(bytes: Vec<u8>) -> Option<String> {
+    if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
+        if !bytes.len().is_multiple_of(2) {
+            return None;
+        }
+        let little = bytes[0] == 0xff;
+        let chars = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| {
+                if little {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect::<Vec<_>>();
+        String::from_utf16(&chars).ok()
+    } else {
+        String::from_utf8(bytes).ok()
+    }
+}
+
+fn shortcut_icon_association(drive: &CheckedDrive, text: &str) -> Option<(PathBuf, u32, String)> {
+    let mut in_shortcut = false;
+    let mut fields = BTreeMap::new();
+    for (number, line) in text.trim_start_matches('\u{feff}').lines().enumerate() {
+        if number >= 256 || line.len() > 4_096 {
+            return None;
+        }
+        let line = line.trim();
+        if line.is_empty() || line.starts_with([';', '#']) {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_shortcut = line.eq_ignore_ascii_case("[InternetShortcut]");
+            continue;
+        }
+        if !in_shortcut {
+            continue;
+        }
+        let (key, value) = line.split_once('=')?;
+        let key = key.trim().to_ascii_lowercase();
+        if matches!(key.as_str(), "url" | "iconfile" | "iconindex")
+            && fields.insert(key, value.trim()).is_some()
+        {
+            return None;
+        }
+    }
+    let app_id = fields
+        .get("url")?
+        .strip_prefix("steam://rungameid/")
+        .and_then(parse_app_id)?;
+    if fields.get("iconindex").is_some_and(|index| *index != "0") {
+        return None;
+    }
+    let icon_file = fields.get("iconfile")?;
+    let icon_file = icon_file
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(icon_file);
+    let bytes = icon_file.as_bytes();
+    if bytes.len() < 3
+        || !bytes[0].eq_ignore_ascii_case(&b'c')
+        || bytes[1] != b':'
+        || !matches!(bytes[2], b'/' | b'\\')
+    {
+        return None;
+    }
+    let components = icon_file[3..].split(['/', '\\']).collect::<Vec<_>>();
+    if components.len() != 5
+        || !components.iter().all(|part| safe_windows_component(part))
+        || !matches!(
+            components[0].to_ascii_lowercase().as_str(),
+            "program files" | "program files (x86)"
+        )
+        || !components[1].eq_ignore_ascii_case("Steam")
+        || !components[2].eq_ignore_ascii_case("steam")
+        || !components[3].eq_ignore_ascii_case("games")
+    {
+        return None;
+    }
+    let filename = components[4].to_ascii_lowercase();
+    let hash = filename.strip_suffix(".ico")?;
+    if hash.len() != 40 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let location = if components[0].eq_ignore_ascii_case("Program Files (x86)") {
+        "Program Files (x86)/Steam"
+    } else {
+        "Program Files/Steam"
+    };
+    let root = checked_directory(drive, &drive.join(location))?;
+    // A publisher hash remains usable if the local ICO is missing, but its
+    // directory must still be the real Steam client directory in this bottle.
+    checked_directory(drive, &root.join("steam/games"))?;
+    Some((root, app_id, hash.to_owned()))
 }
 
 fn read_checked_text(drive: &CheckedDrive, path: &Path, budget: &mut ReadBudget) -> Option<String> {
+    String::from_utf8(read_checked_bytes(drive, path, budget, MAX_FILE_BYTES)?).ok()
+}
+
+fn read_checked_bytes(
+    drive: &CheckedDrive,
+    path: &Path,
+    budget: &mut ReadBudget,
+    maximum: u64,
+) -> Option<Vec<u8>> {
     if budget.exhausted || cancellation::is_requested() {
         return None;
     }
     checked_directory(drive, path.parent()?)?;
     let before = fs::symlink_metadata(path).ok()?;
-    if !before.file_type().is_file() || before.len() > MAX_FILE_BYTES {
+    if !before.file_type().is_file() || before.len() > maximum {
         return None;
     }
     if before.len() > budget.remaining {
@@ -549,7 +753,7 @@ fn read_checked_text(drive: &CheckedDrive, path: &Path, budget: &mut ReadBudget)
     }
     let mut file = open_regular_library_file(path, &before)?;
     let mut bytes = Vec::new();
-    let limit = MAX_FILE_BYTES.min(budget.remaining);
+    let limit = maximum.min(budget.remaining);
     // Charge actual bytes even if a read fails part way through. The shared
     // copier observes cancellation between chunks and immediately before EOF.
     let read_result = crate::copy_cancellable(&mut (&mut file).take(limit + 1), &mut bytes);
@@ -566,7 +770,7 @@ fn read_checked_text(drive: &CheckedDrive, path: &Path, budget: &mut ReadBudget)
     {
         return None;
     }
-    String::from_utf8(bytes).ok()
+    Some(bytes)
 }
 
 #[derive(Debug)]
@@ -1056,15 +1260,17 @@ mod tests {
         symlink(&outside, cache.join("480_icon.jpg")).unwrap();
         let large = File::create(cache.join("480_icon.png")).unwrap();
         large.set_len(MAX_ICON_BYTES + 1).unwrap();
-        let logo = cache.join("480_logo.png");
-        fs::write(&logo, b"synthetic local logo fixture").unwrap();
+        let modern = cache.join("480");
+        fs::create_dir(&modern).unwrap();
+        let icon = modern.join("icon.ico");
+        fs::write(&icon, b"synthetic local icon fixture").unwrap();
         assert_eq!(
             discover(&fixture.prefix).unwrap().games[0]
                 .icon_path
                 .as_deref(),
-            Some(logo.to_str().unwrap())
+            Some(icon.to_str().unwrap())
         );
-        fs::remove_file(&logo).unwrap();
+        fs::remove_file(&icon).unwrap();
         assert!(
             discover(&fixture.prefix).unwrap().games[0]
                 .icon_path
@@ -1073,7 +1279,7 @@ mod tests {
     }
 
     #[test]
-    fn prefers_named_modern_and_legacy_game_covers_and_refuses_outside_cache_links() {
+    fn prefers_real_modern_and_legacy_icons_without_using_covers_or_outside_links() {
         let fixture = Fixture::new();
         fixture.game(480, "Spacewar", "Spacewar");
         let cache = fixture.steam.join("appcache/librarycache");
@@ -1083,20 +1289,25 @@ mod tests {
         fs::write(&icon, b"synthetic icon fixture").unwrap();
         let legacy = cache.join("480_header.jpg");
         fs::write(&legacy, b"synthetic legacy header fixture").unwrap();
-        let header = modern.join("header.jpg");
-        fs::write(&header, b"synthetic modern header fixture").unwrap();
+        fs::write(
+            modern.join("header.jpg"),
+            b"synthetic modern header fixture",
+        )
+        .unwrap();
+        let modern_icon = modern.join("icon.ico");
+        fs::write(&modern_icon, b"synthetic modern icon fixture").unwrap();
         assert_eq!(
             discover(&fixture.prefix).unwrap().games[0]
                 .icon_path
                 .as_deref(),
-            Some(header.to_str().unwrap())
+            Some(modern_icon.to_str().unwrap())
         );
-        fs::remove_file(&header).unwrap();
+        fs::remove_file(&modern_icon).unwrap();
         assert_eq!(
             discover(&fixture.prefix).unwrap().games[0]
                 .icon_path
                 .as_deref(),
-            Some(legacy.to_str().unwrap())
+            Some(icon.to_str().unwrap())
         );
         let outside = fixture.root.join("outside-artwork");
         fs::create_dir(&outside).unwrap();
@@ -1105,7 +1316,7 @@ mod tests {
             b"outside artwork must not be used",
         )
         .unwrap();
-        fs::remove_dir(&modern).unwrap();
+        fs::remove_dir_all(&modern).unwrap();
         symlink(&outside, &modern).unwrap();
         fs::remove_file(&legacy).unwrap();
         assert_eq!(
@@ -1113,6 +1324,190 @@ mod tests {
                 .icon_path
                 .as_deref(),
             Some(icon.to_str().unwrap())
+        );
+        fs::remove_file(&icon).unwrap();
+        fs::write(cache.join("480_logo.png"), b"wide library wordmark").unwrap();
+        assert!(
+            discover(&fixture.prefix).unwrap().games[0]
+                .icon_path
+                .is_none()
+        );
+    }
+
+    fn shortcut_fixture(fixture: &Fixture, account: &str, app_id: u32, hash: &str) -> PathBuf {
+        let desktop = fixture
+            .prefix
+            .join("drive_c/users")
+            .join(account)
+            .join("Desktop");
+        fs::create_dir_all(&desktop).unwrap();
+        fs::create_dir_all(fixture.steam.join("steam/games")).unwrap();
+        let shortcut = desktop.join(format!("{app_id}.url"));
+        fs::write(&shortcut, format!("[InternetShortcut]\r\nURL=steam://rungameid/{app_id}\r\n IconFile = C:\\Program Files (x86)\\Steam\\steam\\games\\{hash}.ico\r\nIconIndex=0\r\n")).unwrap();
+        shortcut
+    }
+
+    #[test]
+    fn resolves_exact_steam_shortcut_icons_and_preserves_public_hash_when_file_missing() {
+        let fixture = Fixture::new();
+        fixture.game(480, "Spacewar", "Spacewar");
+        fixture.game(620, "Portal 2", "Portal 2");
+        let hash = "a".repeat(40);
+        shortcut_fixture(&fixture, "example", 480, &hash);
+        let icon = fixture
+            .steam
+            .join("steam/games")
+            .join(format!("{hash}.ico"));
+        fs::write(&icon, b"synthetic publisher ICO").unwrap();
+        let games = discover(&fixture.prefix).unwrap().games;
+        let game = games.iter().find(|game| game.app_id == 480).unwrap();
+        assert_eq!(game.icon_path.as_deref(), Some(icon.to_str().unwrap()));
+        assert_eq!(game.icon_hash.as_deref(), Some(hash.as_str()));
+        assert!(
+            games
+                .iter()
+                .find(|game| game.app_id == 620)
+                .unwrap()
+                .icon_path
+                .is_none()
+        );
+        fs::remove_file(&icon).unwrap();
+        let game = launch_target(&fixture.prefix, 480).unwrap();
+        assert!(game.icon_path.is_none());
+        assert_eq!(game.icon_hash.as_deref(), Some(hash.as_str()));
+    }
+
+    #[test]
+    fn validates_steam_shortcut_identity_paths_duplicates_and_character_encodings() {
+        let fixture = Fixture::new();
+        fixture.game(480, "Spacewar", "Spacewar");
+        let hash = "a".repeat(40);
+        let shortcut = shortcut_fixture(&fixture, "example", 480, &hash);
+        let drive = CheckedDrive::open(&fixture.prefix.join("drive_c")).unwrap();
+        let text = fs::read_to_string(&shortcut).unwrap();
+        assert_eq!(shortcut_icon_association(&drive, &text).unwrap().1, 480);
+        for wrong in [
+            text.replace("steam://rungameid/480", "steam://rungameid/0480"),
+            text.replace("steam://rungameid/480", "steam://rungameid/480?x=1"),
+            text.replace("C:\\Program Files", "Z:\\Program Files"),
+            text.replace("Steam\\steam\\games", "Other\\steam\\games"),
+            text.replace("Steam\\steam\\games", "Steam\\..\\games"),
+            text.replace(".ico", ".exe"),
+            text.replace("IconIndex=0", "IconIndex=1"),
+            format!("{text}\nURL=steam://rungameid/480"),
+            format!("{text}\nIconFile=bad"),
+            text.replace(&hash, &"g".repeat(40)),
+        ] {
+            assert!(shortcut_icon_association(&drive, &wrong).is_none());
+        }
+        let utf16 = [
+            vec![0xff, 0xfe],
+            text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+        ]
+        .concat();
+        fs::write(&shortcut, utf16).unwrap();
+        assert_eq!(
+            launch_target(&fixture.prefix, 480)
+                .unwrap()
+                .icon_hash
+                .as_deref(),
+            Some(hash.as_str())
+        );
+        assert!(shortcut_text(vec![0xff, 0xfe, 0]).is_none());
+        assert!(shortcut_text(vec![0xff, 0xfe, 0x00, 0xd8]).is_none());
+    }
+
+    #[test]
+    fn conflicting_shortcuts_do_not_select_an_arbitrary_publisher_icon() {
+        let fixture = Fixture::new();
+        fixture.game(480, "Spacewar", "Spacewar");
+        let hash = "a".repeat(40);
+        shortcut_fixture(&fixture, "example", 480, &hash);
+        shortcut_fixture(&fixture, "Public", 480, &hash);
+        assert_eq!(
+            launch_target(&fixture.prefix, 480)
+                .unwrap()
+                .icon_hash
+                .as_deref(),
+            Some(hash.as_str())
+        );
+        shortcut_fixture(&fixture, "Public", 480, &"b".repeat(40));
+        assert!(
+            launch_target(&fixture.prefix, 480)
+                .unwrap()
+                .icon_hash
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn never_follows_host_profiles_shortcuts_or_icon_files() {
+        let fixture = Fixture::new();
+        fixture.game(480, "Spacewar", "Spacewar");
+        let hash = "a".repeat(40);
+        let shortcut = shortcut_fixture(&fixture, "example", 480, &hash);
+        let outside = fixture.root.join("host");
+        fs::create_dir_all(&outside).unwrap();
+        let external = outside.join("external.url");
+        fs::rename(&shortcut, &external).unwrap();
+        symlink(&external, &shortcut).unwrap();
+        assert!(
+            launch_target(&fixture.prefix, 480)
+                .unwrap()
+                .icon_hash
+                .is_none()
+        );
+        fs::remove_file(&shortcut).unwrap();
+        fs::rename(&external, &shortcut).unwrap();
+        fs::write(outside.join("icon.ico"), b"outside publisher icon").unwrap();
+        let icon = fixture
+            .steam
+            .join("steam/games")
+            .join(format!("{hash}.ico"));
+        symlink(outside.join("icon.ico"), &icon).unwrap();
+        assert!(
+            launch_target(&fixture.prefix, 480)
+                .unwrap()
+                .icon_path
+                .is_none()
+        );
+        let desktop = shortcut.parent().unwrap();
+        fs::rename(desktop, outside.join("Desktop")).unwrap();
+        symlink(outside.join("Desktop"), desktop).unwrap();
+        assert!(
+            launch_target(&fixture.prefix, 480)
+                .unwrap()
+                .icon_hash
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn finds_start_menu_icons_and_refuses_oversized_shortcuts() {
+        let fixture = Fixture::new();
+        fixture.game(480, "Spacewar", "Spacewar");
+        let hash = "a".repeat(40);
+        let shortcut = shortcut_fixture(&fixture, "example", 480, &hash);
+        let programs = fixture.prefix.join(
+            "drive_c/users/example/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Steam",
+        );
+        fs::create_dir_all(&programs).unwrap();
+        let nested = programs.join("Spacewar.url");
+        fs::rename(&shortcut, &nested).unwrap();
+        assert_eq!(
+            launch_target(&fixture.prefix, 480)
+                .unwrap()
+                .icon_hash
+                .as_deref(),
+            Some(hash.as_str())
+        );
+        let oversized = File::options().write(true).open(&nested).unwrap();
+        oversized.set_len(MAX_SHORTCUT_BYTES + 1).unwrap();
+        assert!(
+            launch_target(&fixture.prefix, 480)
+                .unwrap()
+                .icon_hash
+                .is_none()
         );
     }
 

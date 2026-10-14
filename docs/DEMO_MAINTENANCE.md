@@ -5,6 +5,29 @@ Select a Windows app/game, then open **Files & Maintenance** in its details.
 Empty or hidden bottles remain reachable through + → Manage bottles or Command-3.
 They do not establish publisher-client or game compatibility.
 
+## Recently Deleted
+
+**+ → Recently Deleted…** opens deleted bottles at the bottom of the inspector.
+**Restore** returns a bottle to Collection. Its trash button opens a named
+**Delete Permanently** confirmation; accepting it erases that deleted bottle’s
+apps, games and files without a recovery option.
+
+`purge-deleted <bottle-id>` refuses active or unknown bottles and requires the
+bottle lock, verified idle runtime/process state and no open file holders.
+The core pins real directories and removes entries relative to their file
+descriptors; payload symlinks are removed as links, never followed.
+Unsafe layouts, mounts, unverified ownership or entry limits stop removal.
+
+## Original game icons
+
+Installed Windows apps and games use compact original icons. Steam game icons
+come from exact bottle-local icon cache names or a Steam shortcut associating
+its AppID with that client’s original icon. A verified public icon hash can
+fetch the missing ICO from Steam’s official CDN; no account or bottle paths
+are sent. ICOs use their largest available frame through the shared native
+icon renderer. Publisher-provided resolutions vary. Browser games keep their
+wide picture cards. Store cover images are never used as a replacement icon.
+
 ## Installed Programs
 
 `installed-programs <bottle-id>` reads the machine and current-user uninstall

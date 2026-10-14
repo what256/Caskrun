@@ -112,6 +112,43 @@ struct SteamGameArtworkTests {
         expect(await denied.load(appID: 480, localPath: nil) == nil, "unavailable artwork safely stays unavailable during the retry backoff")
         expect(await deniedProbe.calls == 1, "retry backoff prevents repeated failures when views reappear")
 
+        let hash = String(repeating: "a", count: 40)
+        let iconSource = SteamGameArtworkSource(appID: 480, iconHash: hash)!
+        expect(iconSource.isIcon && iconSource.urls.count == 1 && iconSource.urls[0].path.hasSuffix("/480/\(hash).ico"),
+               "remote icon is bound to the verified game and exact client-icon hash")
+        expect(iconSource.cacheName != source.cacheName, "cover and icon caches cannot alias")
+        for invalid in ["", String(repeating: "a", count: 39), String(repeating: "a", count: 41),
+                        String(repeating: "A", count: 40), String(repeating: "/", count: 40)] {
+            expect(SteamGameArtworkSource(appID: 480, iconHash: invalid) == nil, "invalid icon identities never create URLs")
+        }
+        let ico = try iconFixture()
+        let icon = SteamGameArtworkPolicy.icon(ico, mimeType: "image/x-icon")!
+        expect(imageDimensions(icon) == [256, 256], "multi-size original ICO renders as a native app icon")
+        expect(SteamGameArtworkPolicy.icon(ico, mimeType: "image/jpeg") == nil, "icon MIME cannot mislabel a different format")
+        expect(SteamGameArtworkPolicy.icon(Data("not an icon".utf8)) == nil, "invalid local icon refused")
+        let iconResponse = HTTPURLResponse(url: iconSource.urls[0], statusCode: 200, httpVersion: "HTTP/1.1",
+                                          headerFields: ["Content-Type": "image/x-icon"])!
+        expect(SteamGameArtworkPolicy.accepts(iconResponse, source: iconSource), "original publisher ICO response accepted")
+        expect(!SteamGameArtworkPolicy.accepts(iconResponse, source: source), "ICO cannot enter the cover transport")
+        let localIcon = root.appendingPathComponent("original.ico")
+        try ico.write(to: localIcon)
+        let iconProbe = ArtworkProbe(data: icon)
+        let icons = SteamGameArtworkStore(cacheRoot: root.appendingPathComponent("icon-cache"), transport: { source, url in
+            try await iconProbe.fetch(source: source, url: url)
+        })
+        expect(await icons.loadIcon(appID: 480, localPath: localIcon.path, iconHash: nil) != nil,
+               "installed original icon needs neither a remote identity nor internet")
+        expect(await iconProbe.calls == 0, "local original game icon is preferred without any image download")
+        expect(await icons.loadIcon(appID: 480, localPath: nil, iconHash: nil) == nil,
+               "an unknown icon never substitutes a guessed cover")
+        async let remoteIconOne = icons.loadIcon(appID: 480, localPath: nil, iconHash: hash)
+        async let remoteIconTwo = icons.loadIcon(appID: 480, localPath: nil, iconHash: hash)
+        let iconPair = await (remoteIconOne, remoteIconTwo)
+        expect(iconPair.0 != nil && iconPair.0 == iconPair.1, "concurrent icon requests coalesce independently of covers")
+        expect(await iconProbe.calls == 1, "a verified missing local icon needs one publisher request")
+        expect(await icons.loadIcon(appID: 480, localPath: nil, iconHash: hash) != nil, "icon cache works on the next visit")
+        expect(await iconProbe.calls == 1, "cached icon does not redownload")
+
         if CommandLine.arguments.contains("--live") {
             // Optional actual transport check using public game IDs only. No
             // requests use an account; all test files are removed by defer.
@@ -131,6 +168,24 @@ struct SteamGameArtworkTests {
                                      colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         image.bitmapData!.update(repeating: 150, count: image.bytesPerRow * image.pixelsHigh)
         return image.representation(using: .png, properties: [:])!
+    }
+
+    static func iconFixture() throws -> Data {
+        let frames = try [fixture(width: 32, height: 32), fixture(width: 128, height: 128)]
+        var data = Data([0, 0, 1, 0, 2, 0])
+        var offset = UInt32(6 + frames.count * 16)
+        func little(_ number: UInt32) -> [UInt8] {
+            (0..<4).map { UInt8(truncatingIfNeeded: number >> ($0 * 8)) }
+        }
+        for (index, frame) in frames.enumerated() {
+            let size: UInt8 = index == 0 ? 32 : 128
+            data.append(contentsOf: [size, size, 0, 0, 1, 0, 32, 0])
+            data.append(contentsOf: little(UInt32(frame.count)))
+            data.append(contentsOf: little(offset))
+            offset += UInt32(frame.count)
+        }
+        for frame in frames { data.append(frame) }
+        return data
     }
 
     static func imageDimensions(_ data: Data) -> [Int]? {

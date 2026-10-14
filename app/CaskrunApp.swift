@@ -192,6 +192,7 @@ struct SteamGame: Decodable, Identifiable, Sendable {
     let install_path: String
     let steam_path: String
     let icon_path: String?
+    let icon_hash: String?
 }
 
 struct SteamLibrary: Decodable, Sendable {
@@ -1256,6 +1257,22 @@ final class CaskrunModel: ObservableObject {
         }
     }
 
+    func permanentlyDeleteBottle(_ bottle: Bottle) {
+        guard !isQuitting && !isManagingBottle && !isLaunching,
+              deletedBottles.contains(where: { $0.id == bottle.id }),
+              !bottles.contains(where: { $0.id == bottle.id }) else { return }
+        isManagingBottle = true
+        bottleOperationLabel = "Deleting \(bottle.name)…"
+        Task {
+            defer { isManagingBottle = false; bottleOperationLabel = "Updating bottle…" }
+            do {
+                _ = try await callAsync(["purge-deleted", bottle.id], as: Bottle.self)
+                refresh()
+                message = "Permanently deleted \(bottle.name)."
+            } catch { message = error.localizedDescription }
+        }
+    }
+
     func openDriveC(in bottle: Bottle) {
         do {
             let prefix = try call(["prefix-path", bottle.id], as: PrefixPathResult.self)
@@ -1494,9 +1511,10 @@ final class CaskrunModel: ObservableObject {
               requestedIcons.insert("game:\(key)").inserted else { return }
         Task {
             defer { requestedIcons.remove("game:\(key)") }
-            let data = await SteamGameArtworkStore.shared.load(appID: game.app_id, localPath: game.icon_path)
+            let data = await SteamGameArtworkStore.shared.loadIcon(appID: game.app_id, localPath: game.icon_path,
+                                                                 iconHash: game.icon_hash)
             guard !Task.isCancelled, bottles.contains(where: { $0.id == bottle.id }),
-                  steamGames[bottle.id]?.contains(where: { $0.id == game.id && $0.icon_path == game.icon_path }) == true,
+                  steamGames[bottle.id]?.contains(where: { $0.id == game.id && $0.icon_path == game.icon_path && $0.icon_hash == game.icon_hash }) == true,
                   gameArtworkRevision(game, in: bottle) == stamp else { return }
             guard let data else { gameIcons[key] = nil; gameIconStamps[key] = nil; return }
             gameIcons[key] = NSImage(data: data)
@@ -1511,7 +1529,7 @@ final class CaskrunModel: ObservableObject {
     }
 
     func gameArtworkRevision(_ game: SteamGame, in bottle: Bottle) -> String {
-        "cover-v1:\(game.app_id):\(artworkGenerations[bottle.id, default: 0]):\(steamArtworkRevisions[bottle.id, default: 0]):\(game.icon_path ?? "none")"
+        "icon-v1:\(game.app_id):\(artworkGenerations[bottle.id, default: 0]):\(steamArtworkRevisions[bottle.id, default: 0]):\(game.icon_path ?? "none"):\(game.icon_hash ?? "none")"
     }
 
     func requestSteamInstall(appID: UInt32, in bottle: Bottle) {
@@ -2615,6 +2633,7 @@ struct CaskrunApp: App {
     @State private var newBottleName = ""
     @State private var renameTarget: Bottle?
     @State private var deleteTarget: Bottle?
+    @State private var purgeTarget: Bottle?
     @State private var quitTarget: Bottle?
     @State private var rebootTarget: Bottle?
     @State private var renameText = ""
@@ -2639,6 +2658,8 @@ struct CaskrunApp: App {
     @State private var hoveredInstall = false
     @State private var hoveredCatalogID: String?
     @State private var showingBottleInspector = false
+    @State private var recentlyDeletedScrollRequest = UUID()
+    @State private var scrollToRecentlyDeleted = false
     @State private var inspectingBottleOnly = false
     @State private var openBottleID: String?
     @State private var selectedSteamGameID: String?
@@ -2722,6 +2743,12 @@ struct CaskrunApp: App {
         page = .collection
         showingBottleInspector = true
         showBottleManagement = true
+    }
+
+    private func openRecentlyDeleted() {
+        openBottleManager()
+        scrollToRecentlyDeleted = true
+        recentlyDeletedScrollRequest = UUID()
     }
 
     private func installedProgram(for app: CatalogEntry) -> SavedProgram? {
@@ -2997,6 +3024,18 @@ struct CaskrunApp: App {
             } message: {
                 Text("The bottle and its Windows files will leave the active list. You can restore it from Recently Deleted.")
             }
+            .alert("Permanently delete \(purgeTarget?.name ?? "this bottle")?", isPresented: Binding(
+                get: { purgeTarget != nil },
+                set: { if !$0 { purgeTarget = nil } }
+            )) {
+                Button("Delete Permanently", role: .destructive) {
+                    if let bottle = purgeTarget { model.permanentlyDeleteBottle(bottle) }
+                    purgeTarget = nil
+                }
+                Button("Cancel", role: .cancel) { purgeTarget = nil }
+            } message: {
+                Text("All apps, games and files in this deleted bottle will be erased. This cannot be undone.")
+            }
             .alert("Quit Windows apps in this bottle?", isPresented: Binding(
                 get: { quitTarget != nil },
                 set: { if !$0 { quitTarget = nil } }
@@ -3175,6 +3214,9 @@ struct CaskrunApp: App {
                     .disabled(model.isLaunching || model.isManagingBottle)
                 Divider()
                 Button("Manage bottles…") { openBottleManager() }
+                if !model.deletedBottles.isEmpty {
+                    Button("Recently Deleted…") { openRecentlyDeleted() }
+                }
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 13, weight: .semibold))
@@ -3862,13 +3904,19 @@ struct CaskrunApp: App {
                         }
                         Divider()
                         inspectorLibraryActions
-                        recentlyDeletedBottles
+                        recentlyDeletedBottles.id("recently-deleted")
                     }
                     .padding(18)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onChange(of: selectedSteamGame?.id ?? inspectedProgram?.id ?? selectedBottle?.id) { _, _ in
                     proxy.scrollTo("inspector-top", anchor: .top)
+                }
+                .task(id: recentlyDeletedScrollRequest) {
+                    guard scrollToRecentlyDeleted else { return }
+                    await Task.yield()
+                    proxy.scrollTo("recently-deleted", anchor: .bottom)
+                    scrollToRecentlyDeleted = false
                 }
             }
             .frame(maxHeight: .infinity)
@@ -4266,7 +4314,7 @@ struct CaskrunApp: App {
         if !model.deletedBottles.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Recently Deleted").font(.title3.weight(.semibold))
-                Text("These bottles remain on disk until permanent removal is added. Restore one to use it again.")
+                Text("Restore a bottle to use it again, or permanently delete its apps, games and files.")
                     .font(.caption).foregroundStyle(.secondary)
                 ForEach(model.deletedBottles) { bottle in
                     HStack {
@@ -4274,7 +4322,15 @@ struct CaskrunApp: App {
                         Text(bottle.name)
                         Spacer()
                         Button("Restore") { model.restoreDeletedBottle(bottle) }
-                            .disabled(model.isManagingBottle || model.isLaunching)
+                            .disabled(model.isQuitting || model.isManagingBottle || model.isLaunching)
+                        Button { purgeTarget = bottle } label: {
+                            Image(systemName: "trash").frame(width: 24, height: 24)
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .disabled(model.isQuitting || model.isManagingBottle || model.isLaunching)
+                        .help("Delete \(bottle.name) permanently…")
+                        .accessibilityLabel("Delete \(bottle.name) permanently…")
                     }
                     .padding(12)
                     .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))

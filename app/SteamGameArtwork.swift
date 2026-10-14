@@ -7,16 +7,28 @@ import Darwin
 struct SteamGameArtworkSource: Sendable {
     let appID: UInt32
     let urls: [URL]
+    let isIcon: Bool
+    private let iconHash: String?
     var allowedURLs: Set<String> { Set(urls.map(\.absoluteString)) }
-    var cacheName: String { "steam-\(appID)-cover-v1.png" }
+    var cacheName: String {
+        iconHash.map { "steam-\(appID)-icon-\($0)-v1.png" } ?? "steam-\(appID)-cover-v1.png"
+    }
 
     init?(appID: UInt32) {
         guard appID > 0 else { return nil }
         self.appID = appID
+        isIcon = false; iconHash = nil
         urls = [
             "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/\(appID)/header.jpg",
             "https://cdn.akamai.steamstatic.com/steam/apps/\(appID)/header.jpg"
         ].compactMap(URL.init(string:))
+    }
+
+    init?(appID: UInt32, iconHash: String) {
+        guard appID > 0, iconHash.utf8.count == 40,
+              iconHash.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
+        self.appID = appID; self.iconHash = iconHash; isIcon = true
+        urls = [URL(string: "https://cdn.akamai.steamstatic.com/steamcommunity/public/images/apps/\(appID)/\(iconHash).ico")!]
     }
 }
 
@@ -28,6 +40,9 @@ enum SteamGameArtworkPolicy {
     static let maximumCacheEntries = 256
     static let acceptedTypes = ["image/png": "public.png", "image/jpeg": "public.jpeg",
                                 "image/webp": "org.webmproject.webp", "image/avif": "public.avif"]
+    static let acceptedIconTypes = acceptedTypes.merging([
+        "image/x-icon": "com.microsoft.ico", "image/vnd.microsoft.icon": "com.microsoft.ico"
+    ]) { original, _ in original }
 
     static func request(for url: URL, source: SteamGameArtworkSource) -> URLRequest? {
         // Exact generated URLs prevent redirects to other games, local services,
@@ -39,7 +54,8 @@ enum SteamGameArtworkPolicy {
                                  timeoutInterval: 10)
         request.httpMethod = "GET"
         request.httpShouldHandleCookies = false
-        request.setValue("image/jpeg,image/png,image/webp,image/avif", forHTTPHeaderField: "Accept")
+        request.setValue(source.isIcon ? "image/x-icon,image/vnd.microsoft.icon,image/png,image/jpeg"
+                                     : "image/jpeg,image/png,image/webp,image/avif", forHTTPHeaderField: "Accept")
         request.setValue("Caskrun/0.1", forHTTPHeaderField: "User-Agent")
         return request
     }
@@ -59,7 +75,7 @@ enum SteamGameArtworkPolicy {
     static func accepts(_ response: HTTPURLResponse, source: SteamGameArtworkSource) -> Bool {
         response.statusCode == 200 && response.url.flatMap { request(for: $0, source: source) } != nil
             && (response.expectedContentLength < 0 || response.expectedContentLength <= maximumBytes)
-            && response.mimeType.map { acceptedTypes[$0.lowercased()] != nil } == true
+            && response.mimeType.map { (source.isIcon ? acceptedIconTypes : acceptedTypes)[$0.lowercased()] != nil } == true
     }
 
     static func mayTryFallback(after error: Error) -> Bool {
@@ -98,6 +114,17 @@ enum SteamGameArtworkPolicy {
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination), output.length <= maximumCacheBytes else { return nil }
         return output as Data
+    }
+
+    /// A game's real ICO may hold several sizes. The shared app renderer picks
+    /// the best one and preserves its original shape; a cover is never cropped
+    /// or relabelled as a game icon.
+    static func icon(_ data: Data, mimeType: String? = nil, local: Bool = false) -> Data? {
+        guard !data.isEmpty, data.count <= (local ? maximumLocalBytes : maximumBytes),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let type = CGImageSourceGetType(source) as String?, acceptedIconTypes.values.contains(type),
+              mimeType == nil || acceptedIconTypes[mimeType!.lowercased()] == type else { return nil }
+        return MacAppArtwork.png(data)
     }
 }
 
@@ -146,7 +173,8 @@ enum SteamGameArtworkDownload {
             }
             try Task.checkCancellation()
             let thumbnail = await Task.detached(priority: .utility) {
-                SteamGameArtworkPolicy.thumbnail(data, mimeType: mime)
+                source.isIcon ? SteamGameArtworkPolicy.icon(data, mimeType: mime)
+                              : SteamGameArtworkPolicy.thumbnail(data, mimeType: mime)
             }.value
             guard let thumbnail else { throw SteamGameArtworkError.invalidImage }
             return thumbnail
@@ -215,7 +243,8 @@ enum SteamGameArtworkCache {
               metadata.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
               metadata.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec,
               data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) else { return nil }
-        return SteamGameArtworkPolicy.thumbnail(data, mimeType: "image/png", local: true)
+        return source.isIcon ? SteamGameArtworkPolicy.icon(data, mimeType: "image/png", local: true)
+                             : SteamGameArtworkPolicy.thumbnail(data, mimeType: "image/png", local: true)
     }
 
     @discardableResult
@@ -254,8 +283,8 @@ actor SteamGameArtworkStore {
     typealias Transport = @Sendable (SteamGameArtworkSource, URL) async throws -> Data
     private let cacheRoot: URL?
     private let transport: Transport
-    private var flights: [UInt32: Task<Data?, Never>] = [:]
-    private var failedUntil: [UInt32: Date] = [:]
+    private var flights: [String: Task<Data?, Never>] = [:]
+    private var failedUntil: [String: Date] = [:]
     private var active = 0
     private var waiting: [CheckedContinuation<Void, Never>] = []
 
@@ -273,17 +302,31 @@ actor SteamGameArtworkStore {
             return ["header", "library_header", "library_hero", "library_600x900", "capsule"].contains(where: name.contains)
         } ?? false
         if localIsCover, let localPath, let local = await SteamArtworkReader.shared.read(localPath) { return local }
-        if let flight = flights[appID] { return await flight.value }
-        if failedUntil[appID].map({ $0 > Date() }) == true {
-            if let localPath { return await SteamArtworkReader.shared.read(localPath) }
+        return await load(source, localPath: localPath)
+    }
+
+    func loadIcon(appID: UInt32, localPath: String?, iconHash: String?) async -> Data? {
+        guard appID > 0, !Task.isCancelled else { return nil }
+        if let localPath, let local = await SteamArtworkReader.shared.read(localPath, asIcon: true) { return local }
+        // Without a verified client-icon hash there is no authoritative remote
+        // icon URL. Never substitute the old cached cover or another game's art.
+        guard let iconHash, let source = SteamGameArtworkSource(appID: appID, iconHash: iconHash) else { return nil }
+        return await load(source, localPath: localPath)
+    }
+
+    private func load(_ source: SteamGameArtworkSource, localPath: String?) async -> Data? {
+        let key = source.cacheName
+        if let flight = flights[key] { return await flight.value }
+        if failedUntil[key].map({ $0 > Date() }) == true {
+            if let localPath { return await SteamArtworkReader.shared.read(localPath, asIcon: source.isIcon) }
             return nil
         }
         let flight = Task { await self.resolve(source, localPath: localPath) }
-        flights[appID] = flight
+        flights[key] = flight
         let data = await flight.value
-        flights[appID] = nil
-        if data == nil { failedUntil[appID] = Date().addingTimeInterval(60) }
-        else { failedUntil[appID] = nil }
+        flights[key] = nil
+        if data == nil { failedUntil[key] = Date().addingTimeInterval(60) }
+        else { failedUntil[key] = nil }
         return Task.isCancelled ? nil : data
     }
 
@@ -311,7 +354,7 @@ actor SteamGameArtworkStore {
                 if !SteamGameArtworkPolicy.mayTryFallback(after: error) { break }
             }
         }
-        if let localPath { return await SteamArtworkReader.shared.read(localPath) }
+        if let localPath { return await SteamArtworkReader.shared.read(localPath, asIcon: source.isIcon) }
         return nil
     }
 }
