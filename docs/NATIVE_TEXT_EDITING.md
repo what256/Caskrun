@@ -133,8 +133,14 @@ record through the same locked, idle-only path while retaining earlier backups.
 - The user subsequently confirmed that the real Steam login window was usable
   and its native Paste menu worked after the local cache repair. Account
   sign-in, game compatibility and game save handling remain unvalidated.
+- After installing the bounded-header package, the user confirmed that the
+  real login window rendered again. Its right-click menu remained the single,
+  usable Windows fallback; that case still needs verification of the native
+  replacement. A separate live main-window close check found Caskrun's window
+  off screen while its process and Steam's sign-in window remained running.
+  This does not establish retention of a logged-in client or an active game.
 
-A real imported Steam launch later exited with Steam's own 15-second main-loop
+An earlier real imported Steam launch exited with Steam's own 15-second main-loop
 stall assertion, without a native-menu exception. The red-close check initially
 retained the Caskrun, Steam and helper processes; that is not evidence of
 sustained gameplay. An isolated comparison then kept Steam and its helpers
@@ -142,8 +148,8 @@ running for 120 seconds on both the previous and updated engines. Six critical
 client binaries matched after anonymous updates, and the updated engine reached
 a visible sign-in window. No account files, registry or games were copied into
 those tests; all disposable prefixes were removed after scoped shutdown and
-zero-owner checks. This points to imported-bottle state or preferences, without
-identifying the exact cause. A local, idle-only browser-cache reset retained
+zero-owner checks. These tests did not identify the cause of the intermittent
+real-client exit. A local, idle-only browser-cache reset retained
 the old cache directories in a private backup; that real imported client then
 remained running for over six minutes without the watchdog assertion. The user
 then confirmed the usable login window and native Paste menu. This repair is a
