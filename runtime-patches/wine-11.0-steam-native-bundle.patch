@@ -1,6 +1,6 @@
 --- a/dlls/ntdll/unix/loader.c
 +++ b/dlls/ntdll/unix/loader.c
-@@ -591,6 +591,87 @@
+@@ -591,6 +591,113 @@
      struct timespec now;
      if (clock_gettime( CLOCK_MONOTONIC, &now )) return -1;
      return (LONGLONG)now.tv_sec * 1000 + now.tv_nsec / 1000000;
@@ -20,8 +20,33 @@
 +           realpath( path, resolved ) && !strcmp( path, resolved );
 +}
 +
-+static char *caskrun_native_steam_app_program( const char *command )
++/* Only explicit Chromium subprocess roles share the accessory raw loader.
++ * Steam's browser has no type switch, and an unknown role stays eligible for
++ * the prepared UI bundle. Keep this parser in sync with the Cocoa classifier:
++ * both switch forms, the final switch wins, and -- ends option processing. */
++static BOOL caskrun_steam_background_process( char **argv )
 +{
++    const char *role = NULL;
++    size_t i;
++
++    for (i = 3; argv[i]; i++)
++    {
++        if (!strcmp( argv[i], "--" )) break;
++        if (!strncmp( argv[i], "--type=", 7 )) role = argv[i] + 7;
++        else if (!strcmp( argv[i], "--type" ))
++        {
++            if (!argv[i + 1]) { role = ""; break; }
++            role = argv[++i];
++        }
++    }
++    return role && (!strcmp( role, "renderer" ) || !strcmp( role, "gpu-process" ) ||
++                    !strcmp( role, "utility" ) || !strcmp( role, "zygote" ) ||
++                    !strcmp( role, "crashpad-handler" ));
++}
++
++static char *caskrun_native_steam_app_program( char **argv )
++{
++    const char *command = argv[2];
 +    const char *app = getenv( "CASKRUN_STEAM_NATIVE_APP" );
 +    const char *home = getenv( "CASKRUN_NATIVE_DATA" );
 +    const char *bottle = getenv( "CASKRUN_NATIVE_BOTTLE" );
@@ -37,7 +62,8 @@
 +    if (!command || !caskrun_steam_dock_program( command )) return NULL;
 +    for (cursor = command; *cursor; cursor++)
 +        if (*cursor == '/' || *cursor == '\\') name = cursor + 1;
-+    if (strcasecmp( name, "steamwebhelper.exe" ) || !caskrun_native_identity_enabled() ||
++    if (strcasecmp( name, "steamwebhelper.exe" ) || caskrun_steam_background_process( argv ) ||
++        !caskrun_native_identity_enabled() ||
 +        !caskrun_native_bottle_id( bottle ) || !app || strlen( app ) >= sizeof(directory) ||
 +        !caskrun_native_owned_file( core, TRUE ) || !caskrun_native_owned_file( ntdll, FALSE ) ||
 +        !realpath( image, resolved_image ) || !caskrun_native_owned_file( resolved_image, FALSE ) ||
@@ -88,22 +114,23 @@
  }
  
  /* Resolve the bundle without a shell. The short, bounded helper is required
-@@ -727,7 +808,14 @@
+@@ -727,8 +834,15 @@
  
      unsetenv( "CASKRUN_NATIVE_EXEC" );
      if (!build_dir && argv[2] && caskrun_steam_dock_program( argv[2] ))
 -        argv[1] = build_path( ntdll_dir, "Steam" );
 +    {
-+#ifdef __APPLE__
-+        if ((argv[1] = caskrun_native_steam_app_program( argv[2] )))
+ #ifdef __APPLE__
++        if ((argv[1] = caskrun_native_steam_app_program( argv )))
 +            setenv( "CASKRUN_NATIVE_EXEC", "1", 1 );
 +        else
 +#endif
 +            argv[1] = build_path( ntdll_dir, "Steam" );
 +    }
- #ifdef __APPLE__
++#ifdef __APPLE__
      else if (!build_dir && caskrun_native_identity_enabled())
      {
+         if (!(argv[1] = caskrun_native_app_program()))
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
 @@ -153,9 +153,15 @@
@@ -123,3 +150,17 @@
      return [CaskrunArgumentBasename(arguments[1]) caseInsensitiveCompare:expected] == NSOrderedSame;
  }
  
+@@ -589,6 +595,13 @@
+         }
+         if (CaskrunSteamDockEnabled() && CaskrunIsWindowsProcess(@"steamwebhelper.exe"))
+         {
++            /* Renderer/crash helpers use the raw accessory loader, while the
++             * browser owns the prepared bundle and its visible Dock item. */
++            if (CaskrunNativeBackgroundProcess())
++            {
++                [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
++                return;
++            }
+             NSImage *icon = CaskrunSteamIcon();
+             if (icon) self.applicationIcon = icon;
+         }

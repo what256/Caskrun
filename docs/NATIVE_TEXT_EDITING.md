@@ -58,10 +58,17 @@ user-led testing; this policy does not change their close behavior.
 ## Steam's macOS app identity
 
 Core prepares Steam's per-bottle app bundle before starting the client and
-passes its validated executable to Wine. Only `steamwebhelper.exe` reuses it;
+passes its validated executable to Wine. The visible `steamwebhelper.exe`
+browser reuses it;
 Steam's main process retains its accessory role and games keep their own
 native identities. This gives the visible helper a real bundle identifier,
 friendly app name and existing artwork without a child Core callback.
+
+Explicit renderer, GPU, utility, zygote and crash-handler roles use the raw
+Steam loader and remain accessory before any Dock promotion. Both forms of
+the Chromium type switch are recognized, the last switch wins, and parsing
+stops at the positional separator. Unknown or missing roles retain the
+browser path. This keeps background helpers out of the visible app identity.
 
 New aliases are shallow ad-hoc signed in a private staging bundle. Core
 compares their executable code with the selected package's loader while
@@ -98,7 +105,7 @@ repaired and signed. App packaging checks the entire runtime identity after
 outer app signing and refuses a changed engine.
 
 The new package has exact content identity
-`sha256:d8bd4eb824d7ad1b340cbd32ae70f04cdeafb7a1d6016ee4754e472699e61ec8`.
+`sha256:aae295ed019afb077ebb6e58d90445d7cbaf0b3a77fe69dc28f42683622715b9`.
 Known older runtime records have explicit, directly reviewed migration edges.
 The native and switchable predecessors use record-only migration; older
 TLS/Steam predecessors retain their Steam recipe and PE validation gates.
@@ -121,6 +128,11 @@ The bounded-header predecessor
 `sha256:744741740221a92dc10849620661801dcbf3361fdda5fbbc3bf4bca6a6f252a1`
 also has an explicit idle-only transition to the bundled-helper package.
 
+The locally deployed build-45 predecessor
+`sha256:d8bd4eb824d7ad1b340cbd32ae70f04cdeafb7a1d6016ee4754e472699e61ec8`
+has an explicit idle-only transition to the package with one visible helper
+identity. Its historical approval and recovery backups remain intact.
+
 ## Validation boundary
 
 - Native identity/signing tests exercise a compiled macOS executable, complete
@@ -131,9 +143,11 @@ also has an explicit idle-only transition to the bundled-helper package.
   from the actual packaged loader: its complete seal passed, signature-stripped
   code matched the source, and a second preparation preserved every file and
   modification time. GUI context-menu checks remain separate.
-- Extracted production bundle routing passes 35 real-filesystem checks,
+- Extracted production bundle routing passes 58 real-filesystem checks,
   including Wine's normal drive link and refusal of a host-mapped helper.
-  The Cocoa loader/process scope passes 35 checks. Steam's primary process
+  The Cocoa loader/process scope passes 44 checks, and 41 foreground-policy
+  checks prevent either raw or bundled background helpers reaching Dock
+  promotion. Steam's primary process
   and refused helper bindings make no child Core callback; games retain
   their existing callback path. Isolated Steam helpers also registered the
   expected bundle identity and emitted the helper/mode startup canary.
@@ -184,20 +198,24 @@ also has an explicit idle-only transition to the bundled-helper package.
   off screen while its process and Steam's sign-in window remained running.
   This does not establish retention of a logged-in client or an active game.
 
-The combined source passes 495 Rust unit tests and seven integration tests,
+The combined source passes 500 Rust unit tests and seven integration tests,
 with two existing ignored tests, in a serial run.
 
-The bundled-helper package was installed locally as build 45 after normal
+The first bundled-helper package was installed locally as build 45 after normal
 Caskrun Quit and a zero-owner check on the previous app. The imported bottle's
 runtime record migrated to this package and its generated Steam bundle passed
 strict signature verification. The subsequent real Steam launch exited with
 the same 15-second main-loop assertion seen in older launches, before showing
-sign-in. A code-only isolated comparison reached browser helpers on both this
+sign-in. A code-only isolated comparison reached browser helpers on both that
 package and the bounded-header predecessor, but neither reached sign-in in
 the bounded test. The isolated client downloaded an official update, and the
 desktop locked during testing; these are material comparison limits. No
 first-right-click test was performed and no cause is attributed to the bundle
-routing. The native replacement and Dock interaction remain live test items.
+routing. A subsequent unlocked real launch reached the rendered sign-in
+window and stayed running. Its browser, renderer and crash handler shared
+the same bundle identifier while computer-use attachment timed out. The
+successor routing separates those background roles. The native replacement
+and Dock interaction remain live test items.
 
 An earlier real imported Steam launch exited with Steam's own 15-second main-loop
 stall assertion, without a native-menu exception. The red-close check initially

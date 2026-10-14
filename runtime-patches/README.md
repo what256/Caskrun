@@ -112,12 +112,17 @@ close request; minimize follows the existing Wine path. Other windows and
 explicit Quit retain their behavior. The client geometry is unchanged.
 
 `wine-11.0-steam-native-bundle.patch` follows the window patch. Steam's visible
-web helper reuses the per-bottle native app bundle Core prepares before launch;
+browser helper reuses the per-bottle native app bundle Core prepares before launch;
 the primary process remains accessory and games keep their own identities.
 The helper's normal drive-mapping path is resolved and both forms must remain
 inside its exact private prefix. The bundle, Core and selected native loader
 retain their canonical ownership checks. A refused binding uses the existing
 raw Steam loader without a child Core callback.
+
+Five explicit Chromium background roles retain the raw loader and an accessory
+policy before Dock promotion. Type-switch parsing matches the Cocoa policy,
+including both forms, overrides and the positional separator. The visible
+browser retains its independent bundle identity.
 
 `scripts/build-wine-native-text-dev.py` pins all three patches and rebuilds
 the base and DXMT macOS drivers, their x86/x64 Windows halves and both native

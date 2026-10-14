@@ -39,7 +39,7 @@ PATCHES = {
 STEAM_WINDOW_PATCH = "wine-11.0-steam-native-window.patch"
 PATCHES[STEAM_WINDOW_PATCH] = "c34c8c207febd966fc9aa7fb6cd8b31bd9325bcc820b6a35cc266f4164bc5412"
 STEAM_BUNDLE_PATCH = "wine-11.0-steam-native-bundle.patch"
-PATCHES[STEAM_BUNDLE_PATCH] = "1a32af7d300460ef2e303e81e49a22a28367420b774677573ecb116a7591de83"
+PATCHES[STEAM_BUNDLE_PATCH] = "faf14b29f591f66b82b38a4eee97a842675aa29f66960ec499429f27ac6be09a"
 BASE_PATCHES = ["wine-11.0-steam-cef-commandline.patch", "wine-11.0-steam-dock.patch",
                 "wine-11.0-native-app-identity.patch"]
 TEXT_PATCH = "wine-11.0-native-text-editing.patch"
@@ -212,6 +212,7 @@ def package(base: Path, output: Path) -> str:
         "bundled_process": "steamwebhelper.exe",
         "preprepared_alias": True,
         "child_core_callback": False,
+        "explicit_background_helpers_use_raw_loader": True,
         "game_validation": False,
     }
     (candidate / "components.json").write_text(json.dumps(receipt, indent=2) + "\n")
@@ -250,7 +251,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", type=Path, default=REPO / ".build/dxmt-wine-runtime-dev-v4")
     parser.add_argument("--seed", type=Path, default=REPO / ".build/wine-native-apps-11.0-dev")
-    parser.add_argument("--output", type=Path, default=REPO / ".build/native-text-runtime-v8")
+    parser.add_argument("--output", type=Path, default=REPO / ".build/native-text-runtime-v9")
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     try:

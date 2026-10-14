@@ -71,13 +71,20 @@ static void reset(void) {
     setenv("CASKRUN_NATIVE_IMAGE",image,1);setenv("CASKRUN_STEAM_NATIVE_APP",alias,1);
     setenv("CASKRUN_NATIVE_EXEC","stale-parent-marker",1);
 }
-static void route(const char *command,const char *expected,int native,int core_calls) {
-    char *argv[]={NULL,NULL,(char*)command,NULL};
+static void route_args(const char *command,const char *const *tail,const char *expected,int native,int core_calls) {
+    char *argv[20]={NULL,NULL,(char*)command,NULL};
+    size_t count=3;
+    if (tail) for (size_t i=0;tail[i];i++) {
+        assert(count+1<sizeof(argv)/sizeof(argv[0]));argv[count++]=(char*)tail[i];
+    }
     assert(loader_exec(argv,0)==STATUS_INVALID_IMAGE_FORMAT);
     assert(execs==1 && callbacks==core_calls && !strcmp(selected,expected));
     const char *marker=getenv("CASKRUN_NATIVE_EXEC");
     assert(native ? marker && !strcmp(marker,"1") : !marker);
     free(argv[1]);checks++;
+}
+static void route(const char *command,const char *expected,int native,int core_calls) {
+    route_args(command,NULL,expected,native,core_calls);
 }
 static void refuse(void) {route("C:\\Steam\\steamwebhelper.exe",raw,0,0);}
 int main(int argc,char **argv) {
@@ -90,8 +97,39 @@ int main(int argc,char **argv) {
     wineloader="/original-wine-loader";
     reset();route("C:\\Steam\\steamwebhelper.exe",alias,1,0);
     reset();route("C:\\Steam\\STEAMWEBHELPER.EXE",alias,1,0);
+    for (size_t i=0;i<5;i++) {
+        const char *roles[]={"renderer","gpu-process","utility","zygote","crashpad-handler"};
+        char flag[64];assert(snprintf(flag,sizeof(flag),"--type=%s",roles[i])<(int)sizeof(flag));
+        const char *joined[]={flag,NULL},*split[]={"--type",roles[i],NULL};
+        reset();route_args("C:\\Steam\\steamwebhelper.exe",joined,raw,0,0);
+        reset();route_args("C:\\Steam\\steamwebhelper.exe",split,raw,0,0);
+    }
+    const char *browser[]={"--type=browser",NULL};
+    const char *unknown[]={"--type=other",NULL};
+    const char *case_role[]={"--type=Renderer",NULL};
+    const char *similar[]={"--other-type=renderer",NULL};
+    const char *browser_override[]={"--type=renderer","--type","browser",NULL};
+    const char *renderer_override[]={"--type","browser","--type=renderer",NULL};
+    const char *separator[]={"--","--type=renderer",NULL};
+    const char *background_separator[]={"--type=renderer","--","--type=browser",NULL};
+    const char *missing[]={"--type",NULL};
+    const char *empty[]={"--type=",NULL};
+    const char *missing_override[]={"--type=renderer","--type",NULL};
+    reset();route_args("C:\\Steam\\steamwebhelper.exe",browser,alias,1,0);
+    reset();route_args("C:\\Steam\\steamwebhelper.exe",unknown,alias,1,0);
+    reset();route_args("C:\\Steam\\steamwebhelper.exe",case_role,alias,1,0);
+    reset();route_args("C:\\Steam\\steamwebhelper.exe",similar,alias,1,0);
+    reset();route_args("C:\\Steam\\steamwebhelper.exe",browser_override,alias,1,0);
+    reset();route_args("C:\\Steam\\steamwebhelper.exe",renderer_override,raw,0,0);
+    reset();route_args("C:\\Steam\\steamwebhelper.exe",separator,alias,1,0);
+    reset();route_args("C:\\Steam\\steamwebhelper.exe",background_separator,raw,0,0);
+    reset();route_args("C:\\Steam\\steamwebhelper.exe",missing,alias,1,0);
+    reset();route_args("C:\\Steam\\steamwebhelper.exe",empty,alias,1,0);
+    reset();route_args("C:\\Steam\\steamwebhelper.exe",missing_override,alias,1,0);
     reset();route("C:\\Steam\\steam.exe",raw,0,0);
+    reset();route_args("C:\\Steam\\steam.exe",renderer_override,raw,0,0);
     reset();setenv("CASKRUN_NATIVE_IMAGE",game,1);route("C:\\Game.exe","/original-game-alias",1,1);
+    reset();setenv("CASKRUN_NATIVE_IMAGE",game,1);route_args("C:\\Game.exe",renderer_override,"/original-game-alias",1,1);
     reset();setenv("CASKRUN_STEAM_MODE","0",1);route("C:\\Steam\\steamwebhelper.exe","/original-game-alias",1,1);
     reset();setenv("CASKRUN_STEAM_MODE","2",1);route("C:\\Steam\\steamwebhelper.exe","/original-game-alias",1,1);
     reset();unsetenv("CASKRUN_STEAM_NATIVE_APP");refuse();
@@ -164,9 +202,81 @@ int main(void) { @autoreleasepool {
         fixtureArguments=@[@"WindowsApp",@"steamwebhelper.exe",@"--type",role];
         assert(CaskrunNativeBackgroundProcess());checks++;
     }
-    fixtureArguments=@[@"WindowsApp",@"steamwebhelper.exe",@"--type=renderer",@"--type=browser"];assert(!CaskrunNativeBackgroundProcess());checks++;
-    fixtureArguments=@[@"WindowsApp",@"steamwebhelper.exe",@"--",@"--type=renderer"];assert(!CaskrunNativeBackgroundProcess());checks++;
+    for (NSArray *tail in @[@[@"--type=browser"],@[@"--type=other"],@[@"--type=Renderer"],
+                            @[@"--other-type=renderer"],@[@"--type=renderer",@"--type",@"browser"],
+                            @[@"--",@"--type=renderer"],@[@"--type"],@[@"--type="],
+                            @[@"--type=renderer",@"--type"]]) {
+        fixtureArguments=[@[@"WindowsApp",@"steamwebhelper.exe"] arrayByAddingObjectsFromArray:tail];
+        assert(!CaskrunNativeBackgroundProcess());checks++;
+    }
+    for (NSArray *tail in @[@[@"--type",@"browser",@"--type=renderer"],
+                            @[@"--type=renderer",@"--",@"--type=browser"]]) {
+        fixtureArguments=[@[@"WindowsApp",@"steamwebhelper.exe"] arrayByAddingObjectsFromArray:tail];
+        assert(CaskrunNativeBackgroundProcess());checks++;
+    }
     printf("%u exact Cocoa loader-name/CEF role scope checks passed\n",checks);
+}return 0;}
+'''
+
+POLICY_STUB = r'''
+enum { NSApplicationActivationPolicyRegular, NSApplicationActivationPolicyAccessory };
+static unsigned int fixturePromotionAttempts,fixtureIconReads;
+@interface CaskrunForegroundFixture : NSObject {
+    NSInteger policy;
+    NSImage *fixtureAppIcon;
+}
+@property (assign) NSImage *applicationIcon;
+- (BOOL)setActivationPolicy:(NSInteger)value;
+- (NSInteger)activationPolicy;
+- (void)transformProcessToForeground:(BOOL)activateIfTransformed;
+@end
+static CaskrunForegroundFixture *fixtureApplication;
+#define NSApp fixtureApplication
+static NSImage *CaskrunSteamIcon(void) { fixtureIconReads++;return nil; }
+static NSImage *CaskrunNativeIcon(void) { fixtureIconReads++;return nil; }
+@implementation CaskrunForegroundFixture
+@synthesize applicationIcon=fixtureAppIcon;
+- (BOOL)setActivationPolicy:(NSInteger)value { policy=value;return YES; }
+- (NSInteger)activationPolicy { return policy; }
+'''
+
+POLICY_MAIN = r'''
+static unsigned int checks;
+static void policy_check(NSString *loader,NSString *image,NSArray *tail,BOOL native,BOOL steam,BOOL background) {
+    setenv("CASKRUN_NATIVE_EXEC",native ? "1" : "0",1);
+    setenv("CASKRUN_STEAM_MODE",steam ? "1" : "0",1);
+    setenv("CASKRUN_NATIVE_IMAGE",[image UTF8String],1);
+    fixtureArguments=[@[loader,image] arrayByAddingObjectsFromArray:tail];
+    fixturePromotionAttempts=fixtureIconReads=0;
+    [fixtureApplication setActivationPolicy:background ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory];
+    [fixtureApplication transformProcessToForeground:YES];
+    assert([fixtureApplication activationPolicy]==(background ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular));
+    assert(fixturePromotionAttempts==(background ? 0 : 1));
+    if (background && steam) assert(!fixtureIconReads);
+    checks++;
+}
+int main(void) { @autoreleasepool {
+    fixtureApplication=[CaskrunForegroundFixture new];
+    for (NSString *role in @[@"renderer",@"gpu-process",@"utility",@"zygote",@"crashpad-handler"]) {
+        for (NSArray *tail in @[@[[NSString stringWithFormat:@"--type=%@",role]],@[@"--type",role]]) {
+            policy_check(@"/runtime/Steam",@"steamwebhelper.exe",tail,NO,YES,YES);
+            policy_check(@"/bundle/WindowsApp",@"steamwebhelper.exe",tail,YES,YES,YES);
+        }
+    }
+    for (NSArray *tail in @[@[],@[@"--type=browser"],@[@"--type=other"],@[@"--type"],@[@"--type="],
+                            @[@"--type=renderer",@"--type=browser"],@[@"--",@"--type=renderer"]]) {
+        policy_check(@"/runtime/Steam",@"steamwebhelper.exe",tail,NO,YES,NO);
+        policy_check(@"/bundle/WindowsApp",@"steamwebhelper.exe",tail,YES,YES,NO);
+    }
+    policy_check(@"/runtime/Steam",@"steamwebhelper.exe",@[@"--type=browser",@"--type=renderer"],NO,YES,YES);
+    policy_check(@"/runtime/Steam",@"steamwebhelper.exe",@[@"--type=renderer",@"--",@"--type=browser"],NO,YES,YES);
+    policy_check(@"/runtime/Steam",@"steam.exe",@[],NO,YES,YES);
+    policy_check(@"/runtime/Steam",@"steam.exe",@[@"--type=browser"],NO,YES,YES);
+    policy_check(@"/runtime/wine",@"ExampleGame.exe",@[@"--type=renderer"],NO,YES,NO);
+    policy_check(@"/runtime/Steam",@"steamwebhelper.exe",@[@"--type=renderer"],NO,NO,NO);
+    policy_check(@"/bundle/WindowsApp",@"ExampleGame.exe",@[@"--type=renderer"],YES,NO,YES);
+    printf("%u exact foreground guards passed; background helpers never reached Dock promotion\n",checks);
+    [fixtureApplication release];
 }return 0;}
 '''
 
@@ -175,7 +285,8 @@ class BundleTests(unittest.TestCase):
         s=(SOURCE/'dlls/ntdll/unix/loader.c').read_text()
         names=['static BOOL caskrun_steam_dock_program','static BOOL caskrun_native_identity_enabled',
                'static BOOL caskrun_native_owned_file','static BOOL caskrun_native_bottle_id',
-               'static BOOL caskrun_native_steam_directory','static char *caskrun_native_steam_app_program',
+               'static BOOL caskrun_native_steam_directory','static BOOL caskrun_steam_background_process',
+               'static char *caskrun_native_steam_app_program',
                'static NTSTATUS loader_exec']
         with tempfile.TemporaryDirectory(prefix='steam-bundle-',dir=REPO/'.build') as tmp:
             d=Path(tmp);bottle='11111111-1111-4111-8111-111111111111'
@@ -213,6 +324,24 @@ class BundleTests(unittest.TestCase):
         extracted='\n\n'.join(function(s,n) for n in names).replace('[[NSProcessInfo processInfo] arguments]','[[NSProcessInfo processInfo] fixtureArguments]')
         with tempfile.TemporaryDirectory(prefix='steam-matcher-',dir=REPO/'.build') as tmp:
             d=Path(tmp);source=d/'matcher.m';source.write_text(OBJC_STUB+extracted+OBJC_MAIN);binary=d/'matcher'
+            subprocess.run(['clang','-Wall','-Wextra','-Werror','-framework','Foundation',str(source),'-o',str(binary)],check=True)
+            print(subprocess.check_output([str(binary)],text=True).strip())
+
+    def test_exact_foreground_policy_guards(self):
+        s=(SOURCE/'dlls/winemac.drv/cocoa_app.m').read_text()
+        names=['static BOOL CaskrunSteamDockEnabled','static NSString* CaskrunArgumentBasename',
+               'static BOOL CaskrunIsWindowsProcess','static BOOL CaskrunNativeDockEnabled',
+               'static NSString* CaskrunNativeImageName','static BOOL CaskrunNativeBackgroundProcess']
+        extracted='\n\n'.join(function(s,n) for n in names).replace('[[NSProcessInfo processInfo] arguments]','[[NSProcessInfo processInfo] fixtureArguments]')
+        method=function(s,'- (void) transformProcessToForeground:')
+        promotion='        if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)'
+        self.assertEqual(method.count(promotion),1)
+        # Execute the exact guards; replace only the menu/promotion body with
+        # an observable attempt so this fixture never creates an AppKit app.
+        guards=method[:method.index(promotion)]
+        guards+='fixturePromotionAttempts++;[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];\n}\n@end\n'
+        with tempfile.TemporaryDirectory(prefix='steam-policy-',dir=REPO/'.build') as tmp:
+            d=Path(tmp);source=d/'policy.m';source.write_text(OBJC_STUB+extracted+POLICY_STUB+guards+POLICY_MAIN);binary=d/'policy'
             subprocess.run(['clang','-Wall','-Wextra','-Werror','-framework','Foundation',str(source),'-o',str(binary)],check=True)
             print(subprocess.check_output([str(binary)],text=True).strip())
 
