@@ -119,6 +119,43 @@ Failures clean owned staging and copied read-only subtrees; any unverifiable
 cleanup is reported. Backups contain private app
 data and should not be committed or shared without inspection.
 
+## Copying a CrossOver bottle
+
+Import from CrossOver copies an idle win64 bottle into separate Caskrun storage.
+The original remains available for comparison. The importer preserves ordinary
+profile data even when the Windows account is named `crossover`, and keeps app
+registry values that refer to that Windows profile. Runtime/vendor configuration
+keys and host paths remain excluded. Before initialization it connects this Mac
+account to the copied profile with a bottle-relative link when safe. Existing
+profiles are preserved and conflicts are reported instead of silently replacing
+settings or saves.
+
+The copy does not include the source Windows tree, engine, builtin programs,
+symlinks or external drive mappings. System dependencies and externally stored
+game libraries may need to be installed or attached again. A conventional,
+checked x86/x64 Steam client receives Caskrun's Steam rendering and native focus
+behavior without creating a catalog installation receipt.
+
+On 14 October 2026, a real local copy passed byte-for-byte verification of every
+copied app/data file, with the original source unchanged. The copied games were
+listed in Collection. This does not establish gameplay, sound or voice-chat
+compatibility. Keep the original until the apps and games you need are tested.
+
+## Sound and microphone access
+
+Ordinary sound playback requires no microphone consent. The native macOS
+Caskrun menu offers **Microphone Access…** for voice chat: it checks or requests
+macOS audio-input authorization only on that explicit action, never records
+audio and does not request unrelated access. Denied or restricted permission is
+reported with the normal System Settings path.
+
+The app, generated Windows-app bundles and source loader templates include
+microphone purpose text. The current independent runtime remains unchanged;
+its embedded loader metadata predates those source-template changes. Windows
+apps may therefore need their own consent or a separately reviewed runtime
+update if macOS attributes capture to an independent helper. An app permission
+grant is not evidence that all clients or games can capture audio successfully.
+
 ## Verification boundary
 
 Source tests exercise privacy projection, real Wine registry syntax, safe

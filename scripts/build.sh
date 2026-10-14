@@ -112,6 +112,7 @@ cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>CaskrunIcon</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Windows apps you open with Caskrun can use your microphone for voice chat or audio recording when you choose those features.</string>
 </dict></plist>
 PLIST
 touch "$STAGED_APP/Contents/Resources/.caskrun-generated-app"

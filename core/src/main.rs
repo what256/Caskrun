@@ -1992,7 +1992,7 @@ fn steam_install_request(
     // A typed AppID can only produce this one Steam operation, never an
     // arbitrary URL or a native-macOS Steam dispatch.
     let mut arguments = Vec::new();
-    if !steam_install::is_recipe_steam_launcher(home, bottle_id, &launcher) {
+    if !steam_install::is_steam_client_launcher(home, bottle_id, &launcher) {
         arguments.push(steam_install::STEAM_CEF_SOFTWARE_FLAG.into());
     }
     arguments.push(format!("steam://install/{app_id}"));
@@ -2026,7 +2026,7 @@ fn run_launcher_with_wine(
         .into_iter()
         .find(|item| item.id == launcher_id)
         .ok_or("Launcher not found")?;
-    let steam_mode = steam_install::is_recipe_steam_launcher(home, bottle_id, &launcher);
+    let steam_mode = steam_install::is_steam_client_launcher(home, bottle_id, &launcher);
     let itch_mode = itch_install::is_recipe_itch_launcher(home, bottle_id, &launcher);
     let arguments = launcher_arguments(
         steam_mode,

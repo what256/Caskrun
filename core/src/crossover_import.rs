@@ -43,7 +43,18 @@ fn import_with_guard(
     home: &Path,
     source: &Path,
     name: Option<&str>,
+    idle: impl FnMut(&Path) -> Result<(), String>,
+) -> Result<CrossOverImportResult, String> {
+    let account = bottle_xdg::account_name();
+    import_with_account(home, source, name, idle, account.as_deref())
+}
+
+fn import_with_account(
+    home: &Path,
+    source: &Path,
+    name: Option<&str>,
     mut idle: impl FnMut(&Path) -> Result<(), String>,
+    account: Option<&str>,
 ) -> Result<CrossOverImportResult, String> {
     cancellation::check()?;
     if !path_is_real_directory(source) {
@@ -110,6 +121,14 @@ fn import_with_guard(
         let drive = prefix.join("drive_c");
         fs::create_dir(&drive).map_err(|e| e.to_string())?;
         copy_data_tree(&source.join("drive_c"), &drive, Path::new(""), &mut state)?;
+        // CrossOver normally uses the Windows account named `crossover`.
+        // Wine will use this Mac account's name instead. Connect that name to
+        // the copied profile before wineboot so its settings and saves remain
+        // reachable, without changing either profile or any source link.
+        let profile = copied_profile_account(&prefix, account)?;
+        let has_profiles = path_is_real_directory(&prefix.join("drive_c/users"));
+        let profile_outcome =
+            bottle_xdg::resolve_restored_profile(&stage, account, profile.as_deref())?;
         // Source dosdevices is never copied: external drives and host paths
         // must not become part of this bottle. This C: mapping is newly made.
         let devices = prefix.join("dosdevices");
@@ -235,6 +254,15 @@ fn import_with_guard(
             "CrossOver metadata, the Windows directory, Wine builtin programs, native engine binaries, all source symlinks and external drive mappings were excluded.".into(),
             "Caskrun must initialize its independent Wine runtime on first launch. Apps that need system DLLs, services, linked host folders or CrossOver-specific settings may require dependency repair or reinstallation; launch compatibility has not been validated.".into(),
         ];
+        if profile_outcome.resolved() {
+            notes.push("This Mac account uses the copied Windows profile, so its profile settings and data remain reachable. App compatibility still needs verification.".into());
+        }
+        if let Some(warning) = profile_outcome.warning() {
+            notes.push(warning.into());
+        }
+        if profile.is_none() && has_profiles {
+            notes.push("No unambiguous Windows profile was identified. Copied profiles remain in the bottle, but apps may need their settings or saves reselected.".into());
+        }
         if state.skipped_entries > 0 {
             notes.push(format!("Skipped {} files, folders or links under drive_c; excluded folders include their contents.", state.skipped_entries));
         }
@@ -323,10 +351,25 @@ fn filter_registry(bytes: &[u8]) -> Result<(String, usize), String> {
     let mut removed = 0usize;
     let flush = |section: &mut String, output: &mut String, removed: &mut usize| {
         let lower = section.to_ascii_lowercase();
-        let unsafe_section = lower.contains("crossover")
-            || lower.contains("codeweavers")
-            || lower.contains("[software\\\\wine")
-            || lower.contains("[software\\\\wow6432node\\\\wine")
+        // Match configuration keys, not arbitrary values. A normal app value
+        // such as C:\\users\\crossover\\AppData is Windows user data, not
+        // CrossOver's engine configuration.
+        let key = lower.lines().find_map(|line| {
+            line.strip_prefix('[')
+                .and_then(|key| key.split_once(']').map(|(key, _)| key))
+        });
+        let key_parts: Vec<_> = key
+            .unwrap_or("")
+            .split('\\')
+            .filter(|part| !part.is_empty())
+            .collect();
+        let vendor_key = key_parts
+            .iter()
+            .any(|part| matches!(*part, "crossover" | "codeweavers"));
+        let wine_key = key_parts.starts_with(&["software", "wine"])
+            || key_parts.starts_with(&["software", "wow6432node", "wine"]);
+        let unsafe_section = vendor_key
+            || wine_key
             || lower.contains("/users/")
             || lower.contains("/applications/")
             || lower.contains("/volumes/")
@@ -372,9 +415,11 @@ fn excluded_path(relative: &Path) -> bool {
     {
         return true;
     }
-    parts.iter().any(|part| {
-        part.contains("crossover")
-            || part.contains("codeweavers")
+    parts.iter().enumerate().any(|(index, part)| {
+        // The account folder itself may be named `crossover`. Its ordinary
+        // Windows settings and saves must not be mistaken for engine files.
+        let account = index == 1 && parts[0] == "users";
+        (!account && (part.contains("crossover") || part.contains("codeweavers")))
             || [
                 ".ds_store",
                 "cxbottle.conf",
@@ -396,6 +441,47 @@ fn excluded_path(relative: &Path) -> bool {
             ]
             .contains(&part.as_str())
     })
+}
+
+/// Select only a copied, real profile. Prefer CrossOver's conventional account,
+/// then the current account, then a sole ordinary account. Multiple remaining
+/// profiles are kept unchanged instead of guessing which one owns the apps.
+fn copied_profile_account(prefix: &Path, account: Option<&str>) -> Result<Option<String>, String> {
+    let users = prefix.join("drive_c/users");
+    if !path_is_real_directory(&users) {
+        return Ok(None);
+    }
+    if path_is_real_directory(&users.join("crossover")) {
+        return Ok(Some("crossover".into()));
+    }
+    if let Some(account) = account
+        && path_is_real_directory(&users.join(account))
+    {
+        return Ok(Some(account.into()));
+    }
+    let mut profiles = Vec::new();
+    for entry in fs::read_dir(&users).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if [
+            "public",
+            "default",
+            "default user",
+            "all users",
+            "defaultuser0",
+        ]
+        .contains(&name.to_ascii_lowercase().as_str())
+        {
+            continue;
+        }
+        profiles.push(name);
+    }
+    Ok((profiles.len() == 1).then(|| profiles.remove(0)))
 }
 
 fn is_engine_binary(header: &[u8]) -> bool {
@@ -759,6 +845,193 @@ mod tests {
     }
 
     #[test]
+    fn imports_crossover_profile_data_and_connects_this_account_without_source_changes() {
+        let fixture = Fixture::new();
+        let source_profile = fixture.source.join("drive_c/users/crossover");
+        let settings = "AppData/Roaming/Atlas/settings.ini";
+        let saves = "Saved Games/Atlas/save.dat";
+        fs::create_dir_all(source_profile.join("AppData/Roaming/Atlas")).unwrap();
+        fs::create_dir_all(source_profile.join("Saved Games/Atlas")).unwrap();
+        fs::write(source_profile.join(settings), b"profile settings").unwrap();
+        fs::write(source_profile.join(saves), b"game progress").unwrap();
+        fs::create_dir_all(fixture.source.join("drive_c/users/Public")).unwrap();
+        fs::write(source_profile.join("cxbottle.conf"), b"vendor metadata").unwrap();
+        let original_registry = b"WINE REGISTRY Version 2\n#arch=win64\n\n[Software\\\\Atlas]\n\"Save\"=\"C:\\\\users\\\\crossover\\\\Saved Games\\\\Atlas\"\n\n[Software\\\\CodeWeavers]\n\"Engine\"=\"CrossOver\"\n";
+        fs::write(fixture.source.join("user.reg"), original_registry).unwrap();
+
+        let result = import_with_account(
+            &fixture.home,
+            &fixture.source,
+            None,
+            |_| Ok(()),
+            Some("ThisAccount"),
+        )
+        .unwrap();
+        let dir = fixture.home.join("bottles").join(&result.bottle.id);
+        let imported_profile = dir.join("prefix/drive_c/users/crossover");
+        assert_eq!(
+            fs::read(imported_profile.join(settings)).unwrap(),
+            b"profile settings"
+        );
+        assert_eq!(
+            fs::read(imported_profile.join(saves)).unwrap(),
+            b"game progress"
+        );
+        assert!(!imported_profile.join("cxbottle.conf").exists());
+        let registry = fs::read_to_string(dir.join("prefix/user.reg")).unwrap();
+        assert!(registry.contains("C:\\\\users\\\\crossover\\\\Saved Games"));
+        assert!(!registry.contains("CodeWeavers"));
+        let resolved_profile = dir.join("prefix/drive_c/users/ThisAccount");
+        assert_eq!(
+            fs::read(resolved_profile.join(settings)).unwrap(),
+            b"profile settings"
+        );
+        assert_eq!(
+            fs::read_link(&resolved_profile).unwrap(),
+            Path::new("crossover")
+        );
+        assert!(
+            !source_profile
+                .parent()
+                .unwrap()
+                .join("ThisAccount")
+                .exists()
+        );
+        assert!(
+            result
+                .notes
+                .iter()
+                .any(|note| note.contains("uses the copied Windows profile"))
+        );
+        assert_eq!(
+            fs::read(source_profile.join(settings)).unwrap(),
+            b"profile settings"
+        );
+        assert_eq!(
+            fs::read(source_profile.join(saves)).unwrap(),
+            b"game progress"
+        );
+        assert_eq!(
+            fs::read(fixture.source.join("user.reg")).unwrap(),
+            original_registry
+        );
+        assert!(!dir.join("prefix-record.json").exists());
+    }
+
+    #[test]
+    fn preserves_profile_names_without_allowing_vendor_metadata_or_engine_paths() {
+        assert!(!excluded_path(Path::new("users/crossover")));
+        assert!(!excluded_path(Path::new(
+            "users/crossover/AppData/Roaming/Atlas/settings.ini"
+        )));
+        assert!(!excluded_path(Path::new(
+            "users/CodeWeaversUser/Saved Games/Atlas/save.dat"
+        )));
+        assert!(excluded_path(Path::new("users/crossover/cxbottle.conf")));
+        assert!(excluded_path(Path::new("users/crossover/wineserver")));
+        assert!(excluded_path(Path::new(
+            "Program Files/CodeWeavers/engine.exe"
+        )));
+        assert!(excluded_path(Path::new(
+            "Program Files/CrossOver/engine.exe"
+        )));
+        assert!(excluded_path(Path::new("windows/system32/d3d11.dll")));
+    }
+
+    #[test]
+    fn copied_profile_selection_never_guesses_between_ordinary_profiles() {
+        let fixture = Fixture::new();
+        let users = fixture.source.join("drive_c/users");
+        fs::create_dir_all(users.join("Public")).unwrap();
+        fs::create_dir_all(users.join("Default")).unwrap();
+        assert_eq!(
+            copied_profile_account(&fixture.source, Some("ThisAccount")).unwrap(),
+            None
+        );
+        fs::create_dir_all(users.join("FirstAccount")).unwrap();
+        assert_eq!(
+            copied_profile_account(&fixture.source, Some("ThisAccount")).unwrap(),
+            Some("FirstAccount".into())
+        );
+        fs::create_dir_all(users.join("SecondAccount")).unwrap();
+        assert_eq!(
+            copied_profile_account(&fixture.source, Some("ThisAccount")).unwrap(),
+            None
+        );
+        assert_eq!(
+            copied_profile_account(&fixture.source, Some("SecondAccount")).unwrap(),
+            Some("SecondAccount".into())
+        );
+        fs::create_dir_all(users.join("crossover")).unwrap();
+        assert_eq!(
+            copied_profile_account(&fixture.source, Some("SecondAccount")).unwrap(),
+            Some("crossover".into())
+        );
+    }
+
+    #[test]
+    fn import_keeps_conflicting_current_profile_and_warns_instead_of_claiming_resolution() {
+        let account = "ThisAccount";
+        let fixture = Fixture::new();
+        let users = fixture.source.join("drive_c/users");
+        fs::create_dir_all(users.join("crossover")).unwrap();
+        fs::create_dir_all(users.join(account)).unwrap();
+        fs::write(users.join("crossover/settings.ini"), b"imported settings").unwrap();
+        fs::write(
+            users.join(account).join("settings.ini"),
+            b"existing settings",
+        )
+        .unwrap();
+        let result = import_with_account(
+            &fixture.home,
+            &fixture.source,
+            None,
+            |_| Ok(()),
+            Some(account),
+        )
+        .unwrap();
+        let imported_users = fixture
+            .home
+            .join("bottles")
+            .join(&result.bottle.id)
+            .join("prefix/drive_c/users");
+        assert_eq!(
+            fs::read(imported_users.join("crossover/settings.ini")).unwrap(),
+            b"imported settings"
+        );
+        assert_eq!(
+            fs::read(imported_users.join(account).join("settings.ini")).unwrap(),
+            b"existing settings"
+        );
+        assert!(
+            !fs::symlink_metadata(imported_users.join(account))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            result
+                .notes
+                .iter()
+                .any(|note| note.contains("already has its own Windows profile"))
+        );
+        assert!(
+            !result
+                .notes
+                .iter()
+                .any(|note| note.contains("uses the copied Windows profile"))
+        );
+        assert_eq!(
+            fs::read(users.join("crossover/settings.ini")).unwrap(),
+            b"imported settings"
+        );
+        assert_eq!(
+            fs::read(users.join(account).join("settings.ini")).unwrap(),
+            b"existing settings"
+        );
+    }
+
+    #[test]
     fn imported_shortcuts_keep_their_windows_arguments() {
         // A discovered shortcut's arguments are part of its command. Importing
         // the program without them would start a different program.
@@ -845,6 +1118,22 @@ mod tests {
         assert!(!result.contains("CodeWeavers"));
         assert!(!result.contains("Desktop"));
         assert_eq!(removed, 3);
+    }
+
+    #[test]
+    fn registry_filter_matches_configuration_keys_without_brand_substrings_in_app_data() {
+        let text = b"WINE REGISTRY Version 2\n#arch=win64\n\n[Software\\\\Atlas]\n\"Profile\"=\"C:\\\\users\\\\crossover\\\\AppData\\\\Atlas\"\n\"Note\"=\"Imported from CrossOver\"\n\n[Software\\\\CrossoverQuest]\n\"Installed\"=dword:00000001\n\n[Software\\\\WineGame]\n\"Installed\"=dword:00000001\n\n[Software\\\\Wine\\\\DllOverrides]\n\"d3d11\"=\"native\"\n\n[Software\\\\Wow6432Node\\\\Wine\\\\Drivers]\n\"Graphics\"=\"mac\"\n\n[Software\\\\CodeWeavers\\\\Settings]\n\"Engine\"=\"CrossOver\"\n\n[Software\\\\CrossOver\\\\Settings]\n\"Engine\"=\"CrossOver\"\n\n[Software\\\\HostMapping]\n\"File\"=\"/Users/<account>/Documents/save.dat\"\n";
+        let (result, removed) = filter_registry(text).unwrap();
+        assert!(result.contains("C:\\\\users\\\\crossover\\\\AppData\\\\Atlas"));
+        assert!(result.contains("Imported from CrossOver"));
+        assert!(result.contains("CrossoverQuest"));
+        assert!(result.contains("WineGame"));
+        assert!(!result.contains("DllOverrides"));
+        assert!(!result.contains("Drivers"));
+        assert!(!result.contains("CodeWeavers"));
+        assert!(!result.contains("CrossOver\\\\Settings"));
+        assert!(!result.contains("HostMapping"));
+        assert_eq!(removed, 5);
     }
 
     #[test]

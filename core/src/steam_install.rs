@@ -763,6 +763,69 @@ pub(super) fn is_recipe_steam_launcher(home: &Path, bottle_id: &str, launcher: &
         .is_ok_and(|actual| actual == expected)
 }
 
+/// Steam UI and native focus handling also apply to a saved, installed client
+/// imported from another prefix or added manually. This does not create an
+/// installer receipt or make the client eligible for recipe-only migrations.
+pub(super) fn is_steam_client_launcher(home: &Path, bottle_id: &str, launcher: &Launcher) -> bool {
+    if is_recipe_steam_launcher(home, bottle_id, launcher) {
+        return true;
+    }
+    let Ok(dir) = bottle_dir(home, bottle_id) else {
+        return false;
+    };
+    let path = Path::new(&launcher.path);
+    let Ok(clients) = steam_library::client_paths(&dir.join("prefix")) else {
+        return false;
+    };
+    if !path
+        .canonicalize()
+        .is_ok_and(|actual| clients.contains(&actual))
+    {
+        return false;
+    }
+    // Only a conventional client inside this bottle is checked. A label or a
+    // filename elsewhere is not enough. Read the headers rather than hashing
+    // Steam's multi-megabyte executable every time the user opens it.
+    let Ok(before) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !before.file_type().is_file() || before.len() < 70 {
+        return false;
+    }
+    let Ok(mut file) = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW_ANY | 0x4) // Darwin O_NONBLOCK: reject an exchanged FIFO.
+        .open(path)
+    else {
+        return false;
+    };
+    if !file
+        .metadata()
+        .is_ok_and(|opened| same_snapshot(&before, &opened))
+    {
+        return false;
+    }
+    let mut dos = [0_u8; 64];
+    if file.read_exact(&mut dos).is_err() || &dos[..2] != b"MZ" {
+        return false;
+    }
+    let offset = u64::from(u32::from_le_bytes(dos[0x3c..0x40].try_into().unwrap()));
+    if !(64..=64 * 1024).contains(&offset)
+        || offset.saturating_add(6) > before.len()
+        || file.seek(SeekFrom::Start(offset)).is_err()
+    {
+        return false;
+    }
+    let mut pe = [0_u8; 6];
+    file.read_exact(&mut pe).is_ok()
+        && &pe[..4] == b"PE\0\0"
+        && matches!(u16::from_le_bytes([pe[4], pe[5]]), 0x014c | 0x8664)
+        && file
+            .metadata()
+            .is_ok_and(|after| same_snapshot(&before, &after))
+        && fs::symlink_metadata(path).is_ok_and(|after| same_snapshot(&before, &after))
+}
+
 fn run_steam_installer(
     home: &Path,
     wine: &Path,
@@ -936,6 +999,150 @@ mod tests {
         fs::write(path, bytes).unwrap();
         let mut file = File::open(path).unwrap();
         inspect_pe_and_sha256(&mut file).unwrap()
+    }
+
+    fn fake_steam_client(path: &Path, machine: u16) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut bytes = vec![0_u8; 0x86];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&0x80_u32.to_le_bytes());
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        bytes[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn saved_conventional_steam_clients_do_not_need_a_recipe_receipt() {
+        let home = test_home();
+        for location in ["Program Files (x86)/Steam", "Program Files/Steam"] {
+            for name in ["steam.exe", "Steam.exe"] {
+                for machine in [0x014c, 0x8664] {
+                    let bottle = create(&home, "Imported client").unwrap();
+                    let client = bottle_dir(&home, &bottle.id)
+                        .unwrap()
+                        .join("prefix/drive_c")
+                        .join(location)
+                        .join(name);
+                    fake_steam_client(&client, machine);
+                    let saved = add_launcher(&home, &bottle.id, "My Steam", &client).unwrap();
+                    assert!(is_steam_client_launcher(&home, &bottle.id, &saved));
+                    assert!(!is_recipe_steam_launcher(&home, &bottle.id, &saved));
+                    assert!(catalog_attempt(&home, &bottle.id).unwrap().is_none());
+                }
+            }
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn steam_client_handling_refuses_arbitrary_paths_and_invalid_headers() {
+        let home = test_home();
+        let bottle = create(&home, "Client checks").unwrap();
+        let prefix = bottle_dir(&home, &bottle.id).unwrap().join("prefix");
+        for relative in [
+            "drive_c/Other/Steam.exe",
+            "drive_c/Program Files/Steam/Steam-copy.exe",
+            "drive_c/Program Files/Other/Steam.exe",
+        ] {
+            let client = prefix.join(relative);
+            fake_steam_client(&client, 0x014c);
+            let saved = add_launcher(&home, &bottle.id, "Steam", &client).unwrap();
+            assert!(!is_steam_client_launcher(&home, &bottle.id, &saved));
+        }
+        let client = prefix.join("drive_c/Program Files/Steam/Steam.exe");
+        fake_steam_client(&client, 0x014c);
+        let saved = add_launcher(&home, &bottle.id, "Steam", &client).unwrap();
+        for (offset, bytes) in [
+            (0usize, b"no".as_slice()),
+            (0x80, b"PX\0\0".as_slice()),
+            (0x84, 0xaa64_u16.to_le_bytes().as_slice()),
+            (0x3c, 0xffff_ffff_u32.to_le_bytes().as_slice()),
+            (0x3c, 32_u32.to_le_bytes().as_slice()),
+        ] {
+            fake_steam_client(&client, 0x014c);
+            let mut file = OpenOptions::new().write(true).open(&client).unwrap();
+            file.seek(SeekFrom::Start(offset as u64)).unwrap();
+            use std::io::Write;
+            file.write_all(bytes).unwrap();
+            assert!(!is_steam_client_launcher(&home, &bottle.id, &saved));
+        }
+        // A valid-looking header far into a large/sparse file is outside the
+        // bounded scan policy and must not turn a launch into a full-file read.
+        fake_steam_client(&client, 0x014c);
+        let mut file = OpenOptions::new().write(true).open(&client).unwrap();
+        file.set_len(1024 * 1024).unwrap();
+        file.seek(SeekFrom::Start(0x3c)).unwrap();
+        use std::io::Write;
+        file.write_all(&(128 * 1024_u32).to_le_bytes()).unwrap();
+        file.seek(SeekFrom::Start(128 * 1024)).unwrap();
+        file.write_all(b"PE\0\0\x4c\x01").unwrap();
+        assert!(!is_steam_client_launcher(&home, &bottle.id, &saved));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn steam_client_handling_refuses_file_and_parent_symlinks() {
+        let home = test_home();
+        let bottle = create(&home, "No links").unwrap();
+        let prefix = bottle_dir(&home, &bottle.id).unwrap().join("prefix");
+        let root = prefix.join("drive_c/Program Files/Steam");
+        let client = root.join("Steam.exe");
+        fake_steam_client(&client, 0x014c);
+        let mut saved = add_launcher(&home, &bottle.id, "Steam", &client).unwrap();
+        let alias = prefix.join("drive_c/Steam.exe");
+        symlink(&client, &alias).unwrap();
+        saved.path = alias.display().to_string();
+        assert!(!is_steam_client_launcher(&home, &bottle.id, &saved));
+        let outside = home.join("external/Steam.exe");
+        fake_steam_client(&outside, 0x8664);
+        fs::remove_file(&client).unwrap();
+        symlink(&outside, &client).unwrap();
+        saved.path = client.display().to_string();
+        assert!(!is_steam_client_launcher(&home, &bottle.id, &saved));
+        fs::remove_file(&client).unwrap();
+        fs::remove_dir(&root).unwrap();
+        symlink(outside.parent().unwrap(), &root).unwrap();
+        assert!(!is_steam_client_launcher(&home, &bottle.id, &saved));
+        assert!(catalog_attempt(&home, &bottle.id).unwrap().is_none());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn imported_steam_client_uses_native_mode_and_one_software_flag() {
+        let home = test_home();
+        let bottle = create(&home, "Imported Steam").unwrap();
+        let prefix = bottle_dir(&home, &bottle.id).unwrap().join("prefix");
+        let client = prefix.join("drive_c/Program Files (x86)/Steam/steam.exe");
+        fake_steam_client(&client, 0x014c);
+        let saved = add_launcher(&home, &bottle.id, "Steam", &client).unwrap();
+        let wine = fake_wine(&home, 0);
+        let (chosen, request) = steam_install_request(&home, &bottle.id, 480).unwrap();
+        assert_eq!(chosen.id, saved.id);
+        assert_eq!(request, ["steam://install/480"]);
+        assert_eq!(
+            launcher_arguments(true, false, &saved.saved_arguments, &request).unwrap(),
+            [STEAM_CEF_SOFTWARE_FLAG, "steam://install/480"]
+        );
+        run_launcher_with_wine(&home, &bottle.id, &saved.id, &wine, &request).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let arguments =
+                fs::read_to_string(prefix.join("launch-arguments.txt")).unwrap_or_default();
+            let mode = fs::read_to_string(prefix.join("launch-mode.txt")).unwrap_or_default();
+            if arguments.ends_with("steam.exe|-cef-disable-gpu\n")
+                && mode.ends_with("steam.exe|1\n")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Steam mode or launch arguments missing"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(catalog_attempt(&home, &bottle.id).unwrap().is_none());
+        assert!(!is_recipe_steam_launcher(&home, &bottle.id, &saved));
+        fs::remove_dir_all(home).unwrap();
     }
 
     fn fake_wine(home: &Path, installer_exit: i32) -> PathBuf {

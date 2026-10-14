@@ -27,7 +27,7 @@ steam_patch_sha256=408dade743a358886e76b6bb6e592ed6cb8fa67738c1b6d4b061d817c2cbe
 dock_patch="$repo/runtime-patches/wine-11.0-steam-dock.patch"
 dock_patch_sha256=33811970ce63401baabaffd491ce0ac79c69ce740f0ad37687355041f2bd1844
 steam_plist="$repo/runtime-patches/steam_info.plist.in"
-steam_plist_sha256=b28004e117f9ee9d41716bb2d8b6fcda1d03d9f4a72f494706d02c248c17bb70
+steam_plist_sha256=60ce853901a6297629fdb7681b743c8338b5dd21875b6f69182c1dbf2b427d9c
 output="$repo/.build/wine-steam-11.0-cef-dock-dev"
 
 verify_hash() {

@@ -696,7 +696,9 @@ fn prepare_with_inputs_mode(
     }
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
-    digest.update(b"caskrun-native-app-v1\0");
+    // Plist schema changes need a new cache key so existing verified bundles
+    // stay intact and this version generates its microphone purpose text.
+    digest.update(b"caskrun-native-app-v2\0");
     digest.update(canonical.as_os_str().as_bytes());
     digest.update(display.as_bytes());
     for value in [
@@ -1107,6 +1109,7 @@ fn plist(name: &str, id: &str, key: &str, icon: bool, native_icon: bool) -> Stri
 <key>CFBundleVersion</key><string>1</string>
 <key>NSPrincipalClass</key><string>WineApplication</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSMicrophoneUsageDescription</key><string>This Windows app can use your microphone for voice chat or audio recording when you choose those features.</string>
 <key>LSUIElement</key><true/>
 {icon}
 </dict></plist>
@@ -2197,6 +2200,7 @@ exec /bin/sleep 10
             assert!(
                 info.contains("<key>CFBundleDisplayName</key><string>GOG Galaxy Setup</string>")
             );
+            assert!(info.contains("<key>NSMicrophoneUsageDescription</key><string>This Windows app can use your microphone for voice chat or audio recording when you choose those features.</string>"));
         }
         assert_eq!(fixture.prepare(&first).unwrap(), first_loader);
         assert_eq!(fixture.prepare(&second).unwrap(), second_loader);

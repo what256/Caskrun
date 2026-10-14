@@ -24,6 +24,8 @@
     <string>@PACKAGE_VERSION@</string>
     <key>NSPrincipalClass</key>
     <string>WineApplication</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Steam can use your microphone for voice chat or audio recording when you choose those features.</string>
     <key>LSUIElement</key>
     <string>1</string>
 </dict>

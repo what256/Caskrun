@@ -45,7 +45,9 @@ The October isolated launcher round found an Epic MSI execute-access fault and a
 
 New bottle backups use a compressed `.caskrun-backup` archive with a checked entry manifest and per-file SHA-256 integrity. Older inspectable `.caskrun-bottle` folder backups remain supported. Import validates the payload before creating a bottle; export publishes a complete new archive without overwriting an existing file. Duplicate/export require stopped bottle apps and verified prefix ownership. Close all apps before exporting; launchers pointing outside the bottle may need to be selected again after import. Browser bookmarks are separate local app data and are not included in bottle backups.
 
-The + menu also offers **Import from CrossOver** for an idle, existing **win64 bottle folder** containing `drive_c` and `system.reg`. It copies installed apps and data into a new Caskrun bottle without changing the source, excluding CrossOver metadata and engine files, the Windows tree, builtin programs, source symlinks, and external drive mappings. Dependencies may need repair or reinstallation under Caskrun's engine. `.cxarchive` files and 32-bit-only prefixes are unsupported. Synthetic import tests passed; real imported-app compatibility and the import UI have not been verified.
+The + menu also offers **Import from CrossOver** for an idle, existing **win64 bottle folder** containing `drive_c` and `system.reg`. It copies installed apps and data into a new Caskrun bottle without changing the source, excluding CrossOver metadata and engine files, the Windows tree, builtin programs, source symlinks, and external drive mappings. The conventional `crossover` Windows profile and its app registry settings are preserved; the importing account is connected to that profile when safe, and conflicts are reported. Imported Steam clients receive the same native name/focus and CEF rendering behavior as Caskrun-installed Steam, without inventing an installer receipt. Dependencies may need repair or reinstallation under Caskrun's engine. `.cxarchive` files and 32-bit-only prefixes are unsupported. A real copy passed byte-for-byte app/data verification and source-preservation checks; gameplay and the import picker remain unverified.
+
+Game sound uses normal audio output and needs no microphone permission. **Caskrun → Microphone Access…** requests macOS microphone consent only when selected, without recording audio. Windows apps may request their own access when voice chat is used. Permission status does not establish that a particular game's voice chat works.
 
 Moving a bottle to Recently Deleted keeps its files in Caskrun's own data directory so it can be restored. For an initialized bottle, Caskrun refuses the move if its Wine server is still active or a matching independent runtime cannot be checked. Restore does not require Wine. Permanent removal and automatic cleanup are not implemented yet.
 
@@ -92,11 +94,11 @@ To test the core without affecting your real bottles:
 
 ```sh
 cd core
-cargo test
+cargo test -- --test-threads=1
 CASKRUN_HOME="$(mktemp -d)" cargo run -- list
 ```
 
-The current source passes **420 Rust unit tests and 6 integration tests, with 2 existing tests ignored**, plus **125 Python checks** and **104 Swift checks**. These cover browser URL privacy and persistence, compatibility evidence, installed-game manifests, Steam installation requests and the existing maintenance workflows. The complete SwiftUI app typecheck also passes. Its original DXMT matrix separately exercises frame targets and spatial scales under both Windows architectures; see the [recorded evidence](docs/DXMT_OPTIONS.md). Source, API and fixture tests do not establish broad publisher-client or real-game compatibility. See [maintenance workflows](docs/DEMO_MAINTENANCE.md), [manual testing](docs/MANUAL_TEST_CHECKLIST.md), and [launcher validation](docs/LAUNCHER_VALIDATION.md).
+The serial core suite passes **440 Rust unit tests and 6 integration tests, with 2 existing tests ignored**. The earlier browser and maintenance validation recorded **125 Python checks** and **104 Swift checks**; the complete SwiftUI app typecheck also passes with microphone authorization support. These cover browser URL privacy and persistence, compatibility evidence, installed-game manifests, Steam installation requests and the existing maintenance workflows. Its original DXMT matrix separately exercises frame targets and spatial scales under both Windows architectures; see the [recorded evidence](docs/DXMT_OPTIONS.md). Source, API and fixture tests do not establish broad publisher-client or real-game compatibility. See [maintenance workflows](docs/DEMO_MAINTENANCE.md), [manual testing](docs/MANUAL_TEST_CHECKLIST.md), and [launcher validation](docs/LAUNCHER_VALIDATION.md).
 
 ## Design and scope
 

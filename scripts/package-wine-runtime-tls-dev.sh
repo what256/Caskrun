@@ -114,16 +114,25 @@ if [ "${CASKRUN_TLS_VARIANT:-tls}" != tls ]; then
     "$source_meta/patches/wine-11.0-steam-cef-commandline.patch"
   verify_sha256 33811970ce63401baabaffd491ce0ac79c69ce740f0ad37687355041f2bd1844 \
     "$source_meta/patches/wine-11.0-steam-dock.patch"
-  verify_sha256 b28004e117f9ee9d41716bb2d8b6fcda1d03d9f4a72f494706d02c248c17bb70 \
-    "$source_meta/patches/steam_info.plist.in"
+  # Both reviewed templates remain valid source for historical stages. A new
+  # source build uses the microphone-ready template; packaging cannot add a
+  # permission purpose string to an already linked loader.
+  steam_plist_hash=$(/usr/bin/shasum -a 256 "$source_meta/patches/steam_info.plist.in" | /usr/bin/awk '{ print $1 }')
+  case "$steam_plist_hash" in
+    b28004e117f9ee9d41716bb2d8b6fcda1d03d9f4a72f494706d02c248c17bb70|60ce853901a6297629fdb7681b743c8338b5dd21875b6f69182c1dbf2b427d9c) ;;
+    *) printf 'Unreviewed Steam loader plist source.\n' >&2; exit 65 ;;
+  esac
   /usr/bin/codesign --verify --strict "$stage/lib/wine/x86_64-unix/Steam"
 fi
 
 if [ "${CASKRUN_TLS_VARIANT:-tls}" = native-apps ]; then
   verify_sha256 f860b3a32a34d807319827c8a03298b1c24a705fa7075dc3a32cca7567c2d0ab \
     "$source_meta/patches/wine-11.0-native-app-identity.patch"
-  verify_sha256 cbb1781ded5b61bf7d3c7a87315aa54bce151879a073132216d043a9124eb7d5 \
-    "$source_meta/patches/native_app_info.plist.in"
+  native_plist_hash=$(/usr/bin/shasum -a 256 "$source_meta/patches/native_app_info.plist.in" | /usr/bin/awk '{ print $1 }')
+  case "$native_plist_hash" in
+    cbb1781ded5b61bf7d3c7a87315aa54bce151879a073132216d043a9124eb7d5|e852d7f5050264b42e93b7822f5bc5e3593431ea58f0c71cc70fdd58afe5795b) ;;
+    *) printf 'Unreviewed native loader plist source.\n' >&2; exit 65 ;;
+  esac
   # The recorded legacy stage remains valid; fresh builds use the reviewed
   # adaptive MIT helper. Never substitute unreviewed renderer source.
   native_icon_hash=$(/usr/bin/shasum -a 256 "$source_meta/patches/native_icon.swift" | /usr/bin/awk '{ print $1 }')
@@ -266,12 +275,12 @@ fi
 
 if [ "${CASKRUN_TLS_VARIANT:-tls}" = native-apps ]; then
   /usr/bin/codesign --verify --strict "$tmp/runtime/lib/wine/x86_64-unix/WindowsApp"
-  cat >> "$tmp/SOURCES.txt" <<'EOF'
+  cat >> "$tmp/SOURCES.txt" <<EOF
 
 Caskrun original per-EXE macOS identity extension: source/patches/wine-11.0-native-app-identity.patch
 SHA-256: f860b3a32a34d807319827c8a03298b1c24a705fa7075dc3a32cca7567c2d0ab
 Neutral native loader plist: source/patches/native_app_info.plist.in
-SHA-256: cbb1781ded5b61bf7d3c7a87315aa54bce151879a073132216d043a9124eb7d5
+SHA-256: $native_plist_hash
 Original ARM64 icon renderer: source/patches/native_icon.swift (compiled as bin/native-icon)
 SHA-256: ee6957ce414da832719b31ec7eb66378477094af9004fa2a2f3bfc8f82fa03d0
 Fallback artwork: original Caskrun assets/caskrun-icon.png; Caskrun MIT license.

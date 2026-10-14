@@ -62,8 +62,11 @@ verify 408dade743a358886e76b6bb6e592ed6cb8fa67738c1b6d4b061d817c2cbe90f \
   "$base/source/patches/wine-11.0-steam-cef-commandline.patch"
 verify 33811970ce63401baabaffd491ce0ac79c69ce740f0ad37687355041f2bd1844 \
   "$base/source/patches/wine-11.0-steam-dock.patch"
-verify b28004e117f9ee9d41716bb2d8b6fcda1d03d9f4a72f494706d02c248c17bb70 \
-  "$base/source/patches/steam_info.plist.in"
+steam_plist_hash=$(/usr/bin/shasum -a 256 "$base/source/patches/steam_info.plist.in" | /usr/bin/awk '{ print $1 }')
+case "$steam_plist_hash" in
+  b28004e117f9ee9d41716bb2d8b6fcda1d03d9f4a72f494706d02c248c17bb70|60ce853901a6297629fdb7681b743c8338b5dd21875b6f69182c1dbf2b427d9c) ;;
+  *) printf 'Unreviewed Steam loader plist source.\n' >&2; exit 65 ;;
+esac
 verify f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e \
   "$graphics/downloads/MoltenVK-macos-v1.4.2.tar"
 case "$(/usr/bin/file -b "$loader")" in

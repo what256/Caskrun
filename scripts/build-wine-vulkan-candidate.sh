@@ -46,7 +46,7 @@ verify 512 a2c3db14f8cf0d19927466805c8f17c68ee7e93d1196d1162dd2279af497c21ec611a
 verify 256 8f53805f14d208512aa7d00f958ca14ef67751f4e4c43e762d5a363d079784e2 "$loader/lib/libvulkan.1.4.350.dylib"
 verify 256 408dade743a358886e76b6bb6e592ed6cb8fa67738c1b6d4b061d817c2cbe90f "$steam_patch"
 verify 256 33811970ce63401baabaffd491ce0ac79c69ce740f0ad37687355041f2bd1844 "$dock_patch"
-verify 256 b28004e117f9ee9d41716bb2d8b6fcda1d03d9f4a72f494706d02c248c17bb70 "$steam_plist"
+verify 256 60ce853901a6297629fdb7681b743c8338b5dd21875b6f69182c1dbf2b427d9c "$steam_plist"
 
 if [ "$(/usr/bin/uname -m)" != arm64 ] || \
    [ "$(/usr/bin/arch -x86_64 /usr/bin/uname -m)" != x86_64 ]; then

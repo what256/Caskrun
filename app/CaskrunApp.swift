@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 import ImageIO
 import Darwin
@@ -886,6 +887,7 @@ final class CaskrunModel: ObservableObject {
     @Published var catalogAttemptLoadError: String?
     @Published var status = EngineStatus(wine_path: nil, bottle_count: 0)
     @Published var message: String?
+    @Published private(set) var isRequestingMicrophoneAccess = false
     @Published var selectedBottleID = ""
     @Published private(set) var bottleResolutions: [String: BottleResolutionStatus] = [:]
     @Published private(set) var loadingBottleResolutions: Set<String> = []
@@ -929,6 +931,30 @@ final class CaskrunModel: ObservableObject {
 
     var hasBundledRuntime: Bool { Self.bundledWinePath != nil }
     var usesBundledRuntime: Bool { Self.bundledWinePath == wineExecutable && hasBundledRuntime }
+
+    func requestMicrophoneAccess() {
+        guard !isQuitting && !isRequestingMicrophoneAccess else { return }
+        let enabled = "Microphone access is enabled for Caskrun. Windows apps may request their own access when you use voice chat or recording."
+        let denied = "Microphone access is disabled for Caskrun. Enable it in System Settings → Privacy & Security → Microphone when you want to use voice chat or recording."
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            message = enabled
+        case .notDetermined:
+            isRequestingMicrophoneAccess = true
+            Task { @MainActor in
+                let granted = await AVCaptureDevice.requestAccess(for: .audio)
+                isRequestingMicrophoneAccess = false
+                guard !isQuitting else { return }
+                message = granted ? enabled : denied
+            }
+        case .denied:
+            message = denied
+        case .restricted:
+            message = "Microphone access is restricted on this Mac. Check its privacy restrictions before using voice chat or recording."
+        @unknown default:
+            message = "Caskrun could not determine microphone access. Check System Settings → Privacy & Security → Microphone."
+        }
+    }
 
     private var coreURL: URL {
         Bundle.main.executableURL!.deletingLastPathComponent().appendingPathComponent("caskrun-core")
@@ -3042,6 +3068,10 @@ struct CaskrunApp: App {
         }
         .defaultSize(width: 1000, height: 680)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Microphone Access…") { model.requestMicrophoneAccess() }
+                    .disabled(model.isQuitting || model.isRequestingMicrophoneAccess)
+            }
             CommandGroup(replacing: .appSettings) {}
             CommandGroup(replacing: .newItem) {
                 Button("Install from file…") { model.chooseInstaller(in: page == .collection ? openBottleID : nil) }
