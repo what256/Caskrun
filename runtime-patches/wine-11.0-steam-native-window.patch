@@ -1,0 +1,454 @@
+--- /dev/null
++++ b/dlls/winemac.drv/caskrun_steam_window.h
+@@ -0,0 +1,161 @@
++/*
++ * Caskrun native controls for Steam's fixed sign-in window.
++ * Original code, distributed under the GNU LGPL version 2.1 or later.
++ */
++#import <AppKit/AppKit.h>
++#import <QuartzCore/QuartzCore.h>
++#include <math.h>
++
++/* This is deliberately a closed policy. A title/size/process change restores
++ * the unmodified client instead of covering an unknown application surface. */
++static BOOL CaskrunSteamLoginHeaderEligible(BOOL helper, NSString *title, NSRect bounds,
++                                          BOOL resizable, BOOL maximized, BOOL fullscreen,
++                                          BOOL disabled, BOOL noForeground, BOOL floating,
++                                          BOOL hasParent)
++{
++    return helper && [title isEqualToString:@"Sign in to Steam"] &&
++           fabs(bounds.size.width - 700.0) < 0.01 && fabs(bounds.size.height - 440.0) < 0.01 &&
++           !resizable && !maximized && !fullscreen && !disabled && !noForeground && !floating && !hasParent;
++}
++
++@protocol CaskrunSteamLoginHeaderActions
++- (void)caskrunCloseSteamLogin:(id)sender;
++- (void)caskrunMinimizeSteamLogin:(id)sender;
++@end
++
++@interface CaskrunSteamLoginHeader : NSView
++{
++    NSButton *closeButton, *minimizeButton, *zoomButton;
++    NSTextField *label;
++}
++@property(readonly, nonatomic) NSButton *closeButton;
++@property(readonly, nonatomic) NSButton *minimizeButton;
++@property(readonly, nonatomic) NSButton *zoomButton;
++@end
++
++@implementation CaskrunSteamLoginHeader
++@synthesize closeButton, minimizeButton, zoomButton;
++- (id)initWithFrame:(NSRect)frame
++{
++    NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable;
++    if (!(self = [super initWithFrame:frame])) return nil;
++    closeButton = [[NSWindow standardWindowButton:NSWindowCloseButton forStyleMask:style] retain];
++    minimizeButton = [[NSWindow standardWindowButton:NSWindowMiniaturizeButton forStyleMask:style] retain];
++    zoomButton = [[NSWindow standardWindowButton:NSWindowZoomButton forStyleMask:style] retain];
++    if (!closeButton || !minimizeButton || !zoomButton) { [self release]; return nil; }
++    [closeButton setAction:@selector(caskrunCloseSteamLogin:)];
++    [minimizeButton setAction:@selector(caskrunMinimizeSteamLogin:)];
++    [zoomButton setEnabled:NO];
++    [closeButton setToolTip:@"Hide Steam"];
++    [minimizeButton setToolTip:@"Minimize"];
++    for (NSButton *button in @[closeButton, minimizeButton, zoomButton]) [self addSubview:button];
++    label = [[NSTextField alloc] initWithFrame:NSZeroRect];
++    [label setStringValue:@"Steam"];
++    [label setEditable:NO];
++    [label setSelectable:NO];
++    [label setBordered:NO];
++    [label setDrawsBackground:NO];
++    [label setAlignment:NSTextAlignmentCenter];
++    [label setFont:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium]];
++    [label setTextColor:[NSColor colorWithCalibratedWhite:0.78 alpha:1.0]];
++    [self addSubview:label];
++    [self setWantsLayer:YES];
++    /* Wine supplies an external client image to the parent layer. macOS 14+
++     * permits drawing outside NSView bounds by default; this native strip must
++     * never fill a client dirty region beyond its own thirty points. */
++    if (@available(macOS 14.0, *)) [self setClipsToBounds:YES];
++    self.layer.masksToBounds = YES;
++    [self setNeedsLayout:YES];
++    return self;
++}
++- (void)dealloc
++{
++    [closeButton release]; [minimizeButton release]; [zoomButton release]; [label release];
++    [super dealloc];
++}
++- (BOOL)isFlipped { return YES; }
++- (BOOL)isOpaque { return YES; }
++- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
++- (BOOL)acceptsFirstResponder { return NO; }
++- (void)viewDidMoveToWindow
++{
++    [super viewDidMoveToWindow];
++    [closeButton setTarget:self.window];
++    [minimizeButton setTarget:self.window];
++}
++- (void)layout
++{
++    CGFloat x = 12.0;
++    [super layout];
++    for (NSButton *button in @[closeButton, minimizeButton, zoomButton])
++    {
++        NSSize size = [button frame].size;
++        [button setFrame:NSMakeRect(x, floor((self.bounds.size.height - size.height) / 2.0), size.width, size.height)];
++        x += size.width + 6.0;
++    }
++    [label setFrame:NSMakeRect(90.0, 6.0, MAX(0.0, self.bounds.size.width - 180.0), 18.0)];
++}
++- (void)drawRect:(NSRect)dirtyRect
++{
++    [[NSColor colorWithCalibratedRed:0.094 green:0.102 blue:0.129 alpha:1.0] setFill];
++    NSRectFill(NSIntersectionRect(dirtyRect, self.bounds));
++}
++- (void)mouseDown:(NSEvent *)event
++{
++    /* AppKit tracks the drag and retains its matching mouse-up. No synthetic
++     * Windows click or client-coordinate translation is involved. */
++    if (self.window && self.window.movable) [self.window performWindowDragWithEvent:event];
++}
++- (void)rightMouseDown:(NSEvent *)event {}
++- (void)otherMouseDown:(NSEvent *)event {}
++- (void)scrollWheel:(NSEvent *)event {}
++@end
++
++/* Button gestures belong to the view that accepted their down. AppKit may
++ * consume the physical up in its tracking loop; the next fresh down clears a
++ * stale gesture for that button. Retaining only the window avoids event/CF
++ * ownership and allows releases outside the header to stay off the Wine queue. */
++@interface CaskrunSteamHeaderMouseRouter : NSObject
++{
++    NSMutableDictionary *owners;
++}
++- (NSWindow *)windowForEvent:(NSEvent *)event beginWindow:(NSWindow *)window;
++- (void)cancel;
++- (void)forgetWindow:(NSWindow *)window;
++@end
++@implementation CaskrunSteamHeaderMouseRouter
++- (id)init
++{
++    if ((self = [super init])) owners = [[NSMutableDictionary alloc] init];
++    return self;
++}
++- (void)dealloc { [owners release]; [super dealloc]; }
++- (void)cancel { [owners removeAllObjects]; }
++- (void)forgetWindow:(NSWindow *)window
++{
++    for (NSNumber *key in [owners allKeys])
++        if ([owners objectForKey:key] == window) [owners removeObjectForKey:key];
++}
++- (NSWindow *)windowForEvent:(NSEvent *)event beginWindow:(NSWindow *)window
++{
++    NSEventType type = event.type;
++    BOOL down = type == NSEventTypeLeftMouseDown || type == NSEventTypeRightMouseDown || type == NSEventTypeOtherMouseDown;
++    BOOL up = type == NSEventTypeLeftMouseUp || type == NSEventTypeRightMouseUp || type == NSEventTypeOtherMouseUp;
++    BOOL drag = type == NSEventTypeLeftMouseDragged || type == NSEventTypeRightMouseDragged || type == NSEventTypeOtherMouseDragged;
++    if (down || up || drag)
++    {
++        NSNumber *key = @(event.buttonNumber);
++        NSWindow *owner;
++        if (down)
++        {
++            [owners removeObjectForKey:key];
++            if (window) [owners setObject:window forKey:key];
++            return window;
++        }
++        owner = [[[owners objectForKey:key] retain] autorelease];
++        if (up) [owners removeObjectForKey:key];
++        return owner;
++    }
++    return (type == NSEventTypeMouseMoved || type == NSEventTypeScrollWheel) ? window : nil;
++}
++@end
+--- a/dlls/winemac.drv/cocoa_app.h
++++ b/dlls/winemac.drv/cocoa_app.h
+@@ -32,6 +32,7 @@
+ 
+ @class WineEventQueue;
+ @class WineWindow;
++@class CaskrunSteamHeaderMouseRouter;
+ @protocol WineClipCursorHandler;
+ 
+ 
+@@ -67,6 +68,7 @@
+     double mouseMoveDeltaX, mouseMoveDeltaY;
+     NSUInteger unmatchedMouseDowns;
+     BOOL caskrunConsumedRightButton;
++    CaskrunSteamHeaderMouseRouter* caskrunSteamHeaderRouter;
+ 
+     NSTimeInterval lastScrollTime;
+     double accumScrollX, accumScrollY;
+@@ -128,6 +130,7 @@
+     - (void) adjustWindowLevels;
+     - (void) updateFullscreenWindows;
+ 
++    - (BOOL) caskrunSteamNativeWindowEnabled;
+     - (BOOL) handleEvent:(NSEvent*)anEvent;
+     - (void) didSendEvent:(NSEvent*)anEvent;
+ 
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -22,6 +22,12 @@
+ #import "cocoa_cursorclipping.h"
+ #import "cocoa_event.h"
+ #import "cocoa_window.h"
++
++@interface CaskrunSteamHeaderMouseRouter : NSObject
++- (NSWindow*)windowForEvent:(NSEvent*)event beginWindow:(NSWindow*)window;
++- (void)cancel;
++- (void)forgetWindow:(NSWindow*)window;
++@end
+ #include <sys/stat.h>
+ #include <stdatomic.h>
+ #include <time.h>
+@@ -369,6 +375,7 @@
+             CFRunLoopSourceInvalidate(requestSource);
+             CFRelease(requestSource);
+         }
++        [caskrunSteamHeaderRouter release];
+         [super dealloc];
+     }
+ 
+@@ -1673,6 +1680,7 @@
+ 
+     - (void) windowWillOrderOut:(WineWindow*)window
+     {
++        [caskrunSteamHeaderRouter forgetWindow:window];
+         if ([windowsBeingDragged containsObject:window])
+         {
+             [self window:window isBeingDragged:NO];
+@@ -2167,6 +2175,43 @@
+         }
+     }
+ 
++    - (BOOL) caskrunSteamNativeWindowEnabled
++    {
++        return CaskrunSteamDockEnabled() && CaskrunIsWindowsProcess(@"steamwebhelper.exe");
++    }
++
++    - (BOOL) caskrunHandleSteamHeaderEvent:(NSEvent*)event
++    {
++        WineWindow *window = (WineWindow*)event.window;
++        WineWindow *beginWindow = nil;
++        if (!mouseCaptureWindow && !self.clippingCursor && ![windowsBeingDragged count] &&
++            [window isKindOfClass:[WineWindow class]] && [window caskrunSteamHeaderContainsEvent:event])
++            beginWindow = window;
++        if (!caskrunSteamHeaderRouter && !beginWindow) return NO;
++        if (!caskrunSteamHeaderRouter) caskrunSteamHeaderRouter = [[CaskrunSteamHeaderMouseRouter alloc] init];
++        WineWindow *owner = (WineWindow*)[caskrunSteamHeaderRouter windowForEvent:event beginWindow:beginWindow];
++        if (!owner) return NO;
++        NSEventType type = event.type;
++        if (type == NSEventTypeLeftMouseDown || type == NSEventTypeRightMouseDown || type == NSEventTypeOtherMouseDown)
++        {
++            macdrv_cancel_native_text_context();
++            unmatchedMouseDowns &= ~NSEventMaskFromType(type);
++            if (type == NSEventTypeRightMouseDown) caskrunConsumedRightButton = NO;
++        }
++        else if (type == NSEventTypeScrollWheel)
++            macdrv_cancel_native_text_context();
++        forceNextMouseMoveAbsolute = TRUE;
++        /* A released/disabled/retitled header's trailing gesture is consumed,
++         * never forwarded into a different Windows control or captured game. */
++        if (!mouseCaptureWindow && !self.clippingCursor && ![windowsBeingDragged count] &&
++            event.window == owner && [owner caskrunSteamHeaderAcceptsEvents])
++        {
++            [[NSCursor arrowCursor] set];
++            [owner sendEvent:event];
++        }
++        return YES;
++    }
++
+     // Returns TRUE if the event was handled and caller should do nothing more
+     // with it.  Returns FALSE if the caller should process it as normal and
+     // then call -didSendEvent:.
+@@ -2175,6 +2220,7 @@
+         BOOL ret = FALSE;
+         NSEventType type = [anEvent type];
+ 
++        if ([self caskrunHandleSteamHeaderEvent:anEvent]) return YES;
+         if ([self caskrunHandleTextContextEvent:anEvent]) return YES;
+         if (type == NSEventTypeFlagsChanged)
+             self.lastFlagsChanged = anEvent;
+@@ -2599,6 +2645,7 @@
+ 
+     - (void)applicationDidResignActive:(NSNotification *)notification
+     {
++        [caskrunSteamHeaderRouter cancel];
+         macdrv_cancel_native_text_context();
+         macdrv_event* event;
+         WineEventQueue* queue;
+--- a/dlls/winemac.drv/cocoa_window.h
++++ b/dlls/winemac.drv/cocoa_window.h
+@@ -23,6 +23,8 @@
+ 
+ 
+ @class WineEventQueue;
++@class CaskrunSteamLoginHeader;
++@class CaskrunSteamHeaderMouseRouter;
+ 
+ 
+ @interface WineWindow : NSPanel <NSWindowDelegate>
+@@ -84,6 +86,7 @@
+     BOOL fakingClose;
+ 
+     CAShapeLayer* contentViewMaskLayer;
++    CaskrunSteamLoginHeader* caskrunSteamHeader;
+ }
+ 
+ @property (retain, readonly, nonatomic) WineEventQueue* queue;
+@@ -113,4 +116,10 @@
+ 
+     - (void) setRetinaMode:(BOOL)mode;
+ 
++    - (BOOL) caskrunSteamHeaderContainsEvent:(NSEvent*)event;
++    - (BOOL) caskrunSteamHeaderAcceptsEvents;
++    - (void) caskrunUpdateSteamHeader;
++    - (void) caskrunCloseSteamLogin:(id)sender;
++    - (void) caskrunMinimizeSteamLogin:(id)sender;
++
+ @end
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -32,6 +32,7 @@
+ #import "cocoa_app.h"
+ #import "cocoa_event.h"
+ #import "cocoa_opengl.h"
++#import "caskrun_steam_window.h"
+ 
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+ 
+@@ -805,6 +806,9 @@
+                 [self invalidateHasGLDescendant];
+         }
+         [super didAddSubview:subview];
++        if (![subview isKindOfClass:[CaskrunSteamLoginHeader class]] &&
++            [self.window isKindOfClass:[WineWindow class]] && self.window.contentView == self)
++            [(WineWindow*)self.window caskrunUpdateSteamHeader];
+     }
+ 
+     - (void) willRemoveSubview:(NSView*)subview
+@@ -1100,7 +1104,70 @@
+         [latentChildWindows release];
+         [latentParentWindow release];
+         [contentViewMaskLayer release];
++        [caskrunSteamHeader release];
+         [super dealloc];
++    }
++
++    - (BOOL) caskrunSteamHeaderEligible
++    {
++        NSView *content = self.contentView;
++        return [content isKindOfClass:[WineContentView class]] && !closing &&
++               CaskrunSteamLoginHeaderEligible([[WineApplicationController sharedController] caskrunSteamNativeWindowEnabled],
++                                              self.title, content.bounds, resizable, maximized, fullscreen,
++                                              disabled, noForeground || preventsAppActivation, floating,
++                                              self.parentWindow != nil || latentParentWindow != nil);
++    }
++
++    - (void) caskrunUpdateSteamHeader
++    {
++        if (![self caskrunSteamHeaderEligible])
++        {
++            [caskrunSteamHeader removeFromSuperview];
++            [caskrunSteamHeader release];
++            caskrunSteamHeader = nil;
++            return;
++        }
++        NSRect bounds = self.contentView.bounds;
++        NSRect headerFrame = NSMakeRect(NSMinX(bounds), self.contentView.isFlipped ? NSMinY(bounds) : NSMaxY(bounds) - 30.0,
++                                       bounds.size.width, 30.0);
++        if (!caskrunSteamHeader)
++        {
++            caskrunSteamHeader = [[CaskrunSteamLoginHeader alloc] initWithFrame:headerFrame];
++            if (!caskrunSteamHeader) return;
++        }
++        if ([self.contentView.subviews lastObject] != caskrunSteamHeader)
++            [self.contentView addSubview:caskrunSteamHeader positioned:NSWindowAbove relativeTo:nil];
++        [caskrunSteamHeader setFrame:headerFrame];
++        [caskrunSteamHeader setNeedsLayout:YES];
++    }
++
++    - (void) setTitle:(NSString*)title
++    {
++        [super setTitle:title];
++        [self caskrunUpdateSteamHeader];
++    }
++
++    - (BOOL) caskrunSteamHeaderAcceptsEvents
++    {
++        [self caskrunUpdateSteamHeader];
++        return caskrunSteamHeader && self.visible && !self.miniaturized;
++    }
++
++    - (BOOL) caskrunSteamHeaderContainsEvent:(NSEvent*)event
++    {
++        if (event.window != self || ![self caskrunSteamHeaderAcceptsEvents]) return NO;
++        NSPoint point = [caskrunSteamHeader convertPoint:event.locationInWindow fromView:nil];
++        return NSMouseInRect(point, caskrunSteamHeader.bounds, caskrunSteamHeader.isFlipped);
++    }
++
++    - (void) caskrunCloseSteamLogin:(id)sender
++    {
++        if ([self caskrunSteamHeaderAcceptsEvents]) [NSApp hide:sender];
++    }
++
++    - (void) caskrunMinimizeSteamLogin:(id)sender
++    {
++        if ([self caskrunSteamHeaderAcceptsEvents]) [self miniaturize:sender];
+     }
+ 
+     - (BOOL) preventResizing
+@@ -1146,6 +1213,7 @@
+ 
+         if (allow_immovable_windows || cursor_clipping_locks_windows)
+             [self setMovable:[self allowsMovingWithMaximized:maximized]];
++        [self caskrunUpdateSteamHeader];
+     }
+ 
+     - (void) adjustFullScreenBehavior:(NSWindowCollectionBehavior)behavior
+@@ -1225,6 +1293,7 @@
+         resizable = wf->resizable;
+         [self adjustFeaturesForState];
+         [self setHasShadow:wf->shadow];
++        [self caskrunUpdateSteamHeader];
+     }
+ 
+     // Indicates if the window would be visible if the app were not hidden.
+@@ -1404,6 +1473,7 @@
+                 [NSApp addWindowsItem:self title:[self title] filename:NO];
+         }
+         [self adjustFullScreenBehavior:behavior];
++        [self caskrunUpdateSteamHeader];
+     }
+ 
+     - (BOOL) addChildWineWindow:(WineWindow*)child assumeVisible:(BOOL)assumeVisible
+@@ -1930,6 +2000,7 @@
+ 
+         wineFrame = frame;
+         roundedWineFrame = self.frame;
++        [self caskrunUpdateSteamHeader];
+         CGFloat junk;
+ #if CGFLOAT_IS_DOUBLE
+         if ((!modf(wineFrame.origin.x, &junk) && !modf(wineFrame.origin.y, &junk) &&
+@@ -2045,6 +2116,7 @@
+                 [[WineApplicationController sharedController] adjustWindowLevels];
+             [self adjustFullScreenBehavior:[self collectionBehavior]];
+         }
++        [self caskrunUpdateSteamHeader];
+     }
+ 
+     - (void) setDisabled:(BOOL)newValue
+@@ -3094,6 +3166,11 @@
+ 
+     - (BOOL)windowShouldClose:(id)sender
+     {
++        if ([self caskrunSteamHeaderAcceptsEvents])
++        {
++            [self caskrunCloseSteamLogin:sender];
++            return NO;
++        }
+         macdrv_event* event = macdrv_create_event(WINDOW_CLOSE_REQUESTED, self);
+         [queue postEvent:event];
+         macdrv_release_event(event);

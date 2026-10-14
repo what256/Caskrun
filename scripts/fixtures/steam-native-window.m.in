@@ -1,0 +1,307 @@
+#import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>
+#include <assert.h>
+#include <math.h>
+#include <signal.h>
+#include <unistd.h>
+#import "caskrun_steam_window.h"
+
+static int checks;
+static NSTask *ownedSession;
+static int contextSerial;
+static void macdrv_cancel_native_text_context(void) { contextSerial++; }
+#define CHECK(value) do { if (!(value)) { fprintf(stderr, "check failed at %d: %s\n", __LINE__, #value); if (ownedSession.running) { [ownedSession terminate]; [ownedSession waitUntilExit]; } exit(1); } checks++; } while (0)
+static NSArray *probeArguments;
+@interface ProbeProcessInfo : NSObject
++ (id)processInfo;
+- (NSArray *)arguments;
+@end
+@implementation ProbeProcessInfo
++ (id)processInfo { static id info; if (!info) info = [[self alloc] init]; return info; }
+- (NSArray *)arguments { return probeArguments; }
+@end
+#define NSProcessInfo ProbeProcessInfo
+/* PROCESS_FUNCTIONS */
+#undef NSProcessInfo
+
+@class WineWindow;
+enum { WINDOW_CLOSE_REQUESTED, WINDOW_MINIMIZE_REQUESTED, APP_QUIT_REQUESTED };
+enum { QUIT_REASON_NONE, QUIT_REASON_LOGOUT, QUIT_REASON_RESTART, QUIT_REASON_SHUTDOWN };
+typedef struct { int type, deliver; struct { int reason; } app_quit_requested; } macdrv_event;
+static macdrv_event *macdrv_create_event(int type, id window) { (void)window; macdrv_event *e=calloc(1,sizeof(*e)); e->type=type; return e; }
+static void macdrv_release_event(macdrv_event *event) { free(event); }
+static BOOL stage_manager_enabled(void) { return NO; }
+@interface WineEventQueue : NSObject
+@property(assign) int closeCount, minimizeCount, quitCount;
+- (void)postEvent:(macdrv_event *)event;
+@end
+@implementation WineEventQueue
+@synthesize closeCount, minimizeCount, quitCount;
+- (void)postEvent:(macdrv_event *)event
+{
+    if (event->type == WINDOW_CLOSE_REQUESTED) self.closeCount++;
+    if (event->type == WINDOW_MINIMIZE_REQUESTED) self.minimizeCount++;
+    if (event->type == APP_QUIT_REQUESTED) self.quitCount++;
+}
+@end
+@interface WineContentView : NSView
+{ BOOL _cachedHasGLDescendantValid, _cachedHasGLDescendant; }
+- (void)invalidateHasGLDescendant;
+@end
+
+@interface WineApplicationController : NSObject <NSApplicationDelegate>
+{
+    WineWindow *mouseCaptureWindow;
+    BOOL clippingCursor, forceNextMouseMoveAbsolute, caskrunConsumedRightButton;
+    NSMutableSet *windowsBeingDragged;
+    NSUInteger unmatchedMouseDowns;
+    CaskrunSteamHeaderMouseRouter *caskrunSteamHeaderRouter;
+    NSLock *eventQueuesLock;
+    NSMutableArray *eventQueues;
+}
+@property(assign) BOOL clippingCursor;
+@property(assign) WineWindow *mouseCaptureWindow;
+@property(readonly) BOOL forceNextMouseMoveAbsolute;
+@property(readonly) NSUInteger unmatchedMouseDowns;
++ (id)sharedController;
+- (BOOL)caskrunSteamNativeWindowEnabled;
+- (void)prepareQueue:(WineEventQueue *)queue;
+- (void)setDragging:(BOOL)dragging;
+- (BOOL)caskrunHandleSteamHeaderEvent:(NSEvent *)event;
+- (void)clearGestures;
+- (void)unminimizeWindowIfNoneVisible;
+- (BOOL)isAnyWineWindowVisible;
+@end
+@interface WineWindow : NSPanel <NSWindowDelegate>
+{
+    BOOL resizable, maximized, fullscreen, disabled, noForeground, preventsAppActivation, floating, closing;
+    NSWindow *latentParentWindow;
+    CaskrunSteamLoginHeader *caskrunSteamHeader;
+    WineEventQueue *queue;
+}
+@property(readonly) CaskrunSteamLoginHeader *header;
+@property(readonly) WineEventQueue *queue;
+@property(assign) NSInteger nativeEvents;
+@property(readonly) BOOL presentsVisibleContent;
+- (void)configure:(NSUInteger)flags;
+- (void)caskrunUpdateSteamHeader;
+- (BOOL)caskrunSteamHeaderAcceptsEvents;
+- (BOOL)caskrunSteamHeaderContainsEvent:(NSEvent *)event;
+- (void)grabDockIconSnapshotFromWindow:(WineWindow *)window force:(BOOL)force;
+- (void)fixtureMiniaturize;
+@end
+@implementation WineContentView
+- (void)invalidateHasGLDescendant { _cachedHasGLDescendantValid=NO; }
+- (BOOL)isFlipped { return YES; }
+/* CONTENT_VIEW_METHODS */
+@end
+@implementation WineApplicationController
+@synthesize clippingCursor, mouseCaptureWindow, forceNextMouseMoveAbsolute, unmatchedMouseDowns;
++ (id)sharedController { static id controller; if (!controller) controller = [[self alloc] init]; return controller; }
+- (id)init
+{
+    if ((self=[super init])) { windowsBeingDragged=[[NSMutableSet alloc] init]; eventQueuesLock=[[NSLock alloc] init]; eventQueues=[[NSMutableArray alloc] init]; }
+    return self;
+}
+- (void)dealloc
+{
+    [windowsBeingDragged release]; [eventQueuesLock release]; [eventQueues release]; [caskrunSteamHeaderRouter release]; [super dealloc];
+}
+- (void)prepareQueue:(WineEventQueue *)queue { [eventQueues addObject:queue]; }
+- (void)setDragging:(BOOL)value { [windowsBeingDragged removeAllObjects]; if(value) [windowsBeingDragged addObject:@1]; }
+- (void)clearGestures { [caskrunSteamHeaderRouter cancel]; }
+- (BOOL)isAnyWineWindowVisible { for (WineWindow *w in NSApp.windows) if ([w isKindOfClass:[WineWindow class]] && w.visible && !w.miniaturized) return YES; return NO; }
+/* CONTROLLER_METHODS */
+@end
+@implementation WineWindow
+@synthesize nativeEvents;
+- (id)init
+{
+    if ((self=[super initWithContentRect:NSMakeRect(120,180,700,440) styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO]))
+    {
+        [self setReleasedWhenClosed:NO]; [self setHidesOnDeactivate:NO];
+        self.contentView=[[[WineContentView alloc] initWithFrame:NSMakeRect(0,0,700,440)] autorelease];
+        queue=[[WineEventQueue alloc] init]; self.delegate=self;
+    }
+    return self;
+}
+- (void)dealloc { [queue release]; [caskrunSteamHeader release]; [super dealloc]; }
+- (CaskrunSteamLoginHeader *)header { return caskrunSteamHeader; }
+- (WineEventQueue *)queue { return queue; }
+- (BOOL)presentsVisibleContent { return !NSIsEmptyRect(self.contentView.bounds); }
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return [self canBecomeKeyWindow]; }
+- (void)configure:(NSUInteger)flags
+{
+    resizable=flags&1; maximized=flags&2; fullscreen=flags&4; disabled=flags&8; noForeground=flags&16;
+    floating=flags&32; closing=flags&64; preventsAppActivation=flags&128;
+    [self caskrunUpdateSteamHeader];
+}
+- (void)sendEvent:(NSEvent *)event { self.nativeEvents++; [super sendEvent:event]; }
+- (void)grabDockIconSnapshotFromWindow:(WineWindow *)window force:(BOOL)force { (void)window; (void)force; }
+// Model only the existing backend's acknowledgement after WINDOW_MINIMIZE_REQUESTED.
+- (void)fixtureMiniaturize { [self setStyleMask:self.styleMask|NSWindowStyleMaskMiniaturizable]; [super miniaturize:nil]; }
+/* WINDOW_METHODS */
+@end
+
+/* The real AppKit Quit action must reach the original producer. The fixture
+ * vetoes only its own exit after recording the original terminate-later reply. */
+@interface ProbeQuitDelegate : NSObject <NSApplicationDelegate>
+@property(assign) NSApplicationTerminateReply reply;
+@end
+@implementation ProbeQuitDelegate
+@synthesize reply;
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)app
+{
+    self.reply=[[WineApplicationController sharedController] applicationShouldTerminate:app];
+    return NSTerminateCancel;
+}
+@end
+
+static void settle(void)
+{
+    NSDate *end=[NSDate dateWithTimeIntervalSinceNow:0.2];
+    while ([[NSDate date] compare:end] == NSOrderedAscending)
+    {
+        NSEvent *event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:end inMode:NSDefaultRunLoopMode dequeue:YES];
+        if(event) [NSApp sendEvent:event];
+    }
+}
+static NSEvent *mouse(NSEventType type, WineWindow *window, NSPoint point)
+{
+    return [NSEvent mouseEventWithType:type location:point modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
+                         windowNumber:window.windowNumber context:nil eventNumber:1 clickCount:1 pressure:0];
+}
+static NSPoint buttonPoint(WineWindow *window, NSButton *button)
+{
+    return [button convertPoint:NSMakePoint(NSMidX(button.bounds),NSMidY(button.bounds)) toView:nil];
+}
+static void arguments(NSArray *values) { probeArguments=values; }
+int main(int argc, char **argv)
+{
+    @autoreleasepool
+    {
+        for (int i=1;i+1<argc;i++)
+        {
+            if (!strcmp(argv[i],"--report-file")) { FILE *report=fopen(argv[i+1],"w"); if(report) { dup2(fileno(report),STDOUT_FILENO); dup2(fileno(report),STDERR_FILENO); setbuf(stdout,NULL); setbuf(stderr,NULL); } }
+            if (!strcmp(argv[i],"--pid-file")) { FILE *pid=fopen(argv[i+1],"w"); if(pid) { fprintf(pid,"%d\n",getpid()); fclose(pid); } }
+        }
+        setpgid(0,0); // Isolate this fixture and its harmless session process for cleanup.
+        BOOL headless=argc>1 && !strcmp(argv[1],"--headless");
+        [NSApplication sharedApplication];
+        [NSApp setActivationPolicy:headless ? NSApplicationActivationPolicyProhibited : NSApplicationActivationPolicyRegular];
+        WineApplicationController *controller=[WineApplicationController sharedController];
+        [NSApp setDelegate:controller];
+        setenv("CASKRUN_STEAM_MODE","1",1);
+        arguments(@[@"wine", @"C:\\Steam\\steamwebhelper.exe"]);
+        CHECK([controller caskrunSteamNativeWindowEnabled]);
+        for (NSArray *args in @[@[@"wine",@"C:\\Steam\\steam.exe"],@[@"game.exe"],@[@"helper.exe",@"steamwebhelper.exe"],@[]])
+        { arguments(args); CHECK(![controller caskrunSteamNativeWindowEnabled]); }
+        arguments(@[@"steamwebhelper.exe"]); CHECK([controller caskrunSteamNativeWindowEnabled]);
+        setenv("CASKRUN_STEAM_MODE","0",1); CHECK(![controller caskrunSteamNativeWindowEnabled]);
+        setenv("CASKRUN_STEAM_MODE","1",1);
+        CHECK(CaskrunSteamLoginHeaderEligible(YES,@"Sign in to Steam",NSMakeRect(0,0,700,440),NO,NO,NO,NO,NO,NO,NO));
+        CHECK(!CaskrunSteamLoginHeaderEligible(NO,@"Sign in to Steam",NSMakeRect(0,0,700,440),NO,NO,NO,NO,NO,NO,NO));
+        for (int bit=0;bit<7;bit++)
+            CHECK(!CaskrunSteamLoginHeaderEligible(YES,@"Sign in to Steam",NSMakeRect(0,0,700,440),bit==0,bit==1,bit==2,bit==3,bit==4,bit==5,bit==6));
+        for (NSString *title in @[@"Steam",@"Sign in to steam",@"Game",@""])
+            CHECK(!CaskrunSteamLoginHeaderEligible(YES,title,NSMakeRect(0,0,700,440),NO,NO,NO,NO,NO,NO,NO));
+        for (NSValue *size in @[[NSValue valueWithSize:NSMakeSize(700,441)],[NSValue valueWithSize:NSMakeSize(701,440)],[NSValue valueWithSize:NSMakeSize(1400,880)],[NSValue valueWithSize:NSMakeSize(0,0)]])
+            CHECK(!CaskrunSteamLoginHeaderEligible(YES,@"Sign in to Steam",NSMakeRect(0,0,size.sizeValue.width,size.sizeValue.height),NO,NO,NO,NO,NO,NO,NO));
+        WineWindow *window=[[WineWindow alloc] init];
+        NSRect originalFrame=window.frame, originalBounds=window.contentView.bounds;
+        NSView *originalContent=window.contentView;
+        [window setTitle:@"Sign in to Steam"];
+        CHECK(window.header!=nil); CHECK(window.contentView==originalContent);
+        CHECK(NSEqualRects(window.frame,originalFrame)); CHECK(NSEqualRects(window.contentView.bounds,originalBounds));
+        NSView *renderer=[[[NSView alloc] initWithFrame:originalBounds] autorelease];
+        [window.contentView addSubview:renderer];
+        CHECK(window.contentView.subviews.lastObject==window.header); CHECK(NSEqualRects(window.contentView.bounds,originalBounds));
+        CHECK(window.header.frame.size.height==30); CHECK(window.header.closeButton!=nil); CHECK(window.header.minimizeButton!=nil); CHECK(!window.header.zoomButton.enabled);
+        [window.contentView layoutSubtreeIfNeeded];
+        CHECK(window.header.closeButton.target==window); CHECK(window.header.minimizeButton.target==window);
+        for(int flag=0;flag<8;flag++) { [window configure:1u<<flag]; CHECK(window.header==nil); [window configure:0]; CHECK(window.header!=nil); }
+        [window setTitle:@"Steam"]; CHECK(window.header==nil); [window setTitle:@"Sign in to Steam"]; CHECK(window.header!=nil);
+        [window.contentView setFrameSize:NSMakeSize(701,440)]; [window caskrunUpdateSteamHeader]; CHECK(window.header==nil);
+        [window.contentView setFrameSize:NSMakeSize(700,440)]; [window caskrunUpdateSteamHeader]; CHECK(window.header!=nil);
+        WineWindow *other=[[WineWindow alloc] init]; [other setTitle:@"Game"];
+        [other addChildWindow:window ordered:NSWindowAbove]; [window caskrunUpdateSteamHeader]; CHECK(window.header==nil);
+        [other removeChildWindow:window]; [window caskrunUpdateSteamHeader]; CHECK(window.header!=nil);
+        arguments(@[@"game.exe"]); [window caskrunUpdateSteamHeader]; CHECK(window.header==nil);
+        arguments(@[@"steamwebhelper.exe"]); [window caskrunUpdateSteamHeader]; CHECK(window.header!=nil);
+        // Test the actual shared router with application-owned NSEvents only.
+        CaskrunSteamHeaderMouseRouter *router=[[CaskrunSteamHeaderMouseRouter alloc] init];
+        NSEvent *down=mouse(NSEventTypeLeftMouseDown,window,NSMakePoint(20,430));
+        NSEvent *drag=mouse(NSEventTypeLeftMouseDragged,other,NSMakePoint(100,100));
+        NSEvent *up=mouse(NSEventTypeLeftMouseUp,other,NSMakePoint(100,100));
+        CHECK([router windowForEvent:down beginWindow:window]==window);
+        CHECK([router windowForEvent:drag beginWindow:nil]==window);
+        CHECK([router windowForEvent:up beginWindow:nil]==window);
+        CHECK([router windowForEvent:up beginWindow:nil]==nil);
+        CHECK([router windowForEvent:down beginWindow:window]==window);
+        CHECK([router windowForEvent:down beginWindow:nil]==nil);
+        CHECK([router windowForEvent:drag beginWindow:nil]==nil);
+        CHECK([router windowForEvent:down beginWindow:window]==window); [router forgetWindow:other];
+        CHECK([router windowForEvent:drag beginWindow:nil]==window); [router forgetWindow:window];
+        CHECK([router windowForEvent:drag beginWindow:nil]==nil);
+        CHECK([router windowForEvent:down beginWindow:window]==window); [router cancel];
+        CHECK([router windowForEvent:up beginWindow:nil]==nil); [router release];
+        if (!headless)
+        {
+            dispatch_async(dispatch_get_main_queue(), ^{
+            [NSApp activateIgnoringOtherApps:YES]; [window makeKeyAndOrderFront:nil]; [window makeMainWindow]; settle();
+            CHECK(window.visible); CHECK([window caskrunSteamHeaderAcceptsEvents]);
+            NSPoint closePoint=buttonPoint(window,window.header.closeButton);
+            CHECK([window caskrunSteamHeaderContainsEvent:mouse(NSEventTypeLeftMouseDown,window,closePoint)]);
+            NSEvent *content=mouse(NSEventTypeLeftMouseDown,window,NSMakePoint(120,120));
+            CHECK(![controller caskrunHandleSteamHeaderEvent:content]);
+            NSEvent *headerMove=mouse(NSEventTypeMouseMoved,window,NSMakePoint(300,430));
+            CHECK([controller caskrunHandleSteamHeaderEvent:headerMove]); CHECK(controller.forceNextMouseMoveAbsolute);
+            controller.mouseCaptureWindow=other; CHECK(![controller caskrunHandleSteamHeaderEvent:headerMove]); controller.mouseCaptureWindow=nil;
+            controller.clippingCursor=YES; CHECK(![controller caskrunHandleSteamHeaderEvent:headerMove]); controller.clippingCursor=NO;
+            [controller setDragging:YES]; CHECK(![controller caskrunHandleSteamHeaderEvent:headerMove]); [controller setDragging:NO];
+            // Cancel a real standard button by dragging/releasing outside it.
+            int closes=window.queue.closeCount;
+            [NSApp postEvent:mouse(NSEventTypeLeftMouseDragged,window,NSMakePoint(300,400)) atStart:NO];
+            [NSApp postEvent:mouse(NSEventTypeLeftMouseUp,window,NSMakePoint(300,400)) atStart:NO];
+            CHECK([controller caskrunHandleSteamHeaderEvent:mouse(NSEventTypeLeftMouseDown,window,closePoint)]);
+            CHECK(!NSApp.hidden); CHECK(window.queue.closeCount==closes); CHECK(window.visible);
+            CHECK(contextSerial>0);
+            [controller clearGestures];
+            // Foreign trailing release cannot reach either application's content.
+            NSEvent *rightDown=mouse(NSEventTypeRightMouseDown,window,NSMakePoint(300,430));
+            int pendingSerial=contextSerial;
+            CHECK([controller caskrunHandleSteamHeaderEvent:rightDown]);
+            CHECK(contextSerial!=pendingSerial); // Same-root header interaction invalidates a pending text-menu result.
+            NSInteger nativeBefore=window.nativeEvents;
+            CHECK([controller caskrunHandleSteamHeaderEvent:mouse(NSEventTypeRightMouseUp,other,NSMakePoint(20,430))]);
+            CHECK(window.nativeEvents==nativeBefore);
+            // An independently running, harmless process represents a retained session.
+            NSTask *session=[[NSTask alloc] init]; ownedSession=session; session.launchPath=@"/bin/sleep"; session.arguments=@[@"30"]; [session launch];
+            [NSApp postEvent:mouse(NSEventTypeLeftMouseUp,window,closePoint) atStart:NO];
+            CHECK([controller caskrunHandleSteamHeaderEvent:mouse(NSEventTypeLeftMouseDown,window,closePoint)]); settle();
+            CHECK(NSApp.hidden); CHECK(window.queue.closeCount==closes); CHECK(window.queue.quitCount==0); CHECK(session.running);
+            CHECK(NSEqualRects(window.frame,originalFrame)); CHECK(NSEqualRects(window.contentView.bounds,originalBounds));
+            // NSApplication unhiding and the production Dock-reopen delegate retain the same window.
+            [NSApp unhide:nil]; [controller applicationShouldHandleReopen:NSApp hasVisibleWindows:NO]; settle();
+            CHECK(!NSApp.hidden); CHECK(window.visible); CHECK(window.header!=nil); CHECK(session.running);
+            [window.header.minimizeButton performClick:nil]; CHECK(window.queue.minimizeCount==1); CHECK(session.running);
+            [window fixtureMiniaturize]; settle(); CHECK(window.miniaturized);
+            [controller applicationShouldHandleReopen:NSApp hasVisibleWindows:NO]; settle(); CHECK(!window.miniaturized); CHECK(window.visible);
+            [controller prepareQueue:window.queue];
+            ProbeQuitDelegate *quitDelegate=[[[ProbeQuitDelegate alloc] init] autorelease];
+            [NSApp setDelegate:quitDelegate]; [NSApp terminate:nil];
+            CHECK(window.queue.quitCount==1); CHECK(quitDelegate.reply==NSTerminateLater);
+            [NSApp setDelegate:controller];
+            CHECK(session.running); [session terminate]; [session waitUntilExit]; [session release]; ownedSession=nil;
+            CHECK(window.queue.closeCount==closes);
+            [NSApp stop:nil];
+            [NSApp postEvent:[NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0] atStart:NO];
+            });
+            [NSApp run];
+        }
+        [NSApp setDelegate:nil]; [other close]; [other release]; [window close]; [window release];
+        printf("%d %s AppKit native Steam header checks passed\n",checks,headless?"headless":"interactive");
+    }
+    return 0;
+}

@@ -12,16 +12,18 @@
 static WNDPROC edit_proc;
 static HWND window, fields[2], status;
 static DWORD selective_until;
+static BOOL delay_next_menu, menu_proof_recorded;
 static HANDLE log_file = INVALID_HANDLE_VALUE;
 static unsigned int sequence;
+static DWORD started;
 
 static void record(const char *event, int field)
 {
     char line[256];
     DWORD written;
     int count = snprintf(line, sizeof(line),
-        "{\"sequence\":%u,\"event\":\"%s\",\"field\":%d,\"control\":%d,\"shift\":%d,\"alt\":%d,\"win\":%d}\n",
-        ++sequence, event, field, !!(GetKeyState(VK_CONTROL) & 0x8000),
+        "{\"sequence\":%u,\"elapsed_ms\":%lu,\"event\":\"%s\",\"field\":%d,\"control\":%d,\"shift\":%d,\"alt\":%d,\"win\":%d}\n",
+        ++sequence, (unsigned long)(GetTickCount() - started), event, field, !!(GetKeyState(VK_CONTROL) & 0x8000),
         !!(GetKeyState(VK_SHIFT) & 0x8000), !!(GetKeyState(VK_MENU) & 0x8000),
         !!((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000));
     if (log_file != INVALID_HANDLE_VALUE && count > 0)
@@ -45,6 +47,21 @@ static LRESULT CALLBACK text_proc(HWND control, UINT message, WPARAM wparam, LPA
     int field = control == fields[0] ? 1 : 2;
     switch (message)
     {
+    case WM_ENTERIDLE:
+    {
+        if (menu_proof_recorded) return 0;
+        menu_proof_recorded = TRUE;
+        GUITHREADINFO info = {0};
+        MENUBARINFO menu = {0};
+        info.cbSize = sizeof(info); menu.cbSize = sizeof(menu);
+        BOOL got = GetGUIThreadInfo(GetCurrentThreadId(), &info);
+        record(got && (info.flags & GUI_INMENUMODE) ? "proof_tracking" : "proof_no_tracking", field);
+        record(got && GetAncestor(info.hwndFocus, GA_ROOT) == window ? "proof_focus_root" : "proof_focus_changed", field);
+        record(got && GetAncestor(info.hwndMenuOwner, GA_ROOTOWNER) == window ? "proof_owned_root" : "proof_wrong_owner_root", field);
+        record(got && GetWindowThreadProcessId(info.hwndMenuOwner, NULL) == GetCurrentThreadId() ? "proof_owner_thread" : "proof_wrong_owner_thread", field);
+        record(got && GetMenuBarInfo(info.hwndMenuOwner, OBJID_CLIENT, 0, &menu) && menu.fBarFocused ? "proof_global_top" : "proof_wrong_global_top", field);
+        return 0;
+    }
     case WM_SETCURSOR:
         SetCursor(LoadCursorW(NULL, IDC_IBEAM));
         return TRUE;
@@ -53,14 +70,40 @@ static LRESULT CALLBACK text_proc(HWND control, UINT message, WPARAM wparam, LPA
         record("right_down", field);
         return 0;
     case WM_RBUTTONUP:
+    {
+        HMENU menu;
+        POINT point;
+        DWORD before_start, before_end, after_start, after_end;
+        UINT choice;
         record("right_up", field);
-        return 0; /* model Steam's text surface without a Windows popup */
+        menu_proof_recorded = FALSE;
+        SendMessageW(control, EM_GETSEL, (WPARAM)&before_start, (LPARAM)&before_end);
+        if (delay_next_menu) { delay_next_menu = FALSE; record("delayed_menu", field); Sleep(700); }
+        GetCursorPos(&point);
+        menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING, 101, L"Windows synthetic Paste");
+        AppendMenuW(menu, MF_STRING, 102, L"Windows original menu");
+        record("windows_menu_begin", field);
+        choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                point.x, point.y, 0, control, NULL);
+        DestroyMenu(menu);
+        SendMessageW(control, EM_GETSEL, (WPARAM)&after_start, (LPARAM)&after_end);
+        record(choice ? "windows_menu_selected" : "windows_menu_canceled", field);
+        record(before_start == after_start && before_end == after_end ? "selection_preserved" : "selection_changed", field);
+        if (choice == 101)
+        {
+            SetWindowTextW(control, L"Synthetic paste marker");
+            record("original_synthetic_paste", field);
+        }
+        return 0;
+    }
     case WM_CONTEXTMENU:
     case WM_COPY:
     case WM_CUT:
     case WM_PASTE:
         return 0;
     case WM_KEYDOWN:
+        if (wparam == VK_F4) { delay_next_menu = TRUE; record("delay_armed", field); return 0; }
         if (wparam == VK_F2)
         {
             selective_start();
@@ -87,6 +130,13 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     switch (message)
     {
     case WM_COMMAND:
+        if (LOWORD(wparam) == 11)
+        {
+            SetFocus(fields[1]);
+            SendMessageW(fields[1], EM_SETSEL, 2, 8);
+            record("second_selection_prepared", 2);
+            return 0;
+        }
         if (LOWORD(wparam) == 10)
         {
             SetFocus(fields[0]);
@@ -112,6 +162,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, char *command_line, i
     WNDCLASSW klass = {0};
     MSG message;
     (void)previous; (void)command_line; (void)show;
+    started = GetTickCount();
     log_file = CreateFileW(L"C:\\native-text-fixture.jsonl", GENERIC_WRITE,
                           FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     klass.lpfnWndProc = window_proc;
@@ -136,7 +187,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, char *command_line, i
     SetWindowLongPtrW(fields[1], GWLP_WNDPROC, (LONG_PTR)text_proc);
     CreateWindowW(L"BUTTON", L"Focus first field", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                   24, 126, 170, 32, window, (HMENU)10, instance, NULL);
-    status = CreateWindowW(L"STATIC", L"Right-click second field and choose native Paste. F2 tests selective key polling.",
+    CreateWindowW(L"BUTTON", L"Select second field", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                  314, 126, 170, 32, window, (HMENU)11, instance, NULL);
+    status = CreateWindowW(L"STATIC", L"Right-click: replace Windows menu. F2: key-only refusal; F4: delayed original menu.",
                             WS_CHILD | WS_VISIBLE, 24, 176, 560, 44, window, NULL, instance, NULL);
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);

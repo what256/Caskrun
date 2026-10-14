@@ -1,0 +1,79 @@
+#import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
+#import "caskrun_steam_window.h"
+#include <assert.h>
+@interface WineWindow:NSPanel
+@property(assign)BOOL closing,usePerPixelAlpha,shapeChangedSinceLastDraw;
+- (void)windowDidDrawContent;
+- (void)caskrunCloseSteamLogin:(id)sender;
+- (void)caskrunMinimizeSteamLogin:(id)sender;
+@end
+@implementation WineWindow
+@synthesize closing,usePerPixelAlpha,shapeChangedSinceLastDraw;
+- (void)windowDidDrawContent {}
+- (void)caskrunCloseSteamLogin:(id)sender {(void)sender;}
+- (void)caskrunMinimizeSteamLogin:(id)sender {(void)sender;}
+@end
+@interface WineContentView:NSView
+{ CGImageRef colorImage,shapeImage;CGRect surfaceRect; }
+- (void)setColorImage:(CGImageRef)image;
+- (void)setSurfaceRect:(CGRect)rect;
+@end
+@implementation WineContentView
+- (BOOL)isFlipped {return YES;}
+- (id)initWithFrame:(NSRect)frame {if((self=[super initWithFrame:frame])){[self setLayerContentsPlacement:NSViewLayerContentsPlacementTopLeft];[self setWantsLayer:YES];self.layer.contentsScale=1;[self setAutoresizesSubviews:NO];}return self;}
+- (void)dealloc {CGImageRelease(colorImage);CGImageRelease(shapeImage);[super dealloc];}
+/* VIEW_METHODS */
+@end
+static unsigned char baseline[4];
+static int checked;
+static void checkComposed(const char *phase, NSView *view, BOOL initial)
+{
+    CGColorSpaceRef space=CGColorSpaceCreateDeviceRGB();
+    CGContextRef context=CGBitmapContextCreate(NULL,700,440,8,700*4,space,(CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(space);
+    [view.layer renderInContext:context];
+    unsigned char *bytes=CGBitmapContextGetData(context);
+    size_t offset=(200*700+350)*4;
+    if (initial) memcpy(baseline,bytes+offset,4);
+    else if (memcmp(baseline,bytes+offset,4))
+    {
+        fprintf(stderr,"%s composed client pixel changed: %u,%u,%u,%u\n",phase,bytes[offset],bytes[offset+1],bytes[offset+2],bytes[offset+3]);
+        abort();
+    }
+    checked++;
+    CGContextRelease(context);
+}
+static void checkFrame(NSView *root, CaskrunSteamLoginHeader *header)
+{
+    assert(NSEqualSizes(root.bounds.size,NSMakeSize(700,440)));
+    assert(NSEqualSizes(root.layer.bounds.size,NSMakeSize(700,440)));
+    assert(NSEqualSizes(header.bounds.size,NSMakeSize(700,30)));
+    assert(NSEqualSizes(header.layer.bounds.size,NSMakeSize(700,30)));
+    assert(header.layer != root.layer && header.layer.masksToBounds);
+    checked+=5;
+}
+int main(void)
+{
+ @autoreleasepool {
+  assert(CaskrunSteamLoginHeaderEligible(YES,@"Sign in to Steam",NSMakeRect(0,0,700,440),NO,NO,NO,NO,NO,NO,NO));
+  [NSApplication sharedApplication];[NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
+  WineWindow *window=[[WineWindow alloc]initWithContentRect:NSMakeRect(-10000,-10000,700,440)styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];[window setReleasedWhenClosed:NO];
+  WineContentView *root=[[WineContentView alloc]initWithFrame:NSMakeRect(0,0,700,440)];window.contentView=root;
+  CGColorSpaceRef space=CGColorSpaceCreateDeviceRGB();CGContextRef dc=CGBitmapContextCreate(NULL,700,440,8,700*4,space,(CGBitmapInfo)kCGImageAlphaPremultipliedLast);CGColorSpaceRelease(space);CGContextSetRGBFillColor(dc,0.1,0.3,0.7,1);CGContextFillRect(dc,CGRectMake(0,0,700,440));CGImageRef blue=CGBitmapContextCreateImage(dc);
+  [root setColorImage:blue];[root setSurfaceRect:CGRectMake(0,0,700,440)];[root updateLayer];checkComposed("before",root,YES);
+  CaskrunSteamLoginHeader *header=[[CaskrunSteamLoginHeader alloc]initWithFrame:NSMakeRect(0,0,700,30)];[root addSubview:header positioned:NSWindowAbove relativeTo:nil];[root layoutSubtreeIfNeeded];[window display];[CATransaction flush];checkFrame(root,header);checkComposed("attached",root,NO);
+  [root updateLayer];checkComposed("repaint",root,NO);
+  [header removeFromSuperview];[window display];[CATransaction flush];[root updateLayer];checkComposed("removed",root,NO);
+  [window close];[header release];[root release];[window release];
+  WineWindow *earlyWindow=[[WineWindow alloc]initWithContentRect:NSMakeRect(-10000,-10000,700,440)styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];[earlyWindow setReleasedWhenClosed:NO];
+  WineContentView *earlyRoot=[[WineContentView alloc]initWithFrame:NSMakeRect(0,0,700,440)];earlyWindow.contentView=earlyRoot;
+  CaskrunSteamLoginHeader *earlyHeader=[[CaskrunSteamLoginHeader alloc]initWithFrame:NSMakeRect(0,0,700,30)];[earlyRoot addSubview:earlyHeader positioned:NSWindowAbove relativeTo:nil];
+  [earlyWindow orderFront:nil];[earlyWindow display];[CATransaction flush];checkFrame(earlyRoot,earlyHeader);
+  [earlyRoot setColorImage:blue];[earlyRoot setSurfaceRect:CGRectMake(0,0,700,440)];[earlyRoot setNeedsDisplayInRect:NSMakeRect(0,0,700,440)];[earlyWindow display];[CATransaction flush];checkComposed("header-before-first-image",earlyRoot,NO);
+  [earlyRoot updateLayer];checkComposed("header-before-forced-image",earlyRoot,NO);
+  [earlyWindow close];[earlyHeader release];[earlyRoot release];[earlyWindow release];CGImageRelease(blue);CGContextRelease(dc);
+ }
+ printf("%d exact WineContentView composition checks passed\n",checked);
+ return 0;
+}

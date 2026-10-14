@@ -705,13 +705,32 @@ mod tests {
         assert!(runtime_migration::is_reviewed_switchable_runtime(
             runtime_migration::NATIVE_TEXT_EDITING_WINE_11_IDENTITY
         ));
+        assert!(runtime_migration::is_reviewed_switchable_runtime(
+            runtime_migration::REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY
+        ));
+        assert!(runtime_migration::is_reviewed_switchable_runtime(
+            runtime_migration::BOUNDED_NATIVE_UI_WINE_11_IDENTITY
+        ));
         for identity in [
             "wine-11.0",
             "caskrun-switchable-graphics-v1",
             "sha256:unknown",
             "sha256:4d82b50b96eb5995a78d848fb67166979577cd98e36d7db72fbb08636f8f44c0",
+            // Rebuilt prototypes were rejected before installation. Their
+            // component receipts cannot promote them into approved engines.
+            "sha256:0bb25bb7ae0bcc82bd2db993845e82d8d3cc047422f6acc6040e12587a775f35",
+            "sha256:5be503a788c8c00e376904c77f4de0012c8faf508338a9a8d9720bd16f5375aa",
         ] {
             assert!(!runtime_migration::is_reviewed_switchable_runtime(identity));
+        }
+        for approved in [
+            runtime_migration::REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+            runtime_migration::BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
+        ] {
+            let mut altered = approved.to_owned();
+            let original = altered.pop().unwrap();
+            altered.push(if original == '0' { '1' } else { '0' });
+            assert!(!runtime_migration::is_reviewed_switchable_runtime(&altered));
         }
     }
 

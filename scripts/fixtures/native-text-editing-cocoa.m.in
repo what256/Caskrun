@@ -5,21 +5,39 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <math.h>
+#include <stdatomic.h>
+#include <time.h>
+static NSMutableArray *scheduled;
+static void fixtureSchedule(dispatch_block_t block){[scheduled addObject:[[block copy] autorelease]];}
+static void fixtureStep(void){assert(scheduled.count);dispatch_block_t block=[[scheduled objectAtIndex:0] retain];[scheduled removeObjectAtIndex:0];block();[block release];}
+#define dispatch_after(when,queue,block) fixtureSchedule(block)
 #define CGEventGetLocation(event) CGPointMake(140,80)
 static CGPoint cgpoint_win_from_mac(CGPoint point){return point;}
 
 typedef void *macdrv_window;
-typedef struct {int type;macdrv_window window;struct{unsigned int vkey;unsigned long time_ms;void *foreground;bool context_menu;}native_text_edit;struct{int button;bool pressed;int x,y;unsigned long time_ms;}mouse_button;}macdrv_event;
-enum {MOUSE_BUTTON=10,NATIVE_TEXT_EDIT_ACTION=33};
-static BOOL steam_enabled,helper_process,native_enabled,missing_event;
+enum {QUERY_NATIVE_TEXT_CONTEXT=8};
+enum {NATIVE_TEXT_CONTEXT_PENDING,NATIVE_TEXT_CONTEXT_DISMISS_REQUESTED,NATIVE_TEXT_CONTEXT_READY,NATIVE_TEXT_CONTEXT_REFUSED};
+typedef struct {int refs,type;macdrv_window window;bool status,done;struct{void *foreground;unsigned int serial,phase;bool menu_seen,slot_owned;}native_text_context;}macdrv_query;
+typedef struct {int type;macdrv_window window;struct{unsigned int vkey;unsigned long time_ms;void *foreground;bool context_menu;}native_text_edit;struct{int button;bool pressed;int x,y;unsigned long time_ms;}mouse_button;struct{macdrv_query *query;}query_event;}macdrv_event;
+enum {MOUSE_BUTTON=10,NATIVE_TEXT_EDIT_ACTION=33,QUERY_EVENT_NO_PREEMPT_WAIT=15};
+static BOOL steam_enabled,helper_process,native_enabled,missing_event,missing_clock;
+static int fixtureClock(clockid_t clock,struct timespec *now){return missing_clock?-1:clock_gettime(clock,now);}
+#define clock_gettime(clock,now) fixtureClock(clock,now)
 static BOOL CaskrunSteamDockEnabled(void){return steam_enabled;}
 static BOOL CaskrunIsWindowsProcess(NSString *name){return helper_process && [name isEqualToString:@"steamwebhelper.exe"];}
 static BOOL CaskrunNativeDockEnabled(void){return native_enabled;}
-static int posted,popup_count,button_count,field_focus,action_focus;
+static int posted,popup_count,button_count,field_focus,action_focus,windows_popup,query_mode,query_count,query_refs;
 static BOOL buttons[2];
 static unsigned int last_action;
 static macdrv_event *macdrv_create_event(int type,id window){macdrv_event *e=calloc(1,sizeof(*e));e->type=type;e->window=(void*)window;return e;}
-static void macdrv_release_event(macdrv_event *event){free(event);}
+static macdrv_query *macdrv_create_query(void);
+@@CONTEXT_GLOBALS@@
+static macdrv_query *late_queries[4];
+static unsigned int late_count;
+static macdrv_query *macdrv_create_query(void){macdrv_query*q=calloc(1,sizeof(*q));q->refs=1;query_refs++;return q;}
+static macdrv_query *macdrv_retain_query(macdrv_query*q){q->refs++;return q;}
+static void macdrv_release_query(macdrv_query*q){if(--q->refs==0){if(q->native_text_context.slot_owned)macdrv_release_native_text_context_slot();[(id)q->window release];free(q);query_refs--;}}
+static void macdrv_release_event(macdrv_event *event){if(event->type==QUERY_EVENT_NO_PREEMPT_WAIT)macdrv_release_query(event->query_event.query);free(event);}
 static void *macdrv_get_window_hwnd(macdrv_window window){(void)window;return (void*)321;}
 @interface MacDrvEvent:NSObject { @public macdrv_event *event; }
 @end
@@ -39,7 +57,18 @@ static void *macdrv_get_window_hwnd(macdrv_window window){(void)window;return (v
 -(NSUInteger)fixtureEventCount{return events.count;}
 -(void)fixtureClear{for(MacDrvEvent *queued in events) free(queued->event);[events removeAllObjects];}
 @@QUEUE_PEEK@@
--(void)postEvent:(macdrv_event*)event{if(event->type==MOUSE_BUTTON){assert(button_count<2);assert(event->mouse_button.button==1);assert(event->mouse_button.x==140&&event->mouse_button.y==80);buttons[button_count++]=event->mouse_button.pressed;if(event->mouse_button.pressed)field_focus=event->mouse_button.x>=100?2:1;return;}assert(event->type==33);assert(event->native_text_edit.foreground==(void*)321);last_action=event->native_text_edit.vkey;action_focus=field_focus;posted++;}
+-(void)postEvent:(macdrv_event*)event{
+ if(event->type==QUERY_EVENT_NO_PREEMPT_WAIT){
+  macdrv_query*q=event->query_event.query;assert(q->type==8&&q->native_text_context.foreground==(void*)321);query_count++;
+  q->status=true;q->done=true;
+  if(query_mode==1)q->native_text_context.phase=NATIVE_TEXT_CONTEXT_PENDING;
+  else if(query_mode==2)q->native_text_context.phase=NATIVE_TEXT_CONTEXT_REFUSED;
+  else if(query_mode==3){assert(late_count<4);late_queries[late_count++]=macdrv_retain_query(q);q->done=false;}
+  else if(!q->native_text_context.menu_seen){assert(windows_popup);windows_popup=0;q->native_text_context.phase=NATIVE_TEXT_CONTEXT_DISMISS_REQUESTED;}
+  else {assert(!windows_popup);q->native_text_context.phase=NATIVE_TEXT_CONTEXT_READY;}
+  return;
+ }
+ if(event->type==MOUSE_BUTTON){assert(button_count<2);assert(event->mouse_button.button==1);assert(event->mouse_button.x==140&&event->mouse_button.y==80);buttons[button_count++]=event->mouse_button.pressed;if(event->mouse_button.pressed)field_focus=event->mouse_button.x>=100?2:1;else windows_popup=1;return;}assert(event->type==33);assert(event->native_text_edit.foreground==(void*)321);last_action=event->native_text_edit.vkey;action_focus=field_focus;posted++;}
 @end
 @interface WineWindow:NSObject
 @property BOOL visible,closing,disabled,noForeground;
@@ -97,7 +126,7 @@ static NSMenu *capturedMenu;
 +(void)fixturePopup:(NSMenu*)menu withEvent:(NSEvent*)event forView:(NSView*)view;
 @end
 @implementation NSMenu(CaskrunFixture)
-+(void)fixturePopup:(NSMenu*)menu withEvent:(NSEvent*)event forView:(NSView*)view{(void)event;(void)view;capturedMenu=menu;popup_count++;}
++(void)fixturePopup:(NSMenu*)menu withEvent:(NSEvent*)event forView:(NSView*)view{(void)event;(void)view;assert(!windows_popup);capturedMenu=[menu retain];popup_count++;}
 @end
 @interface WineApplicationController:NSObject<NSMenuItemValidation>
 {
@@ -129,6 +158,7 @@ static FakeMouseEvent *event(NSEventType type,WineWindow *window,CGFloat x){
  FakeMouseEvent *event=[FakeMouseEvent new];event.fakeType=type;event.fakeWindow=window;event.fakePoint=NSMakePoint(x,80);return event;
 }
 int main(void){@autoreleasepool {
+ scheduled=[NSMutableArray new];
  for(int i=0;i<4;i++) fixtureCursors[i]=(NSCursor*)[NSObject new];
  method_exchangeImplementations(class_getClassMethod([NSCursor class],@selector(IBeamCursor)),class_getClassMethod([NSCursor class],@selector(fixtureIBeam)));
  method_exchangeImplementations(class_getClassMethod([NSCursor class],@selector(IBeamCursorForVerticalLayout)),class_getClassMethod([NSCursor class],@selector(fixtureVertical)));
@@ -140,7 +170,8 @@ int main(void){@autoreleasepool {
  WineApplicationController *controller=[WineApplicationController new];controller->windowsBeingDragged=[NSMutableSet new];controller->cursor=[NSCursor IBeamCursor];steam_enabled=helper_process=YES;
  controller->unmatchedMouseDowns=NSEventMaskRightMouseDown;field_focus=1;
  assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);
- assert(!controller->unmatchedMouseDowns);assert(popup_count==1 && button_count==2 && buttons[0] && !buttons[1]);assert(field_focus==2);
+ assert(!controller->unmatchedMouseDowns);assert(popup_count==0 && button_count==2 && buttons[0] && !buttons[1]);assert(field_focus==2);
+ assert(query_count==2&&!windows_popup&&query_refs==1);fixtureStep();assert(popup_count==1&&query_refs==0&&atomic_load(&caskrunTextContextPending)==0);
  assert(capturedMenu.numberOfItems==5);
  NSMenuItem *paste=capturedMenu.itemArray[2];assert([paste.title isEqualToString:@"Paste"]);assert(paste.tag=='V');assert([paste.keyEquivalent isEqualToString:@"v"]);assert(paste.keyEquivalentModifierMask==NSEventModifierFlagCommand);
  [controller caskrunNativeTextEdit:paste];assert(posted==1&&last_action=='V'&&action_focus==2);
@@ -160,6 +191,42 @@ int main(void){@autoreleasepool {
  assert(![controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,300)]);assert(popup_count==1);
  window.closing=YES;[controller caskrunNativeTextEdit:paste];assert(posted==1);
  window.closing=NO;testApp.keyWindow=nil;[controller caskrunNativeTextEdit:paste];assert(posted==1);
+
+ /* Unsupported/custom popup: wait boundedly, leave the original alone. */
+ testApp.keyWindow=window;query_mode=1;button_count=0;
+ assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);
+ assert(windows_popup==1&&popup_count==1);fixtureStep();assert(windows_popup==1&&popup_count==1);
+ atomic_store(&caskrunTextContextDeadline,0);fixtureStep();assert(!scheduled.count&&query_refs==0&&popup_count==1&&windows_popup==1);
+ /* Owner/refusal never overlays it either. */
+ query_mode=2;button_count=0;
+ assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);assert(!scheduled.count);assert(query_refs==0&&popup_count==1&&windows_popup==1);
+ /* An unanswered queued query times out without UI; late serial is invalid. */
+ query_mode=3;button_count=0;
+ assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);
+ unsigned int old=atomic_load(&caskrunTextContextSerial);atomic_store(&caskrunTextContextDeadline,0);fixtureStep();assert(!macdrv_native_text_context_current(old)&&query_refs==1&&popup_count==1&&atomic_load(&caskrunTextContextPending)==1);
+ macdrv_release_query(late_queries[--late_count]);assert(query_refs==0&&atomic_load(&caskrunTextContextPending)==0);
+ /* Intervening input in the same root invalidates deferred native UI. */
+ const NSEventType changing[]={NSEventTypeKeyDown,NSEventTypeKeyUp,NSEventTypeFlagsChanged,NSEventTypeLeftMouseDown,NSEventTypeOtherMouseDown,NSEventTypeScrollWheel};
+ for(unsigned int i=0;i<sizeof(changing)/sizeof(changing[0]);i++){
+  query_mode=1;button_count=0;assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);
+  old=atomic_load(&caskrunTextContextSerial);assert(![controller caskrunHandleTextContextEvent:event(changing[i],window,140)]);fixtureStep();assert(!macdrv_native_text_context_current(old)&&query_refs==0&&popup_count==1);
+ }
+ /* Stalled queued owners hold the bounded budget after Cocoa callbacks exit. */
+ query_mode=3;
+ for(int i=0;i<4;i++){button_count=0;assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);}
+ atomic_store(&caskrunTextContextDeadline,0);while(scheduled.count)fixtureStep();
+ assert(late_count==4&&query_refs==4&&atomic_load(&caskrunTextContextPending)==4);
+ button_count=0;field_focus=1;assert(![controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);assert(button_count==0&&field_focus==1&&popup_count==1);
+ while(late_count){macdrv_query*q=late_queries[--late_count];assert(!macdrv_native_text_context_current(q->native_text_context.serial));macdrv_release_query(q);}
+ assert(query_refs==0&&atomic_load(&caskrunTextContextPending)==0);
+ missing_clock=YES;button_count=0;assert(![controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);assert(button_count==0&&atomic_load(&caskrunTextContextPending)==0);missing_clock=NO;
+ query_mode=1;
+ /* Closing or losing the original key window cannot activate a late menu. */
+ for(int i=0;i<2;i++){
+  button_count=0;assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);
+  if(i==0)window.closing=YES;else testApp.keyWindow=nil;fixtureStep();assert(query_refs==0&&popup_count==1);window.closing=NO;testApp.keyWindow=window;
+ }
+ assert(!scheduled.count);puts("async menu exit, unsupported popup, timeout and same-root input cancellation passed");
  puts("queue peek preserves events");
  puts("two-field targeting, native menu, paired releases and 14 context/action refusals passed");
 }return 0;}

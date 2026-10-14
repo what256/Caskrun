@@ -32,13 +32,17 @@ PATCHES = {
     "wine-11.0-steam-cef-commandline.patch": "408dade743a358886e76b6bb6e592ed6cb8fa67738c1b6d4b061d817c2cbe90f",
     "wine-11.0-steam-dock.patch": "33811970ce63401baabaffd491ce0ac79c69ce740f0ad37687355041f2bd1844",
     "wine-11.0-native-app-identity.patch": "f860b3a32a34d807319827c8a03298b1c24a705fa7075dc3a32cca7567c2d0ab",
-    "wine-11.0-native-text-editing.patch": "051cfd19e111dfcfdac740a7783e81c6486b694558302c71dc19ce7fbfee3f46",
+    "wine-11.0-native-text-editing.patch": "4bd978c03d8788337bc609ad9ec24dc5c90fe7e2b371e9eaf4440eb5557cc80a",
     "wine-11.0-winemac-metal-exports.patch": "ada2df6599a9883689cda250cf53e46eb030205503054b1774d7bb1b67fe8235",
     "wine-11.0-dxmt-client-surface.patch": "9e6cc0516e87b37dc2dca98660726098d740a2449aff5a169a92a0c4d9b63a0a",
 }
-BASE_PATCHES = list(PATCHES)[:3]
+STEAM_WINDOW_PATCH = "wine-11.0-steam-native-window.patch"
+PATCHES[STEAM_WINDOW_PATCH] = "c34c8c207febd966fc9aa7fb6cd8b31bd9325bcc820b6a35cc266f4164bc5412"
+BASE_PATCHES = ["wine-11.0-steam-cef-commandline.patch", "wine-11.0-steam-dock.patch",
+                "wine-11.0-native-app-identity.patch"]
 TEXT_PATCH = "wine-11.0-native-text-editing.patch"
-DXMT_PATCHES = list(PATCHES)[4:]
+UI_PATCHES = [TEXT_PATCH, STEAM_WINDOW_PATCH]
+DXMT_PATCHES = ["wine-11.0-winemac-metal-exports.patch", "wine-11.0-dxmt-client-surface.patch"]
 DRIVERS = {
     "lib/wine/x86_64-unix/winemac.so": "winemac.so",
     "lib/wine/x86_64-windows/winemac.drv": "x86_64-windows/winemac.drv",
@@ -100,7 +104,8 @@ def validate(base: Path, seed: Path, output: Path) -> None:
             apply_patch(source, name)
         if tree_files(source) != tree_files(seed / "src/wine-11.0"):
             raise PACKAGE.PackageError("Seed source differs from exact upstream plus reviewed patches")
-        apply_patch(source, TEXT_PATCH)
+        for name in UI_PATCHES:
+            apply_patch(source, name)
         for name in DXMT_PATCHES:
             apply_patch(source, name)
 
@@ -171,24 +176,37 @@ def package(base: Path, output: Path) -> str:
                  "packaged_sha256": PACKAGE.sha256(destination)}
         section = "artifacts" if relative.startswith("components/") else "base_artifacts"
         receipt[section][relative] = entry
-    receipt["patches"][TEXT_PATCH] = PATCHES[TEXT_PATCH]
+    for name in UI_PATCHES:
+        receipt["patches"][name] = PATCHES[name]
     receipt["native_text_editing"] = {
-        "format": "caskrun-native-text-editing-v1",
+        "format": "caskrun-native-text-editing-v2",
+        "context_menu_policy": "verified-original-menu-retired-before-native-menu",
         "clipboard_contents_read_by_menu": False,
         "game_validation": False,
     }
+    receipt["native_steam_window"] = {
+        "format": "caskrun-steam-signin-window-v1",
+        "close_action": "native-hide",
+        "client_geometry_changed": False,
+        "game_validation": False,
+    }
     (candidate / "components.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    shutil.copyfile(REPO / "runtime-patches" / TEXT_PATCH, candidate / "source/patches" / TEXT_PATCH)
-    (candidate / "native-text-editing.txt").write_text("caskrun-native-text-editing-v1\n")
+    for name in UI_PATCHES:
+        shutil.copyfile(REPO / "runtime-patches" / name, candidate / "source/patches" / name)
+    (candidate / "native-text-editing.txt").write_text("caskrun-native-text-editing-v2\n")
     with (candidate / "SOURCES.txt").open("a") as stream:
         stream.write("\nOriginal macOS native text editing extension: source/patches/" + TEXT_PATCH + "\n"
                      "SHA-256: " + PATCHES[TEXT_PATCH] + "\n"
                      "Both base and DXMT Wine drivers rebuilt from the exact corresponding Wine archive\n"
                      "and reviewed patches. No clipboard or field contents are read by the native menu.\n"
                      "Translators, TLS dependencies, native identities and all other engine files retained.\n"
+                     "Original Steam sign-in native controls: source/patches/" + STEAM_WINDOW_PATCH + "\n"
+                     "SHA-256: " + PATCHES[STEAM_WINDOW_PATCH] + "\n"
+                     "Only the recognized sign-in window gets native Hide/Minimize controls.\n"
+                     "Client geometry, app files and explicit Quit behavior are retained.\n"
                      "Build: scripts/build-wine-native-text-dev.py; not a public binary release.\n")
-    allowed = set(inputs) | {"components.json", "SOURCES.txt", "native-text-editing.txt",
-                             "source/patches/" + TEXT_PATCH}
+    allowed = set(inputs) | {"components.json", "SOURCES.txt", "native-text-editing.txt"} | {
+        "source/patches/" + name for name in UI_PATCHES}
     updated = tree_files(candidate)
     changes = {name for name in original.keys() | updated.keys()
                if original.get(name) != updated.get(name)}
@@ -204,7 +222,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", type=Path, default=REPO / ".build/dxmt-wine-runtime-dev-v4")
     parser.add_argument("--seed", type=Path, default=REPO / ".build/wine-native-apps-11.0-dev")
-    parser.add_argument("--output", type=Path, default=REPO / ".build/native-text-runtime-v1")
+    parser.add_argument("--output", type=Path, default=REPO / ".build/native-text-runtime-v6")
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     try:
@@ -214,8 +232,8 @@ def main() -> int:
             print("Exact base, full Wine source, patch order and disjoint ignored paths verified.")
             return 0
         output.mkdir()
-        build_driver(seed, output / "base-build", [TEXT_PATCH])
-        build_driver(seed, output / "dxmt-build", [TEXT_PATCH] + DXMT_PATCHES)
+        build_driver(seed, output / "base-build", UI_PATCHES)
+        build_driver(seed, output / "dxmt-build", UI_PATCHES + DXMT_PATCHES)
         print("Candidate runtime identity: sha256:" + package(base, output))
         return 0
     except (OSError, PACKAGE.PackageError) as error:

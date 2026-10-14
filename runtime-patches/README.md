@@ -96,6 +96,27 @@ Eighty-five isolated Cocoa role checks confirm ordinary apps/tools remain
 eligible for foreground use while the narrowly identified background roles
 are accessory. Full packaged-runtime and vendor-launcher checks remain separate.
 
+## Native editing and Steam sign-in controls
+
+`wine-11.0-native-text-editing.patch` follows the identity patch. It forwards
+native Edit commands and Command shortcuts as balanced Windows editing keys.
+For a recognized Steam text field, bounded asynchronous menu queries retire
+only the original popup whose window, thread and top-menu ownership were
+verified. The native popup appears after tracking and capture end; unsupported
+custom menus keep their original UI. No clipboard or field values are read.
+
+`wine-11.0-steam-native-window.patch` follows the editing patch. Its closed
+process/title/size policy adds native AppKit controls over the empty top strip
+of Steam's fixed English sign-in window. Close hides that UI without a Windows
+close request; minimize follows the existing Wine path. Other windows and
+explicit Quit retain their behavior. The client geometry is unchanged.
+
+`scripts/build-wine-native-text-dev.py` pins both patches and rebuilds both
+the base and DXMT macOS drivers and their x86/x64 Windows halves in isolated
+clones. The packaged source records carry the corresponding patches. See
+[native editing validation](../docs/NATIVE_TEXT_EDITING.md) for the exact runtime
+identity, tests and limits; these changes do not establish gameplay support.
+
 ## DXMT development candidate — separate from the included runtime
 
 Four patches now build an isolated, signed runtime candidate with both Windows

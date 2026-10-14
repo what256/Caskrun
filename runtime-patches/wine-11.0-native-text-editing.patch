@@ -1,3 +1,14 @@
+From: Caskrun contributors
+Subject: Original native text-editing integration for upstream Wine 11
+
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+Native Edit commands forward balanced Windows shortcuts. A Steam-only text
+context fallback targets with the original balanced right-button pair, then
+asynchronously replaces only a verified same-root/thread Windows menu after
+EndMenu has completed. Unknown custom popups retain their original menu.
+No clipboard or field content is read. Old event/query ordinals stay fixed.
+
 --- a/dlls/winemac.drv/cocoa_app.h
 +++ b/dlls/winemac.drv/cocoa_app.h
 @@ -35,7 +35,7 @@
@@ -19,7 +30,74 @@
      double accumScrollX, accumScrollY;
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
-@@ -319,6 +319,119 @@
+@@ -23,6 +23,8 @@
+ #import "cocoa_event.h"
+ #import "cocoa_window.h"
+ #include <sys/stat.h>
++#include <stdatomic.h>
++#include <time.h>
+ 
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+ 
+@@ -43,6 +45,57 @@
+ 
+ 
+ bool macdrv_err_on;
++
++/* A canceled click must not dismiss a menu when its queued query finally runs. */
++static atomic_uint caskrunTextContextSerial;
++static atomic_uint_fast64_t caskrunTextContextDeadline;
++static atomic_uint caskrunTextContextPending;
++
++static uint64_t CaskrunTextContextTime(void)
++{
++    struct timespec now;
++    if (clock_gettime(CLOCK_MONOTONIC, &now)) return UINT64_MAX;
++    return (uint64_t)now.tv_sec * 1000000000 + now.tv_nsec;
++}
++
++bool macdrv_native_text_context_current(unsigned int serial)
++{
++    return serial == atomic_load(&caskrunTextContextSerial) &&
++           CaskrunTextContextTime() < atomic_load(&caskrunTextContextDeadline);
++}
++
++void macdrv_cancel_native_text_context(void)
++{
++    atomic_fetch_add(&caskrunTextContextSerial, 1);
++    atomic_store(&caskrunTextContextDeadline, 0);
++}
++
++void macdrv_release_native_text_context_slot(void)
++{
++    atomic_fetch_sub(&caskrunTextContextPending, 1);
++}
++
++static macdrv_query *CaskrunCreateTextContextQuery(void)
++{
++    unsigned int pending = atomic_load(&caskrunTextContextPending);
++    macdrv_query *query;
++    do
++    {
++        if (pending >= 4) return NULL;
++    } while (!atomic_compare_exchange_weak(&caskrunTextContextPending, &pending, pending + 1));
++    query = macdrv_create_query();
++    if (!query) { macdrv_release_native_text_context_slot(); return NULL; }
++    query->type = QUERY_NATIVE_TEXT_CONTEXT;
++    query->native_text_context.slot_owned = true;
++    return query;
++}
++
++static void CaskrunCancelTextContext(unsigned int serial)
++{
++    /* An old timer must not invalidate a newer click. */
++    atomic_compare_exchange_strong(&caskrunTextContextSerial, &serial, serial + 1);
++}
++
+ 
+ 
+ #if !defined(MAC_OS_VERSION_14_0) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_VERSION_14_0
+@@ -319,6 +372,204 @@
          [super dealloc];
      }
  
@@ -82,6 +160,66 @@
 +        macdrv_release_event(event);
 +    }
 +
++    /* Never put a native popup over a still-tracking Windows popup. This is
++     * asynchronous: nested Windows menu tracking may need the Cocoa thread.
++     * Unknown/custom CEF menus remain the original single menu. */
++    - (void) caskrunPrepareTextContextForWindow:(WineWindow*)window event:(NSEvent*)mouseEvent
++                                       serial:(unsigned int)serial foreground:(void*)foreground menuSeen:(BOOL)menuSeen query:(macdrv_query*)query
++    {
++        unsigned int phase = NATIVE_TEXT_CONTEXT_PENDING;
++        BOOL valid = macdrv_native_text_context_current(serial) &&
++                     window == NSApp.keyWindow && window.isVisible && !window.closing &&
++                     !window.disabled && !window.noForeground && !self.clippingCursor &&
++                     ![windowsBeingDragged count] &&
++                     CaskrunSteamDockEnabled() && CaskrunIsWindowsProcess(@"steamwebhelper.exe");
++
++        if (!valid)
++        {
++            CaskrunCancelTextContext(serial);
++            if (query) macdrv_release_query(query);
++            return;
++        }
++        if (query && query->done)
++        {
++            phase = query->status ? query->native_text_context.phase : NATIVE_TEXT_CONTEXT_REFUSED;
++            macdrv_release_query(query);
++            query = NULL;
++            if (phase == NATIVE_TEXT_CONTEXT_REFUSED)
++            {
++                CaskrunCancelTextContext(serial);
++                return;
++            }
++            if (phase == NATIVE_TEXT_CONTEXT_DISMISS_REQUESTED) menuSeen = YES;
++            if (phase == NATIVE_TEXT_CONTEXT_READY)
++            {
++                if (menuSeen && !mouseCaptureWindow && macdrv_native_text_context_current(serial))
++                    [NSMenu popUpContextMenu:[self caskrunTextMenuForWindow:window]
++                                  withEvent:mouseEvent forView:window.contentView];
++                CaskrunCancelTextContext(serial);
++                return;
++            }
++        }
++        if (!query)
++        {
++            macdrv_event *event;
++            query = CaskrunCreateTextContextQuery();
++            if (!query) { CaskrunCancelTextContext(serial); return; }
++            query->window = (macdrv_window)[window retain];
++            query->native_text_context.foreground = foreground;
++            query->native_text_context.serial = serial;
++            query->native_text_context.menu_seen = menuSeen;
++            event = macdrv_create_event(QUERY_EVENT_NO_PREEMPT_WAIT, window);
++            event->query_event.query = macdrv_retain_query(query);
++            [window.queue postEvent:event];
++            macdrv_release_event(event);
++        }
++        /* The copied block retains only the original window and mouse event.
++         * One outstanding query per request; all terminal branches release it. */
++        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
++            [self caskrunPrepareTextContextForWindow:window event:mouseEvent serial:serial foreground:foreground menuSeen:menuSeen query:query];
++        });
++    }
++
 +    - (BOOL) caskrunHandleTextContextEvent:(NSEvent*)event
 +    {
 +        WineWindow *window;
@@ -90,6 +228,8 @@
 +        CGPoint targetPoint;
 +        CGEventRef mouseEvent;
 +        unsigned int i;
++        macdrv_query *query;
++        uint64_t now;
 +
 +        if (event.type == NSEventTypeRightMouseUp && caskrunConsumedRightButton)
 +        {
@@ -97,10 +237,19 @@
 +            return YES;
 +        }
 +        if (event.type == NSEventTypeRightMouseDragged && caskrunConsumedRightButton) return YES;
-+        if (event.type != NSEventTypeRightMouseDown) return NO;
++        if (event.type != NSEventTypeRightMouseDown)
++        {
++            /* Same-root focus can still change after Tab or another click. */
++            if (event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp ||
++                event.type == NSEventTypeFlagsChanged || event.type == NSEventTypeLeftMouseDown ||
++                event.type == NSEventTypeOtherMouseDown || event.type == NSEventTypeScrollWheel)
++                macdrv_cancel_native_text_context();
++            return NO;
++        }
 +        /* NSMenu's modal tracker can consume the release itself. A fresh
 +         * physical press starts a new pair and must not inherit that state. */
 +        caskrunConsumedRightButton = NO;
++        macdrv_cancel_native_text_context();
 +        if (!CaskrunSteamDockEnabled() || !CaskrunIsWindowsProcess(@"steamwebhelper.exe") ||
 +            mouseCaptureWindow || self.clippingCursor || [windowsBeingDragged count] || !cursor ||
 +            (cursor != [NSCursor IBeamCursor] && cursor != [NSCursor IBeamCursorForVerticalLayout])) return NO;
@@ -118,6 +267,10 @@
 +        mouseEvent = [event CGEvent];
 +        if (!mouseEvent) return NO;
 +        targetPoint = cgpoint_win_from_mac(CGEventGetLocation(mouseEvent));
++        now = CaskrunTextContextTime();
++        if (now > UINT64_MAX - 450 * 1000000 || !(query = CaskrunCreateTextContextQuery())) return NO;
++        /* Capacity is reserved before forwarding a click or changing focus. */
++        atomic_store(&caskrunTextContextDeadline, now + 450 * 1000000);
 +        unmatchedMouseDowns &= ~NSEventMaskRightMouseDown;
 +        for (i = 0; i < 2; i++)
 +        {
@@ -132,14 +285,24 @@
 +        }
 +        forceNextMouseMoveAbsolute = TRUE;
 +        caskrunConsumedRightButton = YES;
-+        [NSMenu popUpContextMenu:[self caskrunTextMenuForWindow:window] withEvent:event forView:window.contentView];
++        query->window = (macdrv_window)[window retain];
++        query->native_text_context.foreground = macdrv_get_window_hwnd((macdrv_window)[window ancestorWineWindow]);
++        query->native_text_context.serial = atomic_load(&caskrunTextContextSerial);
++        macdrv_event *request = macdrv_create_event(QUERY_EVENT_NO_PREEMPT_WAIT, window);
++        request->query_event.query = macdrv_retain_query(query);
++        [window.queue postEvent:request];
++        macdrv_release_event(request);
++        [self caskrunPrepareTextContextForWindow:window event:event
++                                        serial:atomic_load(&caskrunTextContextSerial)
++                                    foreground:macdrv_get_window_hwnd((macdrv_window)[window ancestorWineWindow])
++                                      menuSeen:NO query:query];
 +        return YES; /* physical release is consumed after the balanced targeting pair */
 +    }
 +
      - (void) transformProcessToForeground:(BOOL)activateIfTransformed
      {
          /* Steam's visible login belongs to steamwebhelper.exe. Keep that
-@@ -397,6 +510,13 @@
+@@ -397,6 +648,13 @@
              [item setTitle:CaskrunNativeDockEnabled() && [bundleName length] ? bundleName : WineLocalizedString(STRING_MENU_WINE)];
              [item setSubmenu:submenu];
              [mainMenu addItem:item];
@@ -153,7 +316,7 @@
  
              // Window menu
              submenu = [[[NSMenu alloc] initWithTitle:WineLocalizedString(STRING_MENU_WINDOW)] autorelease];
-@@ -1917,6 +2037,7 @@
+@@ -1917,6 +2175,7 @@
          BOOL ret = FALSE;
          NSEventType type = [anEvent type];
  
@@ -161,6 +324,14 @@
          if (type == NSEventTypeFlagsChanged)
              self.lastFlagsChanged = anEvent;
          else if (type == NSEventTypeMouseMoved || type == NSEventTypeLeftMouseDragged ||
+@@ -2340,6 +2599,7 @@
+ 
+     - (void)applicationDidResignActive:(NSNotification *)notification
+     {
++        macdrv_cancel_native_text_context();
+         macdrv_event* event;
+         WineEventQueue* queue;
+ 
 --- a/dlls/winemac.drv/cocoa_event.m
 +++ b/dlls/winemac.drv/cocoa_event.m
 @@ -289,6 +289,18 @@
@@ -196,6 +367,15 @@
  }
  
  /***********************************************************************
+@@ -731,6 +750,8 @@
+                     CFRelease(query->pasteboard_data.type);
+                 break;
+         }
++        if (query->type == QUERY_NATIVE_TEXT_CONTEXT && query->native_text_context.slot_owned)
++            macdrv_release_native_text_context_slot();
+         [(WineWindow*)query->window release];
+         free(query);
+     }
 --- a/dlls/winemac.drv/cocoa_window.h
 +++ b/dlls/winemac.drv/cocoa_window.h
 @@ -88,6 +88,7 @@
@@ -206,6 +386,16 @@
  @property (readonly, nonatomic) BOOL noForeground;
  @property (readonly, nonatomic) BOOL preventsAppActivation;
  @property (readonly, nonatomic) BOOL floating;
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -3047,6 +3047,7 @@
+ 
+     - (void)windowDidResignKey:(NSNotification *)notification
+     {
++        macdrv_cancel_native_text_context();
+         macdrv_event* event;
+ 
+         if (causing_becomeKeyWindow) return;
 --- a/dlls/winemac.drv/macdrv_cocoa.h
 +++ b/dlls/winemac.drv/macdrv_cocoa.h
 @@ -302,6 +302,7 @@
@@ -229,21 +419,55 @@
      };
  } macdrv_event;
  
-@@ -452,6 +459,7 @@
+@@ -415,7 +422,15 @@
+     QUERY_RESIZE_SIZE,
+     QUERY_RESIZE_START,
+     QUERY_MIN_MAX_INFO,
++    QUERY_NATIVE_TEXT_CONTEXT,
+     NUM_QUERY_TYPES
++};
++
++enum {
++    NATIVE_TEXT_CONTEXT_PENDING,
++    NATIVE_TEXT_CONTEXT_DISMISS_REQUESTED,
++    NATIVE_TEXT_CONTEXT_READY,
++    NATIVE_TEXT_CONTEXT_REFUSED
+ };
+ 
+ typedef struct macdrv_query {
+@@ -439,6 +454,13 @@
+             unsigned int    from_left : 1;
+             unsigned int    from_top : 1;
+         }                                           resize_size;
++        struct {
++            void           *foreground;
++            unsigned int    serial;
++            unsigned int    phase;
++            bool            menu_seen;
++            bool            slot_owned;
++        }                                           native_text_context;
+     };
+ } macdrv_query;
+ 
+@@ -452,6 +474,10 @@
  extern macdrv_event_queue macdrv_create_event_queue(macdrv_event_handler handler);
  extern void macdrv_destroy_event_queue(macdrv_event_queue queue);
  extern int macdrv_get_event_queue_fd(macdrv_event_queue queue);
 +extern int macdrv_queue_has_mouse_button_events(macdrv_event_queue queue);
++extern bool macdrv_native_text_context_current(unsigned int serial);
++extern void macdrv_cancel_native_text_context(void);
++extern void macdrv_release_native_text_context_slot(void);
  
  extern int macdrv_copy_event_from_queue(macdrv_event_queue queue,
          macdrv_event_mask mask, macdrv_event **event);
 --- a/dlls/winemac.drv/macdrv.h
 +++ b/dlls/winemac.drv/macdrv.h
-@@ -246,6 +246,7 @@
+@@ -246,6 +246,8 @@
  extern void macdrv_keyboard_changed(const macdrv_event *event);
  extern void macdrv_key_event(HWND hwnd, const macdrv_event *event);
  extern void macdrv_hotkey_press(const macdrv_event *event);
 +extern void macdrv_native_text_edit(HWND hwnd, const macdrv_event *event);
++extern BOOL macdrv_native_text_context(HWND hwnd, macdrv_query *query);
  extern HKL macdrv_get_hkl_from_source(TISInputSourceRef input_source);
  
  extern void macdrv_displays_changed(const macdrv_event *event);
@@ -265,19 +489,29 @@
      }
  
      if (mask & QS_MOUSEBUTTON)
-@@ -400,6 +402,9 @@
+@@ -353,6 +355,9 @@
+             TRACE("QUERY_RESIZE_START\n");
+             success = query_resize_start(hwnd);
+             break;
++        case QUERY_NATIVE_TEXT_CONTEXT:
++            success = macdrv_native_text_context(hwnd, query);
++            break;
+         case QUERY_MIN_MAX_INFO:
+             TRACE("QUERY_MIN_MAX_INFO\n");
+             success = query_min_max_info(hwnd);
+@@ -399,6 +404,9 @@
+         break;
      case HOTKEY_PRESS:
          macdrv_hotkey_press(event);
-         break;
++        break;
 +    case NATIVE_TEXT_EDIT_ACTION:
 +        macdrv_native_text_edit(hwnd, event);
-+        break;
+         break;
      case IM_SET_TEXT:
          macdrv_im_set_text(event);
-         break;
 --- a/dlls/winemac.drv/keyboard.c
 +++ b/dlls/winemac.drv/keyboard.c
-@@ -1030,6 +1030,70 @@
+@@ -1030,6 +1030,121 @@
   *
   * Handler for HOTKEY_PRESS events.
   */
@@ -285,6 +519,57 @@
 + * Target the same Wine root that owned the Cocoa menu, so a delayed action
 + * cannot edit a newly focused Windows application.  Hardware inputs are
 + * explicitly addressed to that root and every modifier is restored. */
++/* Only the GUI thread tracking the verified original root's menu may end it.
++ * A later query must confirm tracking/capture ended before Cocoa can present
++ * its menu. No Escape key, selection-changing click or clipboard is involved. */
++BOOL macdrv_native_text_context(HWND hwnd, macdrv_query *query)
++{
++    struct macdrv_thread_data *data = macdrv_thread_data();
++    GUITHREADINFO info = { .cbSize = sizeof(info) };
++    MENUBARINFO menu = { .cbSize = sizeof(menu) };
++    HWND root, owner;
++    struct macdrv_win_data *win;
++    BOOL same_window;
++    DWORD thread;
++
++    query->native_text_context.phase = NATIVE_TEXT_CONTEXT_REFUSED;
++    if (!hwnd || !query->native_text_context.foreground ||
++        !macdrv_native_text_context_current(query->native_text_context.serial)) return TRUE;
++    if (!(win = get_win_data(hwnd))) return TRUE;
++    same_window = win->cocoa_window == query->window;
++    release_win_data(win);
++    if (!same_window) return TRUE; /* destroyed/reused HWND is not the retained Cocoa window */
++    root = NtUserGetAncestor(hwnd, GA_ROOT);
++    if (!root || root != query->native_text_context.foreground || root != NtUserGetForegroundWindow()) return TRUE;
++    thread = NtUserGetWindowThread(root, NULL);
++    if (thread != GetCurrentThreadId() || !NtUserGetGUIThreadInfo(thread, &info) ||
++        !info.hwndFocus || NtUserGetAncestor(info.hwndFocus, GA_ROOT) != root ||
++        (info.flags & GUI_INMOVESIZE)) return TRUE;
++    if (macdrv_queue_has_mouse_button_events(data->queue) ||
++        ((NtUserGetQueueStatus(QS_MOUSEBUTTON) >> 16) & QS_MOUSEBUTTON))
++    {
++        query->native_text_context.phase = NATIVE_TEXT_CONTEXT_PENDING;
++        return TRUE;
++    }
++    if (info.flags & GUI_INMENUMODE)
++    {
++        owner = info.hwndMenuOwner;
++        if (!owner || NtUserGetAncestor(owner, GA_ROOTOWNER) != root ||
++            NtUserGetWindowThread(owner, NULL) != thread ||
++            !NtUserGetMenuBarInfo(owner, OBJID_CLIENT, 0, &menu) || !menu.fBarFocused ||
++            root != NtUserGetForegroundWindow() ||
++            !macdrv_native_text_context_current(query->native_text_context.serial)) return TRUE;
++        if (query->native_text_context.menu_seen)
++            query->native_text_context.phase = NATIVE_TEXT_CONTEXT_PENDING;
++        else if (NtUserEndMenu()) query->native_text_context.phase = NATIVE_TEXT_CONTEXT_DISMISS_REQUESTED;
++        return TRUE;
++    }
++    if (info.hwndCapture || info.hwndMenuOwner) return TRUE;
++    query->native_text_context.phase = query->native_text_context.menu_seen ?
++                                       NATIVE_TEXT_CONTEXT_READY : NATIVE_TEXT_CONTEXT_PENDING;
++    return TRUE;
++}
++
 +void macdrv_native_text_edit(HWND hwnd, const macdrv_event *event)
 +{
 +    static const struct {
