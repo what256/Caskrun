@@ -135,7 +135,9 @@ also has an explicit idle-only transition to the bundled-helper package.
   including Wine's normal drive link and refusal of a host-mapped helper.
   The Cocoa loader/process scope passes 35 checks. Steam's primary process
   and refused helper bindings make no child Core callback; games retain
-  their existing callback path. Live bundled-helper verification is pending.
+  their existing callback path. Isolated Steam helpers also registered the
+  expected bundle identity and emitted the helper/mode startup canary.
+  That establishes routing, not a usable sign-in window or native context menu.
 - Real AppKit lifecycle tests cover repeated close, retained window/session,
   delegate forwarding, framework replacement, unrelated windows and explicit
   application termination.
@@ -184,6 +186,18 @@ also has an explicit idle-only transition to the bundled-helper package.
 
 The combined source passes 495 Rust unit tests and seven integration tests,
 with two existing ignored tests, in a serial run.
+
+The bundled-helper package was installed locally as build 45 after normal
+Caskrun Quit and a zero-owner check on the previous app. The imported bottle's
+runtime record migrated to this package and its generated Steam bundle passed
+strict signature verification. The subsequent real Steam launch exited with
+the same 15-second main-loop assertion seen in older launches, before showing
+sign-in. A code-only isolated comparison reached browser helpers on both this
+package and the bounded-header predecessor, but neither reached sign-in in
+the bounded test. The isolated client downloaded an official update, and the
+desktop locked during testing; these are material comparison limits. No
+first-right-click test was performed and no cause is attributed to the bundle
+routing. The native replacement and Dock interaction remain live test items.
 
 An earlier real imported Steam launch exited with Steam's own 15-second main-loop
 stall assertion, without a native-menu exception. The red-close check initially
