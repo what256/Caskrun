@@ -68,7 +68,9 @@ if [[ -e "$APP" || -L "$APP" ]]; then
   "$PROJECT_ROOT/scripts/assert-app-idle.sh" "$APP"
 fi
 
-cargo build --release --target "$RUST_TARGET" --manifest-path "$PROJECT_ROOT/core/Cargo.toml"
+cargo build --locked --release --target "$RUST_TARGET" --manifest-path "$PROJECT_ROOT/core/Cargo.toml"
+SPARKLE_FRAMEWORK="$(python3 -B "$PROJECT_ROOT/scripts/prepare-sparkle.py" --print-framework)"
+SPARKLE_PARENT="${SPARKLE_FRAMEWORK:h}"
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 cp "$PROJECT_ROOT/core/target/$RUST_TARGET/release/caskrun-core" "$STAGED_APP/Contents/MacOS/caskrun-core"
 cp "$PROJECT_ROOT/assets/caskrun-icon.png" "$STAGED_APP/Contents/Resources/caskrun-icon.png"
@@ -92,7 +94,10 @@ for SIZE in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$STAGED_APP/Contents/Resources/CaskrunIcon.icns"
 swiftc -O -target arm64-apple-macos13.0 -parse-as-library "$PROJECT_ROOT/runtime-patches/native_icon.swift" -o "$STAGED_APP/Contents/MacOS/caskrun-native-icon"
-swiftc -O -target arm64-apple-macos14.0 -parse-as-library -D CASKRUN_ICON_LIBRARY "$PROJECT_ROOT/app/CaskrunApp.swift" "$PROJECT_ROOT/app/LaunchArguments.swift" "$PROJECT_ROOT/app/BottleMaintenanceViews.swift" "$PROJECT_ROOT/app/GameLibraryViews.swift" "$PROJECT_ROOT/app/BrowserLaunch.swift" "$PROJECT_ROOT/app/BrowserDiscoveryViews.swift" "$PROJECT_ROOT/app/CollectionViews.swift" "$PROJECT_ROOT/app/LocalArtwork.swift" "$PROJECT_ROOT/app/PS5Collection.swift" "$PROJECT_ROOT/app/PS5CollectionViews.swift" "$PROJECT_ROOT/app/GameCompatibility.swift" "$PROJECT_ROOT/app/CompatibilityBrowseViews.swift" "$PROJECT_ROOT/app/DXMTOptionsView.swift" "$PROJECT_ROOT/app/SteamGameLink.swift" "$PROJECT_ROOT/runtime-patches/native_icon.swift" -o "$STAGED_APP/Contents/MacOS/Caskrun"
+swiftc -O -target arm64-apple-macos14.0 -parse-as-library -D CASKRUN_ICON_LIBRARY -F "$SPARKLE_PARENT" -framework Sparkle -Xlinker -rpath -Xlinker '@executable_path/../Frameworks' "$PROJECT_ROOT/app/CaskrunApp.swift" "$PROJECT_ROOT/app/AppUpdates.swift" "$PROJECT_ROOT/app/SteamGameArtwork.swift" "$PROJECT_ROOT/app/LaunchArguments.swift" "$PROJECT_ROOT/app/BottleMaintenanceViews.swift" "$PROJECT_ROOT/app/GameLibraryViews.swift" "$PROJECT_ROOT/app/BrowserLaunch.swift" "$PROJECT_ROOT/app/BrowserDiscoveryViews.swift" "$PROJECT_ROOT/app/CollectionViews.swift" "$PROJECT_ROOT/app/LocalArtwork.swift" "$PROJECT_ROOT/app/PS5Collection.swift" "$PROJECT_ROOT/app/PS5CollectionViews.swift" "$PROJECT_ROOT/app/GameCompatibility.swift" "$PROJECT_ROOT/app/CompatibilityBrowseViews.swift" "$PROJECT_ROOT/app/DXMTOptionsView.swift" "$PROJECT_ROOT/app/SteamGameLink.swift" "$PROJECT_ROOT/runtime-patches/native_icon.swift" -o "$STAGED_APP/Contents/MacOS/Caskrun"
+mkdir -p "$STAGED_APP/Contents/Frameworks"
+ditto "$SPARKLE_FRAMEWORK" "$STAGED_APP/Contents/Frameworks/Sparkle.framework"
+cp "$SPARKLE_PARENT/LICENSE" "$STAGED_APP/Contents/Resources/SPARKLE_LICENSE.txt"
 for BINARY in "$STAGED_APP/Contents/MacOS/Caskrun" "$STAGED_APP/Contents/MacOS/caskrun-core" "$STAGED_APP/Contents/MacOS/caskrun-native-icon"; do
   if [[ "$(lipo -archs "$BINARY")" != arm64 ]]; then
     print -u2 "Expected an ARM64-only binary: $BINARY"
@@ -115,6 +120,7 @@ cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
   <key>NSMicrophoneUsageDescription</key><string>Windows apps you open with Caskrun can use your microphone for voice chat or audio recording when you choose those features.</string>
 </dict></plist>
 PLIST
+python3 -B "$PROJECT_ROOT/scripts/configure-app-updates.py" "$STAGED_APP/Contents/Info.plist"
 touch "$STAGED_APP/Contents/Resources/.caskrun-generated-app"
 codesign --force --deep --sign - "$STAGED_APP"
 codesign --verify --deep --strict "$STAGED_APP"

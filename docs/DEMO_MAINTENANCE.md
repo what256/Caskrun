@@ -1,6 +1,6 @@
 # Demo maintenance workflows
 
-The development app uses Collection/Discover navigation and a flat item grid.
+The development app uses Collection/Discover navigation with named Windows bottle folders.
 Select a Windows app/game, then open **Files & Maintenance** in its details.
 Empty or hidden bottles remain reachable through + → Manage bottles or Command-3.
 They do not establish publisher-client or game compatibility.

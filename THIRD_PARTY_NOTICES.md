@@ -33,6 +33,10 @@ without local registry paths. Runtime notices remain in the runtime package.
 
 A future binary release requires a separate audit of corresponding source, license texts, notices, redistribution obligations, and embedded private build paths. The current local development DMG is not a GitHub release.
 
+## Sparkle application updater
+
+The app build downloads the official [Sparkle 2.10.0 SDK](https://github.com/sparkle-project/Sparkle/releases/tag/2.10.0), verifies its pinned archive digest and checks cached files against that archive. Sparkle uses the MIT license with additional component notices in its complete [license file](https://github.com/sparkle-project/Sparkle/blob/2.10.0/LICENSE). The framework and full license are copied into local app builds; SDK binaries are excluded from this source repository. Original Caskrun integration code remains MIT-licensed.
+
 ## Publisher software and artwork
 
 Store and launcher names, trademarks, installers, and artwork belong to their respective publishers. Caskrun references official download locations and fetches artwork at runtime; downloaded installers and artwork caches are not included here. Publisher software and pictures are not relicensed by Caskrun. Remote picture provenance and the absence of a blanket reuse license are documented in [the browser catalog](catalog/BROWSER_GAMES.md); publishing these links does not grant permission to redistribute the pictures or games.

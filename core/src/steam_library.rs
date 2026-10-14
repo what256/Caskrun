@@ -498,10 +498,32 @@ fn open_regular_library_file(path: &Path, before: &fs::Metadata) -> Option<File>
 
 fn cached_icon_path(drive: &CheckedDrive, steam_path: &Path, app_id: u32) -> Option<String> {
     let cache = steam_path.parent()?.join("appcache/librarycache");
-    ["icon.jpg", "icon.png", "logo.png"]
+    // Steam now keeps named art in an app-id subdirectory. Keep legacy exact
+    // names too; never guess a hashed blob or accept another app's artwork.
+    let cover_names = [
+        "header.jpg",
+        "header.png",
+        "library_header.jpg",
+        "library_header.png",
+        "library_hero.jpg",
+        "library_600x900.jpg",
+        "library_600x900.png",
+    ];
+    let app_cache = cache.join(app_id.to_string());
+    cover_names
         .into_iter()
-        .find_map(|suffix| {
-            let path = cache.join(format!("{app_id}_{suffix}"));
+        .map(|name| app_cache.join(name))
+        .chain(
+            cover_names
+                .into_iter()
+                .map(|name| cache.join(format!("{app_id}_{name}"))),
+        )
+        .chain(
+            ["icon.jpg", "icon.png", "logo.png"]
+                .into_iter()
+                .map(|name| cache.join(format!("{app_id}_{name}"))),
+        )
+        .find_map(|path| {
             if !checked_regular_file(drive, &path)
                 || !fs::symlink_metadata(&path)
                     .is_ok_and(|metadata| metadata.len() > 0 && metadata.len() <= MAX_ICON_BYTES)
@@ -1047,6 +1069,50 @@ mod tests {
             discover(&fixture.prefix).unwrap().games[0]
                 .icon_path
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn prefers_named_modern_and_legacy_game_covers_and_refuses_outside_cache_links() {
+        let fixture = Fixture::new();
+        fixture.game(480, "Spacewar", "Spacewar");
+        let cache = fixture.steam.join("appcache/librarycache");
+        let modern = cache.join("480");
+        fs::create_dir_all(&modern).unwrap();
+        let icon = cache.join("480_icon.png");
+        fs::write(&icon, b"synthetic icon fixture").unwrap();
+        let legacy = cache.join("480_header.jpg");
+        fs::write(&legacy, b"synthetic legacy header fixture").unwrap();
+        let header = modern.join("header.jpg");
+        fs::write(&header, b"synthetic modern header fixture").unwrap();
+        assert_eq!(
+            discover(&fixture.prefix).unwrap().games[0]
+                .icon_path
+                .as_deref(),
+            Some(header.to_str().unwrap())
+        );
+        fs::remove_file(&header).unwrap();
+        assert_eq!(
+            discover(&fixture.prefix).unwrap().games[0]
+                .icon_path
+                .as_deref(),
+            Some(legacy.to_str().unwrap())
+        );
+        let outside = fixture.root.join("outside-artwork");
+        fs::create_dir(&outside).unwrap();
+        fs::write(
+            outside.join("header.jpg"),
+            b"outside artwork must not be used",
+        )
+        .unwrap();
+        fs::remove_dir(&modern).unwrap();
+        symlink(&outside, &modern).unwrap();
+        fs::remove_file(&legacy).unwrap();
+        assert_eq!(
+            discover(&fixture.prefix).unwrap().games[0]
+                .icon_path
+                .as_deref(),
+            Some(icon.to_str().unwrap())
         );
     }
 

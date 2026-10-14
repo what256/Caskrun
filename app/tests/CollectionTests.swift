@@ -43,6 +43,43 @@ struct CollectionTests {
         expect(CollectionFilter.counts(entries, kind: .app) == [.all: 2, .windows: 2, .ps5: 0, .browser: 0], "zero-count platforms remain discoverable")
         expect(CollectionFilter.counts([], kind: nil).values.allSatisfy { $0 == 0 }, "empty collection has real zero counts")
 
+        var steamApp = entries[1]; steamApp.bottleID = "steam-original"
+        var importedSteam = entries[1]; importedSteam.bottleID = "steam-imported"
+        importedSteam = CollectionItem(id: "app:imported", name: "Steam", platform: .windows, kind: .app,
+                                       subtitle: "Steam (imported)", bottleID: "steam-imported")
+        var installedGame = entries[0]; installedGame.bottleID = "steam-imported"
+        let folderEntries = [installedGame, steamApp, importedSteam, entries[2], entries[3]]
+        let folders = [CollectionFolder(id: "steam-original", name: "Steam"),
+                       CollectionFolder(id: "steam-imported", name: "Steam (imported)"),
+                       CollectionFolder(id: "empty", name: "Empty bottle")]
+        func browse(_ open: String? = nil, _ platform: CollectionPlatform = .all,
+                    _ kind: CollectionItemKind? = nil, _ query: String = "") -> CollectionBrowseResult {
+            CollectionGrouping.browse(folderEntries, folders: folders, openFolderID: open,
+                                      platform: platform, kind: kind, query: query)
+        }
+        expect(browse().folders.map(\.id) == folders.map(\.id), "root presents every bottle, including an empty one")
+        expect(browse().entries.map(\.id) == ["ps5:one", "browser:one"], "installed games and clients stay in their bottles")
+        expect(browse().count == 5, "root count describes visible folders and non-Windows entries")
+        expect(browse("steam-imported").entries.map(\.id) == ["app:imported", "steam:one"],
+               "opening an imported folder shows its launcher first and only its own game")
+        expect(browse("steam-original").entries.map(\.id) == ["app:one"],
+               "same-named clients in different bottles are not merged")
+        expect(browse("steam-imported").folders.isEmpty, "folder contents do not recursively repeat the bottle list")
+        expect(browse("empty").entries.isEmpty && browse("missing").entries.isEmpty,
+               "empty and removed bottle routes never leak another bottle's children")
+        expect(browse(nil, .browser).folders.isEmpty && browse(nil, .browser).entries.map(\.id) == ["browser:one"],
+               "browser filter retains only browser items")
+        expect(browse(nil, .windows, .game).folders.map(\.id) == ["steam-imported"],
+               "game filter includes only bottles containing visible games")
+        expect(browse(nil, .windows, nil, "puzzle").folders.map(\.id) == ["steam-imported"],
+               "search finds a game's containing bottle without flattening the game")
+        expect(browse(nil, .windows, nil, "imported").folders.map(\.id) == ["steam-imported"],
+               "bottle names remain searchable")
+        expect(browse("steam-imported", .all, .game, "puzzle").entries.map(\.id) == ["steam:one"],
+               "search and type filters still apply inside a bottle")
+        expect(CollectionGrouping.contents(folderEntries, folderID: "steam-imported").count == 2,
+               "folder summary uses exact bottle identity")
+
         let identities = [
             CollectionItem.namespacedID(platform: .windows, source: "steam", rawID: "one"),
             CollectionItem.namespacedID(platform: .browser, source: "steam", rawID: "one"),
@@ -86,6 +123,13 @@ struct CollectionTests {
         expect(clicks.route(type: .leftMouseUp, windowNumber: 7, point: .zero,
                             timestamp: 10.21, clickCount: 2, doubleClickInterval: 0.5) == .consume,
                "second mouse-up cannot activate a reflowed control")
+        clicks.remember(id: "folder:steam-imported", windowNumber: 7, point: NSPoint(x: 100, y: 100), timestamp: 15)
+        expect(clicks.route(type: .leftMouseDown, windowNumber: 7, point: NSPoint(x: 100, y: 100),
+                            timestamp: 15.2, clickCount: 2, doubleClickInterval: 0.5) == .open("folder:steam-imported"),
+               "folder double-click keeps the first bottle identity after content reflow")
+        expect(clicks.route(type: .leftMouseUp, windowNumber: 7, point: .zero,
+                            timestamp: 15.21, clickCount: 2, doubleClickInterval: 0.5) == .consume,
+               "folder second mouse-up cannot launch the game beneath it")
         clicks.remember(id: "steam:one", windowNumber: 7, point: .zero, timestamp: 20)
         clicks.cancel()
         expect(clicks.route(type: .leftMouseDown, windowNumber: 7, point: .zero,

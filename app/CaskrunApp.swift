@@ -437,6 +437,7 @@ private enum CaskrunMenuCommand {
 private final class CaskrunAppDelegate: NSObject, NSApplicationDelegate {
     var handleMenuCommand: ((CaskrunMenuCommand) -> Void)?
     var shutdownOwnedApps: (() async -> Bool)?
+    var resumeAfterTerminationFailure: (() -> Void)?
     private var terminationPending = false
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -444,10 +445,18 @@ private final class CaskrunAppDelegate: NSObject, NSApplicationDelegate {
         guard let shutdownOwnedApps else { return .terminateCancel }
         terminationPending = true
         Task {
-            let complete = await shutdownOwnedApps()
+            var complete = await shutdownOwnedApps()
+            if complete {
+                complete = await CaskrunUpdateFileOwners.verify(bundleURL: Bundle.main.bundleURL,
+                    executableURL: Bundle.main.executableURL,
+                    ownPID: ProcessInfo.processInfo.processIdentifier) == .idle
+            }
             terminationPending = false
             sender.reply(toApplicationShouldTerminate: complete)
-            if !complete { handleMenuCommand?(.open) }
+            if !complete {
+                resumeAfterTerminationFailure?()
+                handleMenuCommand?(.open)
+            }
         }
         return .terminateLater
     }
@@ -612,6 +621,7 @@ private struct CaskrunStatusBridge: View {
                 }
                 return true
             }
+            delegate.resumeAfterTerminationFailure = { model.resumeAfterUpdateFailure() }
             CaskrunStatusBarController.shared.configure(model: model) { [weak delegate] command in
                 delegate?.handleMenuCommand?(command)
             }
@@ -887,6 +897,7 @@ final class CaskrunModel: ObservableObject {
     @Published var catalogAttemptLoadError: String?
     @Published var status = EngineStatus(wine_path: nil, bottle_count: 0)
     @Published var message: String?
+    private var quitShutdownCompleted = false
     @Published private(set) var isRequestingMicrophoneAccess = false
     @Published var selectedBottleID = ""
     @Published private(set) var bottleResolutions: [String: BottleResolutionStatus] = [:]
@@ -973,7 +984,8 @@ final class CaskrunModel: ObservableObject {
     }
 
     func shutdownForQuit() async -> Bool {
-        guard !isQuitting else { return false }
+        guard !isQuitting else { return quitShutdownCompleted }
+        quitShutdownCompleted = false
         isQuitting = true
         activeManualInstaller?.cancel()
         activeCatalogCancellation?.cancel()
@@ -1003,8 +1015,10 @@ final class CaskrunModel: ObservableObject {
                 throw NSError(domain: "Caskrun", code: 1,
                               userInfo: [NSLocalizedDescriptionKey: detail.isEmpty ? "Some Windows apps could not be stopped." : detail])
             }
+            quitShutdownCompleted = true
             return true
         } catch {
+            quitShutdownCompleted = false
             isQuitting = false
             message = "Caskrun could not finish closing its Windows apps.\n\n" + error.localizedDescription
             return false
@@ -1012,8 +1026,14 @@ final class CaskrunModel: ObservableObject {
     }
 
     func resumeAfterQuitFailure(_ detail: String) {
+        quitShutdownCompleted = false
         isQuitting = false
         message = "Caskrun could not finish closing its sessions.\n\n" + detail
+    }
+
+    func resumeAfterUpdateFailure() {
+        quitShutdownCompleted = false
+        isQuitting = false
     }
 
     private func call<T: Decodable>(_ arguments: [String], as type: T.Type) throws -> T {
@@ -1469,15 +1489,14 @@ final class CaskrunModel: ObservableObject {
 
     func loadGameIcon(_ game: SteamGame, in bottle: Bottle) {
         let key = "\(bottle.id):\(game.id)"
-        guard let path = game.icon_path else { gameIcons[key] = nil; gameIconStamps[key] = nil; return }
         let stamp = gameArtworkRevision(game, in: bottle)
         guard gameIcons[key] == nil || gameIconStamps[key] != stamp,
               requestedIcons.insert("game:\(key)").inserted else { return }
         Task {
             defer { requestedIcons.remove("game:\(key)") }
-            let data = await SteamArtworkReader.shared.read(path)
+            let data = await SteamGameArtworkStore.shared.load(appID: game.app_id, localPath: game.icon_path)
             guard !Task.isCancelled, bottles.contains(where: { $0.id == bottle.id }),
-                  steamGames[bottle.id]?.contains(where: { $0.id == game.id && $0.icon_path == path }) == true,
+                  steamGames[bottle.id]?.contains(where: { $0.id == game.id && $0.icon_path == game.icon_path }) == true,
                   gameArtworkRevision(game, in: bottle) == stamp else { return }
             guard let data else { gameIcons[key] = nil; gameIconStamps[key] = nil; return }
             gameIcons[key] = NSImage(data: data)
@@ -1492,7 +1511,7 @@ final class CaskrunModel: ObservableObject {
     }
 
     func gameArtworkRevision(_ game: SteamGame, in bottle: Bottle) -> String {
-        "\(artworkGenerations[bottle.id, default: 0]):\(steamArtworkRevisions[bottle.id, default: 0]):\(game.icon_path ?? "none")"
+        "cover-v1:\(game.app_id):\(artworkGenerations[bottle.id, default: 0]):\(steamArtworkRevisions[bottle.id, default: 0]):\(game.icon_path ?? "none")"
     }
 
     func requestSteamInstall(appID: UInt32, in bottle: Bottle) {
@@ -2560,9 +2579,27 @@ private struct InspectorCloseButtonStyle: ButtonStyle {
 @main
 struct CaskrunApp: App {
     @NSApplicationDelegateAdaptor(CaskrunAppDelegate.self) private var appDelegate
-    @StateObject private var model = CaskrunModel()
+    @StateObject private var model: CaskrunModel
     @StateObject private var catalogArtwork = CatalogArtworkStore()
-    @StateObject private var ps5 = PS5CollectionModel()
+    @StateObject private var ps5: PS5CollectionModel
+    @StateObject private var appUpdates: CaskrunAppUpdates
+
+    init() {
+        let model = CaskrunModel()
+        let ps5 = PS5CollectionModel()
+        _model = StateObject(wrappedValue: model)
+        _ps5 = StateObject(wrappedValue: ps5)
+        _appUpdates = StateObject(wrappedValue: CaskrunAppUpdates(prepareForQuit: {
+            guard await model.shutdownForQuit() else { return false }
+            guard await ps5.shutdownForQuit() else {
+                model.resumeAfterQuitFailure(ps5.error ?? "A PS5 session could not be stopped.")
+                return false
+            }
+            return true
+        }, recoverAfterInstallationFailure: {
+            model.resumeAfterUpdateFailure()
+        }, reportMessage: { model.message = $0 }))
+    }
     @State private var collectionSelectedID: String?
     @State private var collectionPlatform: CollectionPlatform = .all
     @State private var collectionKind: CollectionItemKind?
@@ -2672,7 +2709,7 @@ struct CaskrunApp: App {
         collectionSelectedID = launcher.map { "app:\(bottle.id):\($0.id)" }
         model.selectedBottleID = bottle.id
         openBottleID = bottle.id
-        selectedLauncherID = launcher?.id
+        selectedLauncherID = launcher?.id ?? primaryLauncher(in: bottle)?.id
         selectedSteamGameID = nil
         page = .collection
         showingBottleInspector = true
@@ -3069,6 +3106,8 @@ struct CaskrunApp: App {
         .defaultSize(width: 1000, height: 680)
         .commands {
             CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { appUpdates.checkForUpdates() }
+                    .disabled(!appUpdates.canCheckForUpdates || model.isQuitting || model.isRequestingMicrophoneAccess)
                 Button("Microphone Access…") { model.requestMicrophoneAccess() }
                     .disabled(model.isQuitting || model.isRequestingMicrophoneAccess)
             }
@@ -3221,11 +3260,19 @@ struct CaskrunApp: App {
                                 .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                         }
                     }.padding(.horizontal, 24)
-                    CollectionGrid(entries: collectionItems, selectedID: $collectionSelectedID,
+                    CollectionGrid(entries: collectionItems, folders: collectionFolders, openFolderID: $openBottleID,
+                                   selectedID: $collectionSelectedID,
                                    platform: $collectionPlatform, kind: $collectionKind,
                                    query: librarySearch, isLoading: model.loadingGameLibrary,
                                    onSelect: selectCollectionItem, onOpen: openCollectionItem,
                                    onLoadArtwork: loadCollectionArtwork,
+                                   onSelectFolder: selectCollectionFolder, onOpenFolder: openCollectionFolder,
+                                   onLoadFolderArtwork: { folder in
+                                       if let bottle = model.bottles.first(where: { $0.id == folder.id }) {
+                                           model.loadBottleIcon(bottle)
+                                           if let primary = primaryLauncher(in: bottle) { model.loadLauncherIcon(primary, in: bottle) }
+                                       }
+                                   }, onBack: closeCollectionInspector,
                                    onDiscover: {
                                        discoverScope = collectionPlatform == .browser ? .browser : .stores
                                        navigate(to: .discover)
@@ -3278,7 +3325,8 @@ struct CaskrunApp: App {
                            kind: entry.source == .apps ? .app : .game,
                            subtitle: entry.subtitle, icon: entry.icon, browserURL: entry.browserURL,
                            artworkRevision: entry.artworkRevision, canOpen: entry.canPlay,
-                           openActionTitle: entry.source == .epic || entry.source == .gog ? "Open store" : nil)
+                           openActionTitle: entry.source == .epic || entry.source == .gog ? "Open store" : nil,
+                           bottleID: collectionBottleID(for: entry))
         }
         items += ps5.games.map { game in
             CollectionItem(id: "ps5:\(game.id)", name: game.name, platform: .ps5, kind: .game,
@@ -3289,6 +3337,44 @@ struct CaskrunApp: App {
                            openActionTitle: ps5.runningGameIDs.contains(game.id) ? "Show window" : "Open game")
         }
         return items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private func collectionBottleID(for entry: GameLibraryEntry) -> String? {
+        guard entry.source != .browser else { return nil }
+        return model.bottles.first { bottle in
+            ["app:", "steam:", "publisher:"].contains { entry.id.hasPrefix($0 + bottle.id + ":") }
+        }?.id
+    }
+
+    private func primaryLauncher(in bottle: Bottle) -> SavedLauncher? {
+        let launchers = (model.launchers[bottle.id] ?? []).filter { !$0.hidden_from_home }
+        // Steam owns games within a Steam bottle; importing it must not change
+        // the folder's double-click into a random game's launch action.
+        return launchers.first { URL(fileURLWithPath: $0.path).lastPathComponent.lowercased() == "steam.exe" }
+            ?? launchers.first
+    }
+
+    private var collectionFolders: [CollectionFolder] {
+        let canLaunch = !model.isQuitting && !model.isLaunching && !model.isManagingBottle && model.status.wine_path != nil
+        return model.bottles.map { bottle in
+            let primary = primaryLauncher(in: bottle)
+            let icon = primary.flatMap { model.launcherIcons["\(bottle.id):\($0.id)"] }
+                ?? model.bottleIcons[bottle.id]
+            return CollectionFolder(id: bottle.id, name: bottle.name, icon: icon,
+                                    canOpen: canLaunch && primary != nil, primaryAppName: primary?.name)
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private func selectCollectionFolder(_ folder: CollectionFolder) {
+        guard !model.isQuitting, let bottle = model.bottles.first(where: { $0.id == folder.id }) else { return }
+        inspectBottle(bottle)
+    }
+
+    private func openCollectionFolder(_ folder: CollectionFolder) {
+        guard !model.isQuitting, folder.canOpen,
+              let bottle = model.bottles.first(where: { $0.id == folder.id }),
+              let launcher = primaryLauncher(in: bottle) else { return }
+        model.runLauncher(launcher, in: bottle)
     }
 
     private func beginPS5Import() {
@@ -3491,7 +3577,7 @@ struct CaskrunApp: App {
         let canLaunch = !model.isQuitting && !model.isLaunching && !model.isManagingBottle && model.status.wine_path != nil
         var entries: [GameLibraryEntry] = []
         for bottle in model.bottles {
-            for game in model.steamGames[bottle.id] ?? [] {
+            for game in model.steamGames[bottle.id] ?? [] where game.app_id != 228980 {
                 let compatibility = GameCompatibilityCatalog.shared.game(appID: game.app_id)
                 entries.append(GameLibraryEntry(id: "steam:\(bottle.id):\(game.app_id)", name: game.name, source: .steam,
                     subtitle: "Steam · \(bottle.name)", compatibilityText: compatibility?.summary ?? "Not tested in Caskrun",
@@ -3815,12 +3901,15 @@ struct CaskrunApp: App {
                     Image(systemName: item.kind == .app ? "app" : "gamecontroller")
                         .font(.system(size: 28)).foregroundStyle(.secondary).frame(width: 48, height: 48)
                 }
+            } else if let icon = collectionFolders.first(where: { $0.id == bottle.id })?.icon {
+                Image(nsImage: icon).resizable().interpolation(.high).scaledToFit()
+                    .frame(width: 42, height: 42)
             } else { BottleArtwork(model: model, bottle: bottle) }
             VStack(alignment: .leading, spacing: 4) {
                 Text(selectedCollectionItem?.platform == .windows ? (selectedCollectionItem?.name ?? bottle.name) : bottle.name).font(.system(size: 19, weight: .semibold, design: .rounded))
                     .lineLimit(2)
                 let count = (model.launchers[bottle.id] ?? []).count
-                let games = (model.steamGames[bottle.id] ?? []).count
+                let games = (model.steamGames[bottle.id] ?? []).filter { $0.app_id != 228980 }.count
                 Text(selectedCollectionItem?.platform == .windows ? "Windows · " + bottle.name : "\(count) \(count == 1 ? "app" : "apps")" + (games == 0 ? "" : " · \(games) \(games == 1 ? "game" : "games")"))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
@@ -3830,7 +3919,7 @@ struct CaskrunApp: App {
 
     private func inspectorApps(for bottle: Bottle) -> some View {
         let apps = model.launchers[bottle.id] ?? []
-        let games = model.steamGames[bottle.id] ?? []
+        let games = (model.steamGames[bottle.id] ?? []).filter { $0.app_id != 228980 }
         let busy = model.isManagingBottle || model.isLaunching
         return VStack(alignment: .leading, spacing: 12) {
             if let entry = selectedCollectionItem, entry.id.hasPrefix("publisher:") {

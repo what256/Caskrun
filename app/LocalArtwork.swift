@@ -94,7 +94,7 @@ actor SteamArtworkReader {
         guard !Task.isCancelled else { return nil }
         return await Task.detached(priority: .utility) {
             guard let bytes = MacAppArtwork.read(path, maximum: 8 * 1024 * 1024) else { return nil as Data? }
-            return MacAppArtwork.png(bytes)
+            return SteamGameArtworkPolicy.thumbnail(bytes, local: true)
         }.value
     }
 }
