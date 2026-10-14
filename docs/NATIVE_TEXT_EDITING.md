@@ -71,8 +71,9 @@ Unrecognized engines and records remain refused.
   the second field after its matching right-button down/up pair. In selective
   key-only polling, native Paste was refused until the targeting pair was
   processed. A later explicit Edit action still worked normally.
-- These checks do not establish Steam CEF login behavior, game compatibility
-  or game save handling. Real account and gameplay checks remain user tests.
+- The user subsequently confirmed that the real Steam login window was usable
+  and its native Paste menu worked after the local cache repair. Account
+  sign-in, game compatibility and game save handling remain unvalidated.
 
 A real imported Steam launch later exited with Steam's own 15-second main-loop
 stall assertion, without a native-menu exception. The red-close check initially
@@ -85,8 +86,8 @@ those tests; all disposable prefixes were removed after scoped shutdown and
 zero-owner checks. This points to imported-bottle state or preferences, without
 identifying the exact cause. A local, idle-only browser-cache reset retained
 the old cache directories in a private backup; that real imported client then
-remained running for over six minutes without the watchdog assertion. Its
-actual login controls still require a visual/user check. This repair is a
+remained running for over six minutes without the watchdog assertion. The user
+then confirmed the usable login window and native Paste menu. This repair is a
 separate reversible diagnostic action, not an automatic behavior of this
 runtime update.
 
