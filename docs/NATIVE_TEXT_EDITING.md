@@ -217,6 +217,37 @@ the same bundle identifier while computer-use attachment timed out. The
 successor routing separates those background roles. The native replacement
 and Dock interaction remain live test items.
 
+Build 46 was then installed after normal Caskrun Quit and a zero-owner check.
+Two real starts stalled before sign-in. Bounded native stack samples found
+Steam's engine IPC thread waiting in Wine's CoreAudio format probe while both
+AppKit event loops remained responsive. The blocking operation was assigning
+the audio unit's current device. A separate native macOS capture-device probe
+also blocked at that operation for its five-second limit; native output-device
+assignment succeeded in both ARM64 and x86-64 processes. These observations
+establish a recurring capture-device initialization stall. Its underlying
+cause and repair remain unresolved.
+
+A temporary, process-only audio-driver exclusion allowed the real sign-in
+window to render. In that diagnostic session exactly one Steam process was a
+regular macOS app with the generated bundle identity; the main process and
+background helpers stayed outside it. Computer use attached to the actual
+sign-in window and reproduced the poorly rendered white context menu. A
+read-only structural probe identified a captured, directly owned
+`Chrome_WidgetWin_1` popup, with no Windows menu-tracking mode and no standard
+system I-beam cursor. It was not a `#32768` Windows menu, so the existing native
+replacement correctly refused that unsupported path. Relaxing its standard
+menu-owner check would not fix this case. Supporting the custom popup needs
+separate editable-control proof, targeted cancellation and capture-unwind
+verification. First-click behavior and Dock clicking still require live
+verification.
+
+The temporary diagnostic session was stopped through the selected bottle's
+normal shutdown command, with zero remaining Steam applications confirmed.
+The audio exclusion was never saved to bottle or macOS settings. No account
+sign-in, clipboard inspection, audio recording or gameplay occurred; raw
+screenshots and native samples were removed, with only sanitized local
+diagnostic receipts retained outside source control.
+
 An earlier real imported Steam launch exited with Steam's own 15-second main-loop
 stall assertion, without a native-menu exception. The red-close check initially
 retained the Caskrun, Steam and helper processes; that is not evidence of
