@@ -100,10 +100,23 @@ are accessory. Full packaged-runtime and vendor-launcher checks remain separate.
 
 `wine-11.0-native-text-editing.patch` follows the identity patch. It forwards
 native Edit commands and Command shortcuts as balanced Windows editing keys.
-For a recognized Steam text field, bounded asynchronous menu queries retire
-only the original popup whose window, thread and top-menu ownership were
-verified. The native popup appears after tracking and capture end; unsupported
-custom menus keep their original UI. No clipboard or field values are read.
+Within the unchanged active Steam/Wine Cocoa I-beam scope, bounded asynchronous
+queries retire a verified standard Windows menu or one directly owned captured
+`Chrome_WidgetWin_1` popup. The latter requires the exact class, popup shape,
+the tool-window and no-activate extended styles, absence of the transparent
+style, original GUI thread/root/focus, current capture and request serial.
+Chromium toggles the layered style while its menu is shown, so that bit is
+observed but not required; requiring it previously rejected Steam's own menu. Longer class-name prefixes, changed ownership, stale input and
+unknown popups are refused. After a final identity/visibility recheck, it posts
+one `WM_CANCELMODE` to the captured popup without a synchronous application
+callback. Success only requests cancellation: later queries carry that exact
+popup and original focus, then require it hidden or destroyed with capture
+released before showing the native menu. No clipboard or field values are read.
+Foreign Win32 cursor handles do not establish the actual Cocoa cursor shape;
+the source retains its original driver-local I-beam guard. In the real client
+the first right-click, and repeated dismiss/reopen, each produced one native
+editing menu with no Chromium popup behind it. Dock hide/reopen cycles and a
+full clipboard round-trip ending in Paste remain unvalidated.
 
 `wine-11.0-steam-native-window.patch` follows the editing patch. Its closed
 process/title/size policy adds native AppKit controls over the empty top strip
@@ -130,6 +143,21 @@ NTDLL child loaders in isolated clones. Export sets stay unchanged. The
 packaged source records carry the corresponding patches. See
 [native editing validation](../docs/NATIVE_TEXT_EDITING.md) for the exact runtime
 identity, tests and limits; these changes do not establish gameplay support.
+
+The complete recognized-popup package is pinned to
+`sha256:fb91add5bbcdddef39738259595c2da592bed8afb863fccd6384ae6b1337a5ee`.
+Ten direct predecessor edges, including the captured-popup package
+`sha256:46998fc3cf95d882e14c3b5978dba2ee086c5b92e826400fda528517f3808082`,
+retain all 36 historical transitions and backup names. TLS/Steam sources keep recipe/PE gates; later reviewed native packages
+use locked, idle-only record migration and retain rollback. Query-state layout
+is checked for Unix64/PE32/PE64 and existing event/query ordinals stay fixed.
+
+Earlier audio-device probes stalled, but normal audio-enabled Steam startup
+later succeeded after unlock and inspection of already-enabled permissions.
+A repeated capture probe completed in about 6 ms after an earlier 5-second
+limit. This is a transient or context-dependent observation, not proof of a
+persistent microphone failure. No audio bypass, permission change or saved
+audio setting is included in these patches.
 
 ## DXMT development candidate — separate from the included runtime
 

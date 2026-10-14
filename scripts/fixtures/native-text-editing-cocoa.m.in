@@ -17,7 +17,7 @@ static CGPoint cgpoint_win_from_mac(CGPoint point){return point;}
 typedef void *macdrv_window;
 enum {QUERY_NATIVE_TEXT_CONTEXT=8};
 enum {NATIVE_TEXT_CONTEXT_PENDING,NATIVE_TEXT_CONTEXT_DISMISS_REQUESTED,NATIVE_TEXT_CONTEXT_READY,NATIVE_TEXT_CONTEXT_REFUSED};
-typedef struct {int refs,type;macdrv_window window;bool status,done;struct{void *foreground;unsigned int serial,phase;bool menu_seen,slot_owned;}native_text_context;}macdrv_query;
+typedef struct {int refs,type;macdrv_window window;bool status,done;struct{void *foreground,*focus,*popup;unsigned int serial,phase;bool menu_seen,slot_owned;}native_text_context;}macdrv_query;
 typedef struct {int type;macdrv_window window;struct{unsigned int vkey;unsigned long time_ms;void *foreground;bool context_menu;}native_text_edit;struct{int button;bool pressed;int x,y;unsigned long time_ms;}mouse_button;struct{macdrv_query *query;}query_event;}macdrv_event;
 enum {MOUSE_BUTTON=10,NATIVE_TEXT_EDIT_ACTION=33,QUERY_EVENT_NO_PREEMPT_WAIT=15};
 static BOOL steam_enabled,helper_process,native_enabled,missing_event,missing_clock;
@@ -26,7 +26,7 @@ static int fixtureClock(clockid_t clock,struct timespec *now){return missing_clo
 static BOOL CaskrunSteamDockEnabled(void){return steam_enabled;}
 static BOOL CaskrunIsWindowsProcess(NSString *name){return helper_process && [name isEqualToString:@"steamwebhelper.exe"];}
 static BOOL CaskrunNativeDockEnabled(void){return native_enabled;}
-static int posted,popup_count,button_count,field_focus,action_focus,windows_popup,query_mode,query_count,query_refs;
+static int posted,popup_count,button_count,field_focus,action_focus,windows_popup,query_mode,query_count,query_refs,captured_unwind_steps;
 static BOOL buttons[2];
 static unsigned int last_action;
 static macdrv_event *macdrv_create_event(int type,id window){macdrv_event *e=calloc(1,sizeof(*e));e->type=type;e->window=(void*)window;return e;}
@@ -61,6 +61,13 @@ static void *macdrv_get_window_hwnd(macdrv_window window){(void)window;return (v
  if(event->type==QUERY_EVENT_NO_PREEMPT_WAIT){
   macdrv_query*q=event->query_event.query;assert(q->type==8&&q->native_text_context.foreground==(void*)321);query_count++;
   q->status=true;q->done=true;
+  if(!q->native_text_context.focus)q->native_text_context.focus=(void*)456;
+  else assert(q->native_text_context.focus==(void*)456);
+  if(query_mode==4){
+   if(!q->native_text_context.menu_seen){assert(!q->native_text_context.popup&&windows_popup);q->native_text_context.popup=(void*)888;q->native_text_context.phase=NATIVE_TEXT_CONTEXT_DISMISS_REQUESTED;}
+   else{assert(q->native_text_context.popup==(void*)888);if(captured_unwind_steps){captured_unwind_steps--;q->native_text_context.phase=NATIVE_TEXT_CONTEXT_PENDING;}else{windows_popup=0;q->native_text_context.phase=NATIVE_TEXT_CONTEXT_READY;}}
+   return;
+  }
   if(query_mode==1)q->native_text_context.phase=NATIVE_TEXT_CONTEXT_PENDING;
   else if(query_mode==2)q->native_text_context.phase=NATIVE_TEXT_CONTEXT_REFUSED;
   else if(query_mode==3){assert(late_count<4);late_queries[late_count++]=macdrv_retain_query(q);q->done=false;}
@@ -226,7 +233,22 @@ int main(void){@autoreleasepool {
   button_count=0;assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);
   if(i==0)window.closing=YES;else testApp.keyWindow=nil;fixtureStep();assert(query_refs==0&&popup_count==1);window.closing=NO;testApp.keyWindow=window;
  }
- assert(!scheduled.count);puts("async menu exit, unsupported popup, timeout and same-root input cancellation passed");
+ assert(!scheduled.count);
+ /* The captured popup/focus must survive each production Cocoa successor query. */
+ query_mode=4;captured_unwind_steps=2;button_count=0;
+ assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);
+ assert(windows_popup==1&&popup_count==1&&query_refs==1);fixtureStep();assert(windows_popup==1&&popup_count==1);fixtureStep();assert(!windows_popup&&popup_count==1);fixtureStep();assert(popup_count==2&&query_refs==0);
+ /* A new input still cancels this path while original custom UI is tracking. */
+ captured_unwind_steps=4;button_count=0;
+ assert([controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);
+ assert(![controller caskrunHandleTextContextEvent:event(NSEventTypeLeftMouseDown,window,140)]);
+ fixtureStep();assert(windows_popup==1&&popup_count==2&&query_refs==0&&!scheduled.count);
+ /* Non-text pointers retain their original custom popup route. */
+ controller->cursor=[NSCursor arrowCursor];button_count=0;
+ assert(![controller caskrunHandleTextContextEvent:event(NSEventTypeRightMouseDown,window,140)]);
+ assert(button_count==0&&popup_count==2);controller->cursor=[NSCursor IBeamCursor];
+ puts("captured popup/focus query carry, delayed exit, new input and non-text scope passed");
+ puts("async menu exit, unsupported popup, timeout and same-root input cancellation passed");
  puts("queue peek preserves events");
  puts("two-field targeting, native menu, paired releases and 14 context/action refusals passed");
 }return 0;}

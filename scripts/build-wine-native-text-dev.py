@@ -32,7 +32,7 @@ PATCHES = {
     "wine-11.0-steam-cef-commandline.patch": "408dade743a358886e76b6bb6e592ed6cb8fa67738c1b6d4b061d817c2cbe90f",
     "wine-11.0-steam-dock.patch": "33811970ce63401baabaffd491ce0ac79c69ce740f0ad37687355041f2bd1844",
     "wine-11.0-native-app-identity.patch": "f860b3a32a34d807319827c8a03298b1c24a705fa7075dc3a32cca7567c2d0ab",
-    "wine-11.0-native-text-editing.patch": "4bd978c03d8788337bc609ad9ec24dc5c90fe7e2b371e9eaf4440eb5557cc80a",
+    "wine-11.0-native-text-editing.patch": "d56e8fd293f5a1cd511629f7ec28daf5b021aefbb1980d5f30f13fd2c91b73a5",
     "wine-11.0-winemac-metal-exports.patch": "ada2df6599a9883689cda250cf53e46eb030205503054b1774d7bb1b67fe8235",
     "wine-11.0-dxmt-client-surface.patch": "9e6cc0516e87b37dc2dca98660726098d740a2449aff5a169a92a0c4d9b63a0a",
 }
@@ -251,7 +251,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", type=Path, default=REPO / ".build/dxmt-wine-runtime-dev-v4")
     parser.add_argument("--seed", type=Path, default=REPO / ".build/wine-native-apps-11.0-dev")
-    parser.add_argument("--output", type=Path, default=REPO / ".build/native-text-runtime-v9")
+    parser.add_argument("--output", type=Path, default=REPO / ".build/native-text-runtime-v10")
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     try:

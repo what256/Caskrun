@@ -5,16 +5,34 @@ Paste and Select All, including Command-X/C/V/A. These actions send balanced
 Windows editing keys to the focused Windows window. The native menu does not
 read clipboard contents, field values, login credentials or browser DOM data.
 
-Steam's web helper also gets a native text context menu when the pointer is
-an I-beam over its active, visible content. Mouse capture, cursor clipping,
-dragging, closing windows and other Windows processes keep their existing
-right-click behavior. The original balanced click targets the field without
-changing its selection. A bounded asynchronous query verifies the original
-Windows menu's window, root, GUI thread and owner, requests menu cancellation,
-then waits for tracking and capture to end before showing the native menu.
-The two menus are never deliberately displayed together. Unknown custom
-popups retain their original menu; **Edit → Paste** and **Command-V** remain
-available.
+Steam's web helper also has a native text context path when Wine's own
+Cocoa application cursor is an I-beam over its active, visible content. Mouse
+capture before targeting, cursor clipping, dragging, closing windows and other
+Windows processes retain their existing right-click behavior. The original
+balanced right-button pair targets the Windows control without changing its
+selection. A bounded asynchronous query verifies the original window, root,
+GUI thread and owner before requesting cancellation of a standard Windows menu.
+
+The new development candidate also recognizes one captured Chromium popup:
+exact class `Chrome_WidgetWin_1`, a visible, enabled top-level popup directly
+owned by the original root on its GUI thread. It must have tool-window and
+no-activate styles and must not have the transparent style. Chromium toggles
+the layered style while the menu is shown, so that bit is observed but not
+required. Longer class names sharing that prefix are refused. The existing Steam/I-beam scope
+is unchanged; an unknown captured window does not become an editable control.
+The query rechecks popup identity, class, styles, visibility, ownership, active
+root, focus and request serial immediately before posting one `WM_CANCELMODE`
+to that exact popup. It invokes no synchronous application callback.
+
+Success means cancellation was requested, not that the old menu is gone.
+Every subsequent query carries the original GUI focus and exact popup. The
+popup must be hidden or destroyed, capture must be released, and the same
+root and focus must remain before a native menu may appear. A changed popup,
+new capture or changed focus refuses the replacement. GUI focus identifies a
+Windows control; it does not inspect Chromium's individual DOM fields. The
+two menus are never deliberately displayed together. Unrecognized popups
+retain their original menu; **Edit → Paste** and **Command-V** remain available.
+The actual Steam outcome for this new candidate is still pending.
 
 A new key, click, scroll, loss of focus or closing window cancels the pending
 replacement. Queries expire after 450 milliseconds. Four outstanding query
@@ -105,8 +123,11 @@ repaired and signed. App packaging checks the entire runtime identity after
 outer app signing and refuses a changed engine.
 
 The new package has exact content identity
-`sha256:aae295ed019afb077ebb6e58d90445d7cbaf0b3a77fe69dc28f42683622715b9`.
-Known older runtime records have explicit, directly reviewed migration edges.
+`sha256:fb91add5bbcdddef39738259595c2da592bed8afb863fccd6384ae6b1337a5ee`.
+Ten known predecessor packages, including the captured-popup package
+`sha256:46998fc3cf95d882e14c3b5978dba2ee086c5b92e826400fda528517f3808082`,
+have explicit direct migration edges to this complete package. All 36 historical edges and their separate backup names
+remain available; no intermediate engine is adopted during a skipped release.
 The native and switchable predecessors use record-only migration; older
 TLS/Steam predecessors retain their Steam recipe and PE validation gates.
 Migration occurs under the bottle lock only after all relevant owners are
@@ -132,6 +153,13 @@ The locally deployed build-45 predecessor
 `sha256:d8bd4eb824d7ad1b340cbd32ae70f04cdeafb7a1d6016ee4754e472699e61ec8`
 has an explicit idle-only transition to the package with one visible helper
 identity. Its historical approval and recovery backups remain intact.
+
+The build-46 predecessor
+`sha256:aae295ed019afb077ebb6e58d90445d7cbaf0b3a77fe69dc28f42683622715b9`
+also has a direct, idle-only record transition to the captured-popup candidate.
+Its exact renderer approval and all earlier recovery backups remain intact.
+The new package changes native query state within the existing union; event
+and query ordinals remain fixed and all driver views are rebuilt together.
 
 ## Validation boundary
 
@@ -174,7 +202,13 @@ identity. Its historical approval and recovery backups remain intact.
   menu tests model a real Windows popup, delayed cancellation unwind,
   unsupported popups, clock failure, input cancellation and late queued owners
   retaining the four-slot limit. A reused HWND is refused unless it still maps
-  to the captured Cocoa window.
+  to the captured Cocoa window. The new candidate passes seven extracted
+  editing test groups, including 53 captured-popup outcomes: delayed unwind,
+  replacement capture, same-root focus changes, late ownership/style changes,
+  truncated class-name prefixes and failed cancellation. Cocoa tests carry the
+  exact popup and focus across successor queries. Query-state layout checks
+  cover Unix64, PE32 and PE64. These fixtures do not establish the real Steam
+  first-click result.
 - The original Windows probe uses two fields and a fixed synthetic marker;
   it never reads or writes the real clipboard. Its source is
   `scripts/probes/native-text-edit.c`.
@@ -198,8 +232,12 @@ identity. Its historical approval and recovery backups remain intact.
   off screen while its process and Steam's sign-in window remained running.
   This does not establish retention of a logged-in client or an active game.
 
-The combined source passes 500 Rust unit tests and seven integration tests,
-with two existing ignored tests, in a serial run.
+The preceding combined source passed 500 Rust unit tests and seven integration
+tests, with two existing ignored tests, in a serial run. The new candidate's
+focused Core checks pass 70 migration tests and 20 graphics tests. They cover
+all nine direct predecessors, historical destinations, backup preservation,
+lock waiting, owner refusal, package-change rollback and exact renderer approval.
+These checks do not establish gameplay or repeated real-client reopen behavior.
 
 The first bundled-helper package was installed locally as build 45 after normal
 Caskrun Quit and a zero-owner check on the previous app. The imported bottle's
@@ -221,32 +259,45 @@ Build 46 was then installed after normal Caskrun Quit and a zero-owner check.
 Two real starts stalled before sign-in. Bounded native stack samples found
 Steam's engine IPC thread waiting in Wine's CoreAudio format probe while both
 AppKit event loops remained responsive. The blocking operation was assigning
-the audio unit's current device. A separate native macOS capture-device probe
-also blocked at that operation for its five-second limit; native output-device
-assignment succeeded in both ARM64 and x86-64 processes. These observations
-establish a recurring capture-device initialization stall. Its underlying
-cause and repair remain unresolved.
+the audio unit's current device; the native sample did not establish input or
+output direction. A separate native capture-device probe blocked at that
+operation for its five-second limit, while output-device assignment succeeded
+in both ARM64 and x86-64 processes.
 
-A temporary, process-only audio-driver exclusion allowed the real sign-in
-window to render. In that diagnostic session exactly one Steam process was a
-regular macOS app with the generated bundle identity; the main process and
-background helpers stayed outside it. Computer use attached to the actual
-sign-in window and reproduced the poorly rendered white context menu. A
-read-only structural probe identified a captured, directly owned
-`Chrome_WidgetWin_1` popup, with no Windows menu-tracking mode and no standard
-system I-beam cursor. It was not a `#32768` Windows menu, so the existing native
-replacement correctly refused that unsupported path. Relaxing its standard
-menu-owner check would not fix this case. Supporting the custom popup needs
-separate editable-control proof, targeted cancellation and capture-unwind
-verification. First-click behavior and Dock clicking still require live
-verification.
+A temporary, process-only audio-driver exclusion allowed a diagnostic sign-in
+window to render. Computer use attached to that actual window and reproduced
+the poorly rendered white context menu. A read-only structural probe identified
+a captured, directly owned `Chrome_WidgetWin_1` popup with no Windows menu-tracking
+mode. It was not a `#32768` standard Windows menu, so relaxing the standard
+menu-owner check would not address this different path.
 
-The temporary diagnostic session was stopped through the selected bottle's
-normal shutdown command, with zero remaining Steam applications confirmed.
-The audio exclusion was never saved to bottle or macOS settings. No account
+The earlier claim that this probe established a custom or non-I-beam cursor
+was incorrect. External `GetCursorInfo` observations and failed inspection of
+foreign cursor handles through `GetIconInfo` cannot establish the cursor shape
+used by Wine's Cocoa driver. The actual eligibility guard reads that driver's
+own `WineApplicationController` cursor and still requires its standard I-beam
+or vertical I-beam. The captured-popup implementation does not relax that guard.
+Its first-right-click replacement and repeated Dock hide/reopen cycles remain
+pending live checks.
+
+After unlocking and inspecting the existing permissions, a normal launch with
+audio enabled reached a usable real sign-in window. The permissions were
+already enabled and were left unchanged. A repeat native capture-device probe
+completed in about six milliseconds instead of reaching the earlier five-second
+limit. The audio stall is therefore transient or context-dependent in the
+observed tests; a persistent microphone blocker or its root cause was not
+established. No audio bypass, registry change or permission change is part of
+the product fix. The temporary exclusion was never saved to bottle or macOS
+settings.
+
+Exactly one Steam process held the visible native app identity during the
+observed diagnostic session, with the main process and background helpers
+outside it. That observation does not validate every relaunch or Dock cycle.
+The diagnostic session was stopped through the selected bottle's normal
+shutdown command, with zero remaining Steam applications confirmed. No account
 sign-in, clipboard inspection, audio recording or gameplay occurred; raw
 screenshots and native samples were removed, with only sanitized local
-diagnostic receipts retained outside source control.
+receipts retained outside source control.
 
 An earlier real imported Steam launch exited with Steam's own 15-second main-loop
 stall assertion, without a native-menu exception. The red-close check initially
@@ -267,3 +318,76 @@ runtime update.
 The package is a local development build, not an approved public binary
 release. Corresponding Wine source, patches and license notices remain inside
 the runtime package.
+
+### Build 47 stopping point
+
+The complete v10 runtime was packaged in local build 47. Nested and outer
+signatures, exact engine identity, ARM64 app/Core architecture and development
+DMG verification passed. The full serial Core suite passed 505 unit and seven
+integration tests, with two unit tests intentionally ignored.
+
+A first-click automation attempt still displayed the original white Chromium
+popup. A process-only cursor trace requested the native I-beam on the same GUI
+thread before that click. This establishes the requested cursor route, not the
+Cocoa cursor or key-window state at the event. The Caskrun Steam app was not
+observed as the frontmost macOS application, so this attempt cannot establish
+whether the guarded replacement works in a genuine foreground session. The
+key-window and focus guards must remain in place; background input must not
+force activation or replace an unrelated application's menu.
+
+Work stopped at the user's request. Only the Caskrun-owned test bottle was
+stopped; the separate compatibility application was left alone. Temporary
+keep-awake and cursor tracing ended. Actual foreground menu behavior remains
+unverified. No claim of a completed Steam menu repair follows from this build.
+
+### Build 48: the captured-popup recognizer was too strict
+
+A second opt-in, boolean-only diagnostic engine extended the existing trace into
+`macdrv_native_text_context`. In a genuinely frontmost session every Cocoa gate
+passed and the request was accepted; the Windows query then refused at the
+capture branch on the first poll in which Steam's popup held capture, without
+ever recording that popup, so `WM_CANCELMODE` was never posted.
+
+Per-bit observations named the cause exactly. The captured window is directly
+owned by the original root on its GUI thread, visible, holds capture, and its
+class is exactly `Chrome_WidgetWin_1`. It has the tool-window and no-activate
+styles and not the transparent style. It does **not** have `WS_EX_LAYERED`,
+which the recognizer required. Chromium toggles that style while its menu is
+shown, so requiring it rejected Steam's own menu as an unrecognized window.
+
+The repair removes `WS_EX_LAYERED` from the required set. The exact class and
+length, popup shape, child/disabled refusal, transparent-style refusal, direct
+owner, GUI thread, visibility, capture holder, active root, unchanged focus and
+request serial, and the existing 450ms/four-slot bounds are unchanged. The
+earlier structural probe had observed the style in a transient state; the test
+suite had encoded the same assumption, asserting that a non-layered popup must
+be refused. That case is now inverted and a positive case was added.
+
+The complete runtime was rebuilt as
+`sha256:fb91add5bbcdddef39738259595c2da592bed8afb863fccd6384ae6b1337a5ee`
+and packaged as local build 48, with verified nested and outer signatures,
+exact engine identity, ARM64 architecture and DMG checksum. The full serial
+Core suite passed 507 unit and seven integration tests, with two intentionally
+ignored. Focused native editing passed seven groups and the packager six.
+Ten direct predecessor edges, including build 47's engine, retain all 36
+historical transitions and their backups. Build 47 and its DMG are retained in
+an ignored recovery directory.
+
+The real imported Steam client migrated to this engine under the bottle lock and
+reached its sign-in window. Exactly one correctly named Steam application held
+the visible identity. The **first** right-click inside the account field
+produced a single native macOS editing menu with Cut, Copy, Paste and Select All
+and their Command shortcuts, with no Chromium popup behind it and a responsive
+window; AppKit adds its own AutoFill item. Repeated dismiss and reopen produced
+the same single native menu. Menu-driven Select All and Copy acted on the
+focused field.
+
+Limits of this check: right-clicking past the end of the text collapses the
+selection first, which is ordinary Chromium behavior and not a property of this
+replacement; a right-click inside the selection retains it. Synthetic typing
+through this path did not reproduce the intended characters, so the field marker
+was the repeated character the injected keys produced; a full clipboard
+round-trip ending in Paste was not completed before testing stopped at the
+user's request. No account sign-in occurred, no clipboard contents were read,
+and the right-click path while the application is not frontmost deliberately
+still retains Steam's own menu.

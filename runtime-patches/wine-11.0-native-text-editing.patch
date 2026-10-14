@@ -5,9 +5,11 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 
 Native Edit commands forward balanced Windows shortcuts. A Steam-only text
 context fallback targets with the original balanced right-button pair, then
-asynchronously replaces only a verified same-root/thread Windows menu after
-EndMenu has completed. Unknown custom popups retain their original menu.
-No clipboard or field content is read. Old event/query ordinals stay fixed.
+asynchronously replaces a verified Windows menu or the narrowly recognized
+captured Chromium tool popup after cancellation and capture have completed.
+The original GUI focus and exact captured popup stay bound to the request.
+Unrecognized popups retain their original menu. No clipboard or field content
+is read. Old event/query ordinals stay fixed; all driver views must be rebuilt.
 
 --- a/dlls/winemac.drv/cocoa_app.h
 +++ b/dlls/winemac.drv/cocoa_app.h
@@ -97,7 +99,7 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
  
  
  #if !defined(MAC_OS_VERSION_14_0) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_VERSION_14_0
-@@ -319,6 +372,204 @@
+@@ -319,6 +372,209 @@
          [super dealloc];
      }
  
@@ -162,9 +164,10 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
 +
 +    /* Never put a native popup over a still-tracking Windows popup. This is
 +     * asynchronous: nested Windows menu tracking may need the Cocoa thread.
-+     * Unknown/custom CEF menus remain the original single menu. */
++     * Unrecognized CEF menus remain the original single menu. */
 +    - (void) caskrunPrepareTextContextForWindow:(WineWindow*)window event:(NSEvent*)mouseEvent
-+                                       serial:(unsigned int)serial foreground:(void*)foreground menuSeen:(BOOL)menuSeen query:(macdrv_query*)query
++                                       serial:(unsigned int)serial foreground:(void*)foreground focus:(void*)focus popup:(void*)popup
++                                       menuSeen:(BOOL)menuSeen query:(macdrv_query*)query
 +    {
 +        unsigned int phase = NATIVE_TEXT_CONTEXT_PENDING;
 +        BOOL valid = macdrv_native_text_context_current(serial) &&
@@ -182,6 +185,8 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
 +        if (query && query->done)
 +        {
 +            phase = query->status ? query->native_text_context.phase : NATIVE_TEXT_CONTEXT_REFUSED;
++            focus = query->native_text_context.focus;
++            popup = query->native_text_context.popup;
 +            macdrv_release_query(query);
 +            query = NULL;
 +            if (phase == NATIVE_TEXT_CONTEXT_REFUSED)
@@ -206,6 +211,8 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
 +            if (!query) { CaskrunCancelTextContext(serial); return; }
 +            query->window = (macdrv_window)[window retain];
 +            query->native_text_context.foreground = foreground;
++            query->native_text_context.focus = focus;
++            query->native_text_context.popup = popup;
 +            query->native_text_context.serial = serial;
 +            query->native_text_context.menu_seen = menuSeen;
 +            event = macdrv_create_event(QUERY_EVENT_NO_PREEMPT_WAIT, window);
@@ -216,7 +223,7 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
 +        /* The copied block retains only the original window and mouse event.
 +         * One outstanding query per request; all terminal branches release it. */
 +        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-+            [self caskrunPrepareTextContextForWindow:window event:mouseEvent serial:serial foreground:foreground menuSeen:menuSeen query:query];
++            [self caskrunPrepareTextContextForWindow:window event:mouseEvent serial:serial foreground:foreground focus:focus popup:popup menuSeen:menuSeen query:query];
 +        });
 +    }
 +
@@ -295,14 +302,14 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
 +        [self caskrunPrepareTextContextForWindow:window event:event
 +                                        serial:atomic_load(&caskrunTextContextSerial)
 +                                    foreground:macdrv_get_window_hwnd((macdrv_window)[window ancestorWineWindow])
-+                                      menuSeen:NO query:query];
++                                      focus:NULL popup:NULL menuSeen:NO query:query];
 +        return YES; /* physical release is consumed after the balanced targeting pair */
 +    }
 +
      - (void) transformProcessToForeground:(BOOL)activateIfTransformed
      {
          /* Steam's visible login belongs to steamwebhelper.exe. Keep that
-@@ -397,6 +648,13 @@
+@@ -397,6 +653,13 @@
              [item setTitle:CaskrunNativeDockEnabled() && [bundleName length] ? bundleName : WineLocalizedString(STRING_MENU_WINE)];
              [item setSubmenu:submenu];
              [mainMenu addItem:item];
@@ -316,7 +323,7 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
  
              // Window menu
              submenu = [[[NSMenu alloc] initWithTitle:WineLocalizedString(STRING_MENU_WINDOW)] autorelease];
-@@ -1917,6 +2175,7 @@
+@@ -1917,6 +2180,7 @@
          BOOL ret = FALSE;
          NSEventType type = [anEvent type];
  
@@ -324,7 +331,7 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
          if (type == NSEventTypeFlagsChanged)
              self.lastFlagsChanged = anEvent;
          else if (type == NSEventTypeMouseMoved || type == NSEventTypeLeftMouseDragged ||
-@@ -2340,6 +2599,7 @@
+@@ -2340,6 +2604,7 @@
  
      - (void)applicationDidResignActive:(NSNotification *)notification
      {
@@ -435,12 +442,14 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
  };
  
  typedef struct macdrv_query {
-@@ -439,6 +454,13 @@
+@@ -439,6 +454,15 @@
              unsigned int    from_left : 1;
              unsigned int    from_top : 1;
          }                                           resize_size;
 +        struct {
 +            void           *foreground;
++            void           *focus;
++            void           *popup;
 +            unsigned int    serial;
 +            unsigned int    phase;
 +            bool            menu_seen;
@@ -449,7 +458,7 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
      };
  } macdrv_query;
  
-@@ -452,6 +474,10 @@
+@@ -452,6 +476,10 @@
  extern macdrv_event_queue macdrv_create_event_queue(macdrv_event_handler handler);
  extern void macdrv_destroy_event_queue(macdrv_event_queue queue);
  extern int macdrv_get_event_queue_fd(macdrv_event_queue queue);
@@ -511,7 +520,7 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
          macdrv_im_set_text(event);
 --- a/dlls/winemac.drv/keyboard.c
 +++ b/dlls/winemac.drv/keyboard.c
-@@ -1030,6 +1030,121 @@
+@@ -1030,6 +1030,193 @@
   *
   * Handler for HOTKEY_PRESS events.
   */
@@ -522,6 +531,29 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
 +/* Only the GUI thread tracking the verified original root's menu may end it.
 + * A later query must confirm tracking/capture ended before Cocoa can present
 + * its menu. No Escape key, selection-changing click or clipboard is involved. */
++/* Chromium uses a captured tool window rather than TrackPopupMenu. Accept its
++ * exact class, popup shape and direct ownership chain. It toggles WS_EX_LAYERED
++ * while shown, so only its stable styles are required; transparent still refuses. */
++static BOOL caskrun_native_text_popup(HWND popup, HWND root, DWORD thread)
++{
++    static const WCHAR expected[] = {'C','h','r','o','m','e','_','W','i','d','g','e','t','W','i','n','_','1',0};
++    WCHAR buffer[ARRAY_SIZE(expected) + 1];
++    UNICODE_STRING name = {0, sizeof(buffer), buffer};
++    const DWORD required = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
++    DWORD style, exstyle;
++
++    if (!popup || !NtUserIsWindow(popup) ||
++        NtUserGetWindowThread(popup, NULL) != thread ||
++        NtUserGetWindowRelative(popup, GW_OWNER) != root) return FALSE;
++    style = NtUserGetWindowLongW(popup, GWL_STYLE);
++    exstyle = NtUserGetWindowLongW(popup, GWL_EXSTYLE);
++    if ((style & (WS_POPUP | WS_CHILD | WS_DISABLED)) != WS_POPUP ||
++        (exstyle & (required | WS_EX_TRANSPARENT)) != required ||
++        NtUserGetClassName(popup, FALSE, &name) != (int)ARRAY_SIZE(expected) - 1 ||
++        memcmp(buffer, expected, sizeof(expected) - sizeof(WCHAR))) return FALSE;
++    return TRUE;
++}
++
 +BOOL macdrv_native_text_context(HWND hwnd, macdrv_query *query)
 +{
 +    struct macdrv_thread_data *data = macdrv_thread_data();
@@ -551,6 +583,32 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
 +        query->native_text_context.phase = NATIVE_TEXT_CONTEXT_PENDING;
 +        return TRUE;
 +    }
++    /* Save the original GUI focus only after its targeting button pair has
++     * drained. A same-root GUI focus change still invalidates this text-context request. */
++    if (query->native_text_context.focus && query->native_text_context.focus != info.hwndFocus) return TRUE;
++    query->native_text_context.focus = info.hwndFocus;
++
++    if (query->native_text_context.popup)
++    {
++        HWND popup = query->native_text_context.popup;
++
++        /* Never cancel another popup, even when capture changes in this root.
++         * The saved exact HWND remains attached to every subsequent query. */
++        if (!query->native_text_context.menu_seen || info.hwndActive != root ||
++            (info.flags & GUI_INMENUMODE) || info.hwndMenuOwner ||
++            (info.hwndCapture && info.hwndCapture != popup)) return TRUE;
++        if (NtUserIsWindow(popup))
++        {
++            if (!caskrun_native_text_popup(popup, root, thread)) return TRUE;
++            if (NtUserIsWindowVisible(popup))
++            {
++                query->native_text_context.phase = NATIVE_TEXT_CONTEXT_PENDING;
++                return TRUE;
++            }
++        }
++        query->native_text_context.phase = info.hwndCapture ? NATIVE_TEXT_CONTEXT_PENDING : NATIVE_TEXT_CONTEXT_READY;
++        return TRUE;
++    }
 +    if (info.flags & GUI_INMENUMODE)
 +    {
 +        owner = info.hwndMenuOwner;
@@ -564,7 +622,30 @@ No clipboard or field content is read. Old event/query ordinals stay fixed.
 +        else if (NtUserEndMenu()) query->native_text_context.phase = NATIVE_TEXT_CONTEXT_DISMISS_REQUESTED;
 +        return TRUE;
 +    }
-+    if (info.hwndCapture || info.hwndMenuOwner) return TRUE;
++    if (info.hwndCapture)
++    {
++        GUITHREADINFO current = { .cbSize = sizeof(current) };
++        HWND popup = info.hwndCapture;
++
++        /* Queue one standard cancellation on this verified popup's own GUI
++         * thread. No synchronous application callback, Escape or WM_CLOSE.
++         * Success only requests dismissal; a later query proves completion. */
++        if (query->native_text_context.menu_seen || info.hwndMenuOwner || info.hwndActive != root ||
++            !caskrun_native_text_popup(popup, root, thread) || !NtUserIsWindowVisible(popup) ||
++            !NtUserGetGUIThreadInfo(thread, &current) || current.hwndActive != root ||
++            current.hwndFocus != query->native_text_context.focus || current.hwndCapture != popup ||
++            current.hwndMenuOwner || (current.flags & (GUI_INMENUMODE | GUI_INMOVESIZE)) ||
++            !caskrun_native_text_popup(popup, root, thread) || !NtUserIsWindowVisible(popup) ||
++            root != NtUserGetForegroundWindow() ||
++            !macdrv_native_text_context_current(query->native_text_context.serial)) return TRUE;
++        if (NtUserPostMessage(popup, WM_CANCELMODE, 0, 0))
++        {
++            query->native_text_context.popup = popup;
++            query->native_text_context.phase = NATIVE_TEXT_CONTEXT_DISMISS_REQUESTED;
++        }
++        return TRUE;
++    }
++    if (info.hwndMenuOwner) return TRUE;
 +    query->native_text_context.phase = query->native_text_context.menu_seen ?
 +                                       NATIVE_TEXT_CONTEXT_READY : NATIVE_TEXT_CONTEXT_PENDING;
 +    return TRUE;

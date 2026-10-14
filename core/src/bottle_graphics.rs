@@ -717,6 +717,12 @@ mod tests {
         assert!(runtime_migration::is_reviewed_switchable_runtime(
             runtime_migration::SINGLE_STEAM_UI_WINE_11_IDENTITY
         ));
+        assert!(runtime_migration::is_reviewed_switchable_runtime(
+            runtime_migration::CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY
+        ));
+        assert!(runtime_migration::is_reviewed_switchable_runtime(
+            runtime_migration::RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY
+        ));
         for identity in [
             "wine-11.0",
             "caskrun-switchable-graphics-v1",
@@ -734,6 +740,8 @@ mod tests {
             runtime_migration::BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
             runtime_migration::BUNDLED_STEAM_UI_WINE_11_IDENTITY,
             runtime_migration::SINGLE_STEAM_UI_WINE_11_IDENTITY,
+            runtime_migration::CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY,
+            runtime_migration::RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY,
         ] {
             let mut altered = approved.to_owned();
             let original = altered.pop().unwrap();
