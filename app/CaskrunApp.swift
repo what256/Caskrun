@@ -439,6 +439,7 @@ private final class CaskrunAppDelegate: NSObject, NSApplicationDelegate {
     var handleMenuCommand: ((CaskrunMenuCommand) -> Void)?
     var shutdownOwnedApps: (() async -> Bool)?
     var resumeAfterTerminationFailure: (() -> Void)?
+    var requiresInstallationFileOwnerVerification: (() -> Bool)?
     private var terminationPending = false
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -447,7 +448,7 @@ private final class CaskrunAppDelegate: NSObject, NSApplicationDelegate {
         terminationPending = true
         Task {
             var complete = await shutdownOwnedApps()
-            if complete {
+            if complete && requiresInstallationFileOwnerVerification?() == true {
                 complete = await CaskrunUpdateFileOwners.verify(bundleURL: Bundle.main.bundleURL,
                     executableURL: Bundle.main.executableURL,
                     ownPID: ProcessInfo.processInfo.processIdentifier) == .idle
@@ -570,6 +571,7 @@ private struct CaskrunStatusBridge: View {
     @Binding var openBottleID: String?
     @ObservedObject var model: CaskrunModel
     @ObservedObject var ps5: PS5CollectionModel
+    @ObservedObject var appUpdates: CaskrunAppUpdates
     @Binding var selectedCollectionID: String?
     @Binding var inspectingBottleOnly: Bool
     let delegate: CaskrunAppDelegate
@@ -623,6 +625,9 @@ private struct CaskrunStatusBridge: View {
                 return true
             }
             delegate.resumeAfterTerminationFailure = { model.resumeAfterUpdateFailure() }
+            delegate.requiresInstallationFileOwnerVerification = {
+                appUpdates.requiresInstallationFileOwnerVerification
+            }
             CaskrunStatusBarController.shared.configure(model: model) { [weak delegate] command in
                 delegate?.handleMenuCommand?(command)
             }
@@ -2912,7 +2917,7 @@ struct CaskrunApp: App {
                                         didChooseInitialPage: $didChooseInitialPage,
                                         showingBottleInspector: $showingBottleInspector,
                                         openBottleID: $openBottleID,
-                                        model: model, ps5: ps5,
+                                        model: model, ps5: ps5, appUpdates: appUpdates,
                                         selectedCollectionID: $collectionSelectedID, inspectingBottleOnly: $inspectingBottleOnly, delegate: appDelegate))
         .onAppear {
             model.refresh()

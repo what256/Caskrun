@@ -221,6 +221,10 @@ private final class CaskrunUpdateProcessCapture: @unchecked Sendable {
 final class CaskrunAppUpdates: NSObject, ObservableObject {
     @Published private(set) var canCheckForUpdates = true
     @Published private(set) var isPreparingInstallation = false
+    /// AppDelegate applies the stronger replacement guard only after an
+    /// accepted update has reached the installer. Ordinary Quit never needs
+    /// to reject unrelated macOS UI services mapping the app executable.
+    @Published private(set) var requiresInstallationFileOwnerVerification = false
     private let configuration: CaskrunUpdateConfiguration?
     private let unavailableMessage: String
     private let bundle: Bundle
@@ -299,6 +303,7 @@ final class CaskrunAppUpdates: NSObject, ObservableObject {
 
     private func continueInstallation() {
         guard !isPreparingInstallation, installContinuation != nil else { return }
+        installationWillBegin()
         isPreparingInstallation = true
         canCheckForUpdates = false
         installationGeneration &+= 1
@@ -319,10 +324,12 @@ final class CaskrunAppUpdates: NSObject, ObservableObject {
                 installContinuation = nil
                 continuation?()
             case .busy:
+                requiresInstallationFileOwnerVerification = false
                 recoverAfterInstallationFailure()
                 canCheckForUpdates = true
                 reportMessage("The update is ready, but Caskrun could not safely stop all its apps. Close them and choose Check for Updates to try again.")
             case .unavailable:
+                requiresInstallationFileOwnerVerification = false
                 recoverAfterInstallationFailure()
                 canCheckForUpdates = true
                 reportMessage("The update is ready, but Caskrun could not verify that its app and Windows engine are idle. No files were replaced. Choose Check for Updates to retry.")
@@ -330,10 +337,20 @@ final class CaskrunAppUpdates: NSObject, ObservableObject {
         }
     }
 
+    /// Sparkle also calls willInstallUpdate when a deferred install resumes,
+    /// before it asks the installer to terminate the app. Extraction arms the
+    /// same guard because dismissing an already prepared update can leave its
+    /// installer waiting for a later Quit without calling the postpone hook.
+    func installationWillBegin() {
+        requiresInstallationFileOwnerVerification = true
+    }
+
     func installationAborted() {
         let hadInstallation = installContinuation != nil || isPreparingInstallation
+            || requiresInstallationFileOwnerVerification
         installationGeneration &+= 1
         installContinuation = nil
+        requiresInstallationFileOwnerVerification = false
         // A shutdown may still be awaiting a child process. Keep this attempt
         // exclusive until it finishes, then restore normal app operation.
         if !isPreparingInstallation {
@@ -372,6 +389,28 @@ extension CaskrunAppUpdates: SPUUpdaterDelegate {
 
     func updater(_ updater: SPUUpdater, shouldDownloadReleaseNotesForUpdate item: SUAppcastItem) -> Bool {
         configuration?.allowsNotes(item.releaseNotesURL) == true
+    }
+
+    func updater(_ updater: SPUUpdater, willExtractUpdate item: SUAppcastItem) {
+        installationWillBegin()
+    }
+
+    func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
+        installationWillBegin()
+    }
+
+    func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
+                 immediateInstallationBlock immediateInstallHandler: @escaping () -> Void) -> Bool {
+        installationWillBegin()
+        return false
+    }
+
+    func updater(_ updater: SPUUpdater, userDidMake choice: SPUUserUpdateChoice,
+                 forUpdate item: SUAppcastItem, state: SPUUserUpdateState) {
+        if choice == .skip { installationAborted() }
+        // Dismiss at Installing keeps the update scheduled for termination;
+        // preserve its verification requirement rather than treating it as a
+        // feed-only session ending.
     }
 
     func updater(_ updater: SPUUpdater, shouldPostponeRelaunchForUpdate item: SUAppcastItem,

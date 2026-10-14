@@ -171,12 +171,18 @@ struct AppUpdatesTests {
         updates.checkForUpdates()
         expect(!messages.isEmpty && preparations == 0,
                "unconfigured demo reports unavailable without claiming up-to-date or stopping apps")
+        expect(!updates.requiresInstallationFileOwnerVerification,
+               "ordinary Quit and a feed-only check never arm the app replacement guard")
         updates.postponeInstallation { installed += 1 }
+        expect(updates.requiresInstallationFileOwnerVerification,
+               "accepted installation arms replacement verification before its async shutdown starts")
         updates.checkForUpdates()
         updates.postponeInstallation { installed += 100 }
         while updates.isPreparingInstallation { await Task.yield() }
         expect(installed == 0 && preparations == 1 && recoveries == 1 && updates.canCheckForUpdates,
                "failed shutdown retains exactly one retry and restores normal app operation")
+        expect(!updates.requiresInstallationFileOwnerVerification,
+               "failed installation preparation restores ordinary Quit without weakening the update owner guard")
         shutdownAllowed = true
         updates.checkForUpdates()
         while updates.isPreparingInstallation { await Task.yield() }
@@ -192,6 +198,8 @@ struct AppUpdatesTests {
         while updates.isPreparingInstallation { await Task.yield() }
         expect(installed == 1 && preparations == 4,
                "only a successful shutdown and idle verification invokes the original installer once")
+        expect(updates.requiresInstallationFileOwnerVerification,
+               "successful continuation keeps the final AppDelegate update guard armed")
         var normalQuitPending = true
         var backgroundAbortRecoveries = 0
         let backgroundCheck = CaskrunAppUpdates(prepareForQuit: { true }, verifyIdle: { .idle },
@@ -202,6 +210,14 @@ struct AppUpdatesTests {
         backgroundCheck.installationAborted()
         expect(normalQuitPending && backgroundAbortRecoveries == 0,
                "a feed-check-only abort never resets an unrelated normal Quit")
+        expect(!backgroundCheck.requiresInstallationFileOwnerVerification,
+               "feed-check-only abort cannot enable the replacement guard on normal Quit")
+        backgroundCheck.installationWillBegin()
+        expect(backgroundCheck.requiresInstallationFileOwnerVerification,
+               "direct or deferred installation arms verification without the postpone callback")
+        backgroundCheck.installationAborted()
+        expect(!backgroundCheck.requiresInstallationFileOwnerVerification && backgroundAbortRecoveries == 1,
+               "aborting a genuine direct installation clears its guard and restores app state")
         var pendingInspection: CheckedContinuation<CaskrunUpdateIdleResult, Never>?
         var canceledInstallations = 0
         var canceledRecoveries = 0
@@ -214,6 +230,8 @@ struct AppUpdatesTests {
         canceled.checkForUpdates()
         expect(canceled.isPreparingInstallation && !canceled.canCheckForUpdates,
                "aborting a pending inspection keeps preparation exclusive until it completes")
+        expect(!canceled.requiresInstallationFileOwnerVerification,
+               "a canceled installer cannot leave an ordinary Quit subject to the replacement guard")
         pendingInspection?.resume(returning: .idle)
         while canceled.isPreparingInstallation { await Task.yield() }
         expect(canceledInstallations == 0 && canceledRecoveries == 1 && canceled.canCheckForUpdates,
@@ -222,6 +240,9 @@ struct AppUpdatesTests {
         for selector in ["feedURLStringForUpdater:", "allowedSystemProfileKeysForUpdater:",
                          "feedParametersForUpdater:sendingSystemProfile:",
                          "updater:shouldProceedWithUpdate:updateCheck:error:",
+                         "updater:willExtractUpdate:", "updater:willInstallUpdate:",
+                         "updater:willInstallUpdateOnQuit:immediateInstallationBlock:",
+                         "updater:userDidMakeChoice:forUpdate:state:",
                          "updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:",
                          "updater:didAbortWithError:"] {
             expect(updates.responds(to: NSSelectorFromString(selector)),

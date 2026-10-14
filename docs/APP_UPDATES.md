@@ -32,8 +32,10 @@ check. Ordinary network requests still go to GitHub's servers.
 
 Before installation, Caskrun stops only its own Windows and PS5 sessions and
 independently checks open handles on the app helpers and bundled Wine engine.
-Its final termination delegate repeats the ownership check, including when
-Sparkle skips its postpone callback. A failed stop or inspection leaves the app
+Its final termination delegate repeats the ownership check only while an update
+installation is armed, including when Sparkle skips its postpone callback.
+Ordinary Quit still shuts down owned Windows and PS5 sessions, but does not treat
+macOS UI services holding the app image as a pending installation. A failed stop or inspection leaves the app
 in place and restores its usable state. Tests cover stale installer callbacks
 and retry after an unsafe or failed stop.
 
