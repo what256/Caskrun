@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Rebuild both reviewed Wine driver views in isolated development clones.
+"""Rebuild reviewed Wine drivers and child loaders in isolated clones.
 
 No Wine process is launched, no bottle is opened and no installed app is
-changed. The package keeps the existing translators, TLS stack and identities.
+changed. The package keeps the existing translators and TLS stack.
 """
 from __future__ import annotations
 
@@ -38,10 +38,12 @@ PATCHES = {
 }
 STEAM_WINDOW_PATCH = "wine-11.0-steam-native-window.patch"
 PATCHES[STEAM_WINDOW_PATCH] = "c34c8c207febd966fc9aa7fb6cd8b31bd9325bcc820b6a35cc266f4164bc5412"
+STEAM_BUNDLE_PATCH = "wine-11.0-steam-native-bundle.patch"
+PATCHES[STEAM_BUNDLE_PATCH] = "1a32af7d300460ef2e303e81e49a22a28367420b774677573ecb116a7591de83"
 BASE_PATCHES = ["wine-11.0-steam-cef-commandline.patch", "wine-11.0-steam-dock.patch",
                 "wine-11.0-native-app-identity.patch"]
 TEXT_PATCH = "wine-11.0-native-text-editing.patch"
-UI_PATCHES = [TEXT_PATCH, STEAM_WINDOW_PATCH]
+UI_PATCHES = [TEXT_PATCH, STEAM_WINDOW_PATCH, STEAM_BUNDLE_PATCH]
 DXMT_PATCHES = ["wine-11.0-winemac-metal-exports.patch", "wine-11.0-dxmt-client-surface.patch"]
 DRIVERS = {
     "lib/wine/x86_64-unix/winemac.so": "winemac.so",
@@ -128,28 +130,43 @@ def build_driver(seed: Path, target: Path, patches: list[str]) -> None:
     for path in driver.rglob("*"):
         if path.is_file() and (path.suffix == ".o" or path.name in ("winemac.so", "winemac.drv")):
             path.unlink()
+    # The Steam bundle extension changes only the native child-loader code.
+    # Force that object to rebuild even if a copied make timestamp is newer.
+    for relative in ("dlls/ntdll/unix/loader.o", "dlls/ntdll/ntdll.so"):
+        (build / relative).unlink(missing_ok=True)
     with (target / "driver-build.log").open("wb") as log:
-        result = subprocess.run(["/usr/bin/make", "-j8", "dlls/winemac.drv/all"],
+        result = subprocess.run(["/usr/bin/make", "-j8", "dlls/winemac.drv/all", "dlls/ntdll/ntdll.so"],
                                 cwd=build, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:
         raise PACKAGE.PackageError("Isolated driver build failed; see its local driver-build.log")
 
 
 def driver_inputs(output: Path) -> dict[str, Path]:
-    return {
+    inputs = {
         prefix + "/" + relative: output / variant / "build/dlls/winemac.drv" / artifact
         for variant, prefix in (("base-build", "runtime"),
                                 ("dxmt-build", "components/dxmt/runtime"))
         for relative, artifact in DRIVERS.items()
     }
+    for variant, prefix in (("base-build", "runtime"),
+                            ("dxmt-build", "components/dxmt/runtime")):
+        inputs[prefix + "/lib/wine/x86_64-unix/ntdll.so"] = (
+            output / variant / "build/dlls/ntdll/ntdll.so")
+    return inputs
 
 
-def verify_drivers(inputs: dict[str, Path]) -> None:
+def verify_drivers(inputs: dict[str, Path], base: Path) -> None:
     for relative, path in inputs.items():
         if relative.endswith(".so"):
             if PACKAGE.run("/usr/bin/lipo", "-archs", path) != "x86_64":
                 raise PACKAGE.PackageError("Unexpected Wine driver architecture")
             symbols = {line.split()[-1] for line in PACKAGE.run("/usr/bin/nm", "-gU", path).splitlines()}
+            if relative.endswith("/ntdll.so"):
+                previous_symbols = {line.split()[-1] for line in PACKAGE.run(
+                    "/usr/bin/nm", "-gU", base / relative).splitlines()}
+                if symbols != previous_symbols:
+                    raise PACKAGE.PackageError("Steam child loader changed its native exports")
+                continue
             expected = {"___wine_unix_call_funcs", "___wine_unix_call_wow64_funcs"}
             if relative.startswith("components/"):
                 expected |= PACKAGE.EXPORTS
@@ -161,7 +178,7 @@ def verify_drivers(inputs: dict[str, Path]) -> None:
 
 def package(base: Path, output: Path) -> str:
     inputs = driver_inputs(output)
-    verify_drivers(inputs)
+    verify_drivers(inputs, base)
     candidate = output / "runtime-package"
     PACKAGE.run("/bin/cp", "-cRp", base, candidate)
     original = tree_files(base)
@@ -190,6 +207,13 @@ def package(base: Path, output: Path) -> str:
         "client_geometry_changed": False,
         "game_validation": False,
     }
+    receipt["native_steam_bundle"] = {
+        "format": "caskrun-steam-native-bundle-v1",
+        "bundled_process": "steamwebhelper.exe",
+        "preprepared_alias": True,
+        "child_core_callback": False,
+        "game_validation": False,
+    }
     (candidate / "components.json").write_text(json.dumps(receipt, indent=2) + "\n")
     for name in UI_PATCHES:
         shutil.copyfile(REPO / "runtime-patches" / name, candidate / "source/patches" / name)
@@ -199,11 +223,15 @@ def package(base: Path, output: Path) -> str:
                      "SHA-256: " + PATCHES[TEXT_PATCH] + "\n"
                      "Both base and DXMT Wine drivers rebuilt from the exact corresponding Wine archive\n"
                      "and reviewed patches. No clipboard or field contents are read by the native menu.\n"
-                     "Translators, TLS dependencies, native identities and all other engine files retained.\n"
+                     "Translators, TLS dependencies and all unrelated engine files retained.\n"
                      "Original Steam sign-in native controls: source/patches/" + STEAM_WINDOW_PATCH + "\n"
                      "SHA-256: " + PATCHES[STEAM_WINDOW_PATCH] + "\n"
                      "Only the recognized sign-in window gets native Hide/Minimize controls.\n"
                      "Client geometry, app files and explicit Quit behavior are retained.\n"
+                     "Original Steam web-helper bundle reuse: source/patches/" + STEAM_BUNDLE_PATCH + "\n"
+                     "SHA-256: " + PATCHES[STEAM_BUNDLE_PATCH] + "\n"
+                     "Both native child loaders retain their exports. Only Steam's web helper uses\n"
+                     "the preprepared per-bottle app bundle; no child Core callback is added.\n"
                      "Build: scripts/build-wine-native-text-dev.py; not a public binary release.\n")
     allowed = set(inputs) | {"components.json", "SOURCES.txt", "native-text-editing.txt"} | {
         "source/patches/" + name for name in UI_PATCHES}
@@ -222,7 +250,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", type=Path, default=REPO / ".build/dxmt-wine-runtime-dev-v4")
     parser.add_argument("--seed", type=Path, default=REPO / ".build/wine-native-apps-11.0-dev")
-    parser.add_argument("--output", type=Path, default=REPO / ".build/native-text-runtime-v6")
+    parser.add_argument("--output", type=Path, default=REPO / ".build/native-text-runtime-v8")
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     try:

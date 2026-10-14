@@ -55,6 +55,29 @@ Explicit **Quit** remains unchanged. **Hide Steam** (Command-H) is also
 available. Logged-in Steam windows and active-game retention require separate
 user-led testing; this policy does not change their close behavior.
 
+## Steam's macOS app identity
+
+Core prepares Steam's per-bottle app bundle before starting the client and
+passes its validated executable to Wine. Only `steamwebhelper.exe` reuses it;
+Steam's main process retains its accessory role and games keep their own
+native identities. This gives the visible helper a real bundle identifier,
+friendly app name and existing artwork without a child Core callback.
+
+New aliases are shallow ad-hoc signed in a private staging bundle. Core
+compares their executable code with the selected package's loader while
+allowing only structurally checked code-signature bookkeeping to differ.
+It separately verifies the complete bundle seal and generated identifier
+through macOS Security.framework, without enabling network access. Cache
+lookups do not spawn signing tools. The new cache schema preserves existing
+aliases, and shutdown retains the byte-exact proof for already-running older
+aliases. Cached or active bundles are never resigned.
+
+Wine resolves the helper's normal Windows drive-mapping path and requires
+both its original and resolved forms to stay in the exact private prefix.
+The resolved file must remain the helper. The bundle executable, its cache
+ancestors, Core and the selected NTDLL retain their canonical ownership
+checks. Missing or refused bindings retain the raw Steam loader.
+
 ## Independent runtime build
 
 Run `python3 -B scripts/build-wine-native-text-dev.py --check`, then run the
@@ -63,17 +86,19 @@ independently built seed and switchable development package under `.build`.
 The check reconstructs every Wine source file from its exact upstream archive
 and reviewed patch sequence before accepting the seed.
 
-The builder makes two isolated clones and rebuilds the complete macOS driver
-and both Windows halves for each graphics view. The DXMT driver retains its
+The builder makes two isolated clones and rebuilds the complete macOS driver,
+both Windows halves and the native child loader for each graphics view. The
+DXMT driver retains its
 exact ten exports; the default driver retains its two Unix-call table exports.
-Only six driver files, their component receipt and corresponding patch/source
-metadata change. Translators, TLS libraries, loader identities, dependency
-notices and other engine files remain intact. Only changed Mach-O drivers are
+Both NTDLL views retain their exact native exports. Only six driver files,
+two native child loaders, their component receipt and corresponding patch/source
+metadata change. Translators, TLS libraries, dependency notices and other
+engine files remain intact. Only changed Mach-O files are
 repaired and signed. App packaging checks the entire runtime identity after
 outer app signing and refuses a changed engine.
 
 The new package has exact content identity
-`sha256:744741740221a92dc10849620661801dcbf3361fdda5fbbc3bf4bca6a6f252a1`.
+`sha256:d8bd4eb824d7ad1b340cbd32ae70f04cdeafb7a1d6016ee4754e472699e61ec8`.
 Known older runtime records have explicit, directly reviewed migration edges.
 The native and switchable predecessors use record-only migration; older
 TLS/Steam predecessors retain their Steam recipe and PE validation gates.
@@ -92,8 +117,25 @@ historical migration source and renderer-protocol approval, which does not
 claim that its Steam UI was usable. The corrected package can replace its
 record through the same locked, idle-only path while retaining earlier backups.
 
+The bounded-header predecessor
+`sha256:744741740221a92dc10849620661801dcbf3361fdda5fbbc3bf4bca6a6f252a1`
+also has an explicit idle-only transition to the bundled-helper package.
+
 ## Validation boundary
 
+- Native identity/signing tests exercise a compiled macOS executable, complete
+  ad-hoc bundle signing, byte equality after Apple's signature removal,
+  metadata/resource tampering and a valid seal around unrelated code. Cache
+  reuse performs no signing or rendering, and older byte-exact aliases retain
+  their shutdown proof. The ARM release Core also generated a fresh alias
+  from the actual packaged loader: its complete seal passed, signature-stripped
+  code matched the source, and a second preparation preserved every file and
+  modification time. GUI context-menu checks remain separate.
+- Extracted production bundle routing passes 35 real-filesystem checks,
+  including Wine's normal drive link and refusal of a host-mapped helper.
+  The Cocoa loader/process scope passes 35 checks. Steam's primary process
+  and refused helper bindings make no child Core callback; games retain
+  their existing callback path. Live bundled-helper verification is pending.
 - Real AppKit lifecycle tests cover repeated close, retained window/session,
   delegate forwarding, framework replacement, unrelated windows and explicit
   application termination.
@@ -139,6 +181,9 @@ record through the same locked, idle-only path while retaining earlier backups.
   replacement. A separate live main-window close check found Caskrun's window
   off screen while its process and Steam's sign-in window remained running.
   This does not establish retention of a logged-in client or an active game.
+
+The combined source passes 495 Rust unit tests and seven integration tests,
+with two existing ignored tests, in a serial run.
 
 An earlier real imported Steam launch exited with Steam's own 15-second main-loop
 stall assertion, without a native-menu exception. The red-close check initially

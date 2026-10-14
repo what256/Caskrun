@@ -111,9 +111,18 @@ of Steam's fixed English sign-in window. Close hides that UI without a Windows
 close request; minimize follows the existing Wine path. Other windows and
 explicit Quit retain their behavior. The client geometry is unchanged.
 
-`scripts/build-wine-native-text-dev.py` pins both patches and rebuilds both
-the base and DXMT macOS drivers and their x86/x64 Windows halves in isolated
-clones. The packaged source records carry the corresponding patches. See
+`wine-11.0-steam-native-bundle.patch` follows the window patch. Steam's visible
+web helper reuses the per-bottle native app bundle Core prepares before launch;
+the primary process remains accessory and games keep their own identities.
+The helper's normal drive-mapping path is resolved and both forms must remain
+inside its exact private prefix. The bundle, Core and selected native loader
+retain their canonical ownership checks. A refused binding uses the existing
+raw Steam loader without a child Core callback.
+
+`scripts/build-wine-native-text-dev.py` pins all three patches and rebuilds
+the base and DXMT macOS drivers, their x86/x64 Windows halves and both native
+NTDLL child loaders in isolated clones. Export sets stay unchanged. The
+packaged source records carry the corresponding patches. See
 [native editing validation](../docs/NATIVE_TEXT_EDITING.md) for the exact runtime
 identity, tests and limits; these changes do not establish gameplay support.
 

@@ -34,6 +34,11 @@ pub(super) const REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY: &str =
 // renderer protocol; identity approval is not a game-compatibility claim.
 pub(super) const BOUNDED_NATIVE_UI_WINE_11_IDENTITY: &str =
     "sha256:744741740221a92dc10849620661801dcbf3361fdda5fbbc3bf4bca6a6f252a1";
+// Complete signed package measured after rebuilding both native child loaders
+// and Wine driver views. Only the verified Steam helper reuses its prepared
+// bundle; translators and the renderer protocol remain unchanged.
+pub(super) const BUNDLED_STEAM_UI_WINE_11_IDENTITY: &str =
+    "sha256:d8bd4eb824d7ad1b340cbd32ae70f04cdeafb7a1d6016ee4754e472699e61ec8";
 
 /// Capability proof stays tied to explicitly reviewed complete packages. A
 /// component receipt or an engine's major version cannot add a new package.
@@ -44,6 +49,7 @@ pub(super) fn is_reviewed_switchable_runtime(identity: &str) -> bool {
             | NATIVE_TEXT_EDITING_WINE_11_IDENTITY
             | REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY
             | BOUNDED_NATIVE_UI_WINE_11_IDENTITY
+            | BUNDLED_STEAM_UI_WINE_11_IDENTITY
     )
 }
 
@@ -139,7 +145,21 @@ const TLS_TO_BOUNDED_NATIVE_UI_POLICY: MigrationPolicy<'static> = MigrationPolic
     verify_launcher_pe: true,
 };
 
-const STEAM_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 11] = [
+const STEAM_TO_BUNDLED_STEAM_UI_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: STEAM_WINE_11_IDENTITY,
+    approved: BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+    backup_suffix: "steam-to-bundled-steam-ui",
+    verify_launcher_pe: true,
+};
+
+const TLS_TO_BUNDLED_STEAM_UI_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: TLS_WINE_11_IDENTITY,
+    approved: BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+    backup_suffix: "tls-to-bundled-steam-ui",
+    verify_launcher_pe: true,
+};
+
+const STEAM_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 13] = [
     &TLS_TO_STEAM_POLICY,
     &STEAM_TO_NATIVE_POLICY,
     &TLS_TO_NATIVE_POLICY,
@@ -151,6 +171,8 @@ const STEAM_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 11] = [
     &TLS_TO_REFINED_NATIVE_TEXT_POLICY,
     &STEAM_TO_BOUNDED_NATIVE_UI_POLICY,
     &TLS_TO_BOUNDED_NATIVE_UI_POLICY,
+    &STEAM_TO_BUNDLED_STEAM_UI_POLICY,
+    &TLS_TO_BUNDLED_STEAM_UI_POLICY,
 ];
 
 const NATIVE_TO_SWITCHABLE_POLICY: MigrationPolicy<'static> = MigrationPolicy {
@@ -225,7 +247,42 @@ const REFINED_NATIVE_TEXT_TO_BOUNDED_NATIVE_UI_POLICY: MigrationPolicy<'static> 
     verify_launcher_pe: false,
 };
 
-const BUNDLED_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 10] = [
+const NATIVE_TO_BUNDLED_STEAM_UI_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: NATIVE_WINE_11_IDENTITY,
+    approved: BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+    backup_suffix: "native-to-bundled-steam-ui",
+    verify_launcher_pe: false,
+};
+
+const SWITCHABLE_TO_BUNDLED_STEAM_UI_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: SWITCHABLE_WINE_11_IDENTITY,
+    approved: BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+    backup_suffix: "switchable-to-bundled-steam-ui",
+    verify_launcher_pe: false,
+};
+
+const NATIVE_TEXT_TO_BUNDLED_STEAM_UI_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+    approved: BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+    backup_suffix: "native-text-editing-to-bundled-steam-ui",
+    verify_launcher_pe: false,
+};
+
+const REFINED_NATIVE_TEXT_TO_BUNDLED_STEAM_UI_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+    approved: BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+    backup_suffix: "refined-native-ui-to-bundled-steam-ui",
+    verify_launcher_pe: false,
+};
+
+const BOUNDED_NATIVE_UI_TO_BUNDLED_STEAM_UI_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
+    approved: BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+    backup_suffix: "bounded-native-ui-to-bundled-steam-ui",
+    verify_launcher_pe: false,
+};
+
+const BUNDLED_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 15] = [
     &NATIVE_TO_SWITCHABLE_POLICY,
     &NATIVE_TO_NATIVE_TEXT_EDITING_POLICY,
     &SWITCHABLE_TO_NATIVE_TEXT_EDITING_POLICY,
@@ -236,6 +293,11 @@ const BUNDLED_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 10] = [
     &SWITCHABLE_TO_BOUNDED_NATIVE_UI_POLICY,
     &NATIVE_TEXT_TO_BOUNDED_NATIVE_UI_POLICY,
     &REFINED_NATIVE_TEXT_TO_BOUNDED_NATIVE_UI_POLICY,
+    &NATIVE_TO_BUNDLED_STEAM_UI_POLICY,
+    &SWITCHABLE_TO_BUNDLED_STEAM_UI_POLICY,
+    &NATIVE_TEXT_TO_BUNDLED_STEAM_UI_POLICY,
+    &REFINED_NATIVE_TEXT_TO_BUNDLED_STEAM_UI_POLICY,
+    &BOUNDED_NATIVE_UI_TO_BUNDLED_STEAM_UI_POLICY,
 ];
 
 /// Returned only after the old record has been backed up and replaced. The
@@ -983,6 +1045,27 @@ mod tests {
             REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY => {
                 &REFINED_NATIVE_TEXT_TO_BOUNDED_NATIVE_UI_POLICY
             }
+            _ => panic!("unexpected predecessor"),
+        };
+        MigrationPolicy {
+            previous: policy.previous,
+            approved,
+            backup_suffix: policy.backup_suffix,
+            verify_launcher_pe: policy.verify_launcher_pe,
+        }
+    }
+
+    fn test_bundled_steam_ui_policy<'a>(source: &str, approved: &'a str) -> MigrationPolicy<'a> {
+        let policy = match source {
+            TLS_WINE_11_IDENTITY => &TLS_TO_BUNDLED_STEAM_UI_POLICY,
+            STEAM_WINE_11_IDENTITY => &STEAM_TO_BUNDLED_STEAM_UI_POLICY,
+            NATIVE_WINE_11_IDENTITY => &NATIVE_TO_BUNDLED_STEAM_UI_POLICY,
+            SWITCHABLE_WINE_11_IDENTITY => &SWITCHABLE_TO_BUNDLED_STEAM_UI_POLICY,
+            NATIVE_TEXT_EDITING_WINE_11_IDENTITY => &NATIVE_TEXT_TO_BUNDLED_STEAM_UI_POLICY,
+            REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY => {
+                &REFINED_NATIVE_TEXT_TO_BUNDLED_STEAM_UI_POLICY
+            }
+            BOUNDED_NATIVE_UI_WINE_11_IDENTITY => &BOUNDED_NATIVE_UI_TO_BUNDLED_STEAM_UI_POLICY,
             _ => panic!("unexpected predecessor"),
         };
         MigrationPolicy {
@@ -2635,7 +2718,7 @@ mod tests {
         let mut suffixes = std::collections::BTreeSet::new();
         for edge in &all {
             assert!(suffixes.insert(edge.backup_suffix));
-            assert_ne!(edge.previous, BOUNDED_NATIVE_UI_WINE_11_IDENTITY);
+            assert_ne!(edge.previous, BUNDLED_STEAM_UI_WINE_11_IDENTITY);
         }
         assert_eq!(
             all.iter()
@@ -2713,7 +2796,7 @@ mod tests {
         let mut suffixes = std::collections::BTreeSet::new();
         for edge in &all {
             assert!(suffixes.insert(edge.backup_suffix));
-            assert_ne!(edge.previous, BOUNDED_NATIVE_UI_WINE_11_IDENTITY);
+            assert_ne!(edge.previous, BUNDLED_STEAM_UI_WINE_11_IDENTITY);
         }
         assert_eq!(
             all.iter()
@@ -2741,6 +2824,93 @@ mod tests {
         assert_ne!(
             REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
             BOUNDED_NATIVE_UI_WINE_11_IDENTITY
+        );
+    }
+
+    #[test]
+    fn bundled_steam_ui_policies_pin_seven_edges_and_keep_all_historical_edges() {
+        for (edge, previous, steam) in [
+            (&TLS_TO_BUNDLED_STEAM_UI_POLICY, TLS_WINE_11_IDENTITY, true),
+            (
+                &STEAM_TO_BUNDLED_STEAM_UI_POLICY,
+                STEAM_WINE_11_IDENTITY,
+                true,
+            ),
+            (
+                &NATIVE_TO_BUNDLED_STEAM_UI_POLICY,
+                NATIVE_WINE_11_IDENTITY,
+                false,
+            ),
+            (
+                &SWITCHABLE_TO_BUNDLED_STEAM_UI_POLICY,
+                SWITCHABLE_WINE_11_IDENTITY,
+                false,
+            ),
+            (
+                &NATIVE_TEXT_TO_BUNDLED_STEAM_UI_POLICY,
+                NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+                false,
+            ),
+            (
+                &REFINED_NATIVE_TEXT_TO_BUNDLED_STEAM_UI_POLICY,
+                REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+                false,
+            ),
+            (
+                &BOUNDED_NATIVE_UI_TO_BUNDLED_STEAM_UI_POLICY,
+                BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
+                false,
+            ),
+        ] {
+            assert_eq!(edge.previous, previous);
+            assert_eq!(edge.approved, BUNDLED_STEAM_UI_WINE_11_IDENTITY);
+            assert_eq!(edge.verify_launcher_pe, steam);
+            let policies = if steam {
+                &STEAM_RUNTIME_POLICIES[..]
+            } else {
+                &BUNDLED_RUNTIME_POLICIES[..]
+            };
+            assert!(
+                policies
+                    .iter()
+                    .any(|candidate| std::ptr::eq(*candidate, edge))
+            );
+        }
+        let all: Vec<_> = STEAM_RUNTIME_POLICIES
+            .iter()
+            .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .copied()
+            .collect();
+        let mut suffixes = std::collections::BTreeSet::new();
+        let mut pairs = std::collections::BTreeSet::new();
+        for edge in &all {
+            assert!(suffixes.insert(edge.backup_suffix));
+            assert!(pairs.insert((edge.previous, edge.approved)));
+            assert_ne!(edge.previous, BUNDLED_STEAM_UI_WINE_11_IDENTITY);
+        }
+        for (target, count) in [
+            (STEAM_WINE_11_IDENTITY, 1),
+            (NATIVE_WINE_11_IDENTITY, 2),
+            (SWITCHABLE_WINE_11_IDENTITY, 3),
+            (NATIVE_TEXT_EDITING_WINE_11_IDENTITY, 4),
+            (REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY, 5),
+            (BOUNDED_NATIVE_UI_WINE_11_IDENTITY, 6),
+            (BUNDLED_STEAM_UI_WINE_11_IDENTITY, 7),
+        ] {
+            assert_eq!(
+                all.iter().filter(|edge| edge.approved == target).count(),
+                count
+            );
+        }
+        assert_eq!(
+            all.len(),
+            28,
+            "All 21 historical edges and 7 new direct edges remain"
+        );
+        assert!(
+            BUNDLED_RUNTIME_POLICIES
+                .iter()
+                .all(|edge| !edge.verify_launcher_pe)
         );
     }
 
@@ -2859,11 +3029,29 @@ mod tests {
     }
 
     #[test]
+    fn bundled_steam_ui_direct_edges_select_all_seven_predecessors_without_chaining() {
+        assert_direct_edges_without_chaining(
+            &[
+                TLS_WINE_11_IDENTITY,
+                STEAM_WINE_11_IDENTITY,
+                NATIVE_WINE_11_IDENTITY,
+                SWITCHABLE_WINE_11_IDENTITY,
+                NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+                REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+                BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
+            ],
+            BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+            test_bundled_steam_ui_policy,
+        );
+    }
+
+    #[test]
     fn native_ui_edges_do_not_misroute_old_destinations_for_same_predecessor() {
         for destination in [
             SWITCHABLE_WINE_11_IDENTITY,
             NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
             REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+            BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
         ] {
             for source in [
                 TLS_WINE_11_IDENTITY,
@@ -2871,10 +3059,17 @@ mod tests {
                 NATIVE_WINE_11_IDENTITY,
                 SWITCHABLE_WINE_11_IDENTITY,
                 NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+                REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
             ] {
                 if source == destination
                     || (destination == SWITCHABLE_WINE_11_IDENTITY
-                        && source == NATIVE_TEXT_EDITING_WINE_11_IDENTITY)
+                        && matches!(
+                            source,
+                            NATIVE_TEXT_EDITING_WINE_11_IDENTITY
+                                | REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY
+                        ))
+                    || (destination == NATIVE_TEXT_EDITING_WINE_11_IDENTITY
+                        && source == REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY)
                 {
                     continue;
                 }
@@ -2885,7 +3080,9 @@ mod tests {
                 let contents = bottle_contents(&fixture);
                 let approved = fixture.approved_identity();
                 let steam = matches!(source, TLS_WINE_11_IDENTITY | STEAM_WINE_11_IDENTITY);
-                let old = if destination == REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY {
+                let old = if destination == BOUNDED_NATIVE_UI_WINE_11_IDENTITY {
+                    test_bounded_native_ui_policy(source, &approved)
+                } else if destination == REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY {
                     test_refined_successor_policy(source, &approved)
                 } else if destination == NATIVE_TEXT_EDITING_WINE_11_IDENTITY {
                     test_text_editing_policy(source, &approved)
@@ -2894,7 +3091,7 @@ mod tests {
                 } else {
                     fixture.switchable_policy(&approved)
                 };
-                let new = test_bounded_native_ui_policy(source, BOUNDED_NATIVE_UI_WINE_11_IDENTITY);
+                let new = test_bundled_steam_ui_policy(source, BUNDLED_STEAM_UI_WINE_11_IDENTITY);
                 // The different final destination appears first. Only the
                 // exact destination attestation may select the older edge.
                 let policies = [&new, &old];
@@ -2953,6 +3150,7 @@ mod tests {
         for target in [
             REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
             BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
+            BUNDLED_STEAM_UI_WINE_11_IDENTITY,
         ] {
             for source in [TLS_WINE_11_IDENTITY, STEAM_WINE_11_IDENTITY] {
                 for invalid in ["catalog", "launcher", "pe", "package"] {
@@ -2967,8 +3165,10 @@ mod tests {
                     };
                     let policy = if target == REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY {
                         test_refined_successor_policy(source, destination)
-                    } else {
+                    } else if target == BOUNDED_NATIVE_UI_WINE_11_IDENTITY {
                         test_bounded_native_ui_policy(source, destination)
+                    } else {
+                        test_bundled_steam_ui_policy(source, destination)
                     };
                     let dir = bottle_dir(&fixture.home, &fixture.bottle_id).unwrap();
                     match invalid {
@@ -3045,6 +3245,116 @@ mod tests {
     }
 
     #[test]
+    fn bundled_steam_ui_transition_keeps_three_earlier_backups_and_restores_deployed_record() {
+        let fixture = Fixture::new();
+        prepare_text_editing_fixture(&fixture);
+        let dir = bottle_dir(&fixture.home, &fixture.bottle_id).unwrap();
+        fs::remove_file(dir.join("catalog-attempt.json")).unwrap();
+        fs::remove_file(dir.join("launchers.json")).unwrap();
+        fs::remove_dir_all(fixture.steam.parent().unwrap()).unwrap();
+        let approved = fixture.approved_identity();
+        let mut earlier = Vec::new();
+        for (source, policy) in [
+            (
+                SWITCHABLE_WINE_11_IDENTITY,
+                test_text_editing_policy(SWITCHABLE_WINE_11_IDENTITY, &approved),
+            ),
+            (
+                NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+                test_refined_text_editing_policy(&approved),
+            ),
+            (
+                REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+                test_bounded_native_ui_policy(
+                    REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+                    &approved,
+                ),
+            ),
+        ] {
+            fixture.set_predecessor(source);
+            let record = fs::read(&fixture.record_path).unwrap();
+            let backup = fixture.skipped_switchable_backup(&policy);
+            fs::create_dir_all(backup.parent().unwrap()).unwrap();
+            retain_original_record(&backup, &record).unwrap();
+            let metadata = fs::metadata(&backup).unwrap();
+            earlier.push(PreservedEntry {
+                path: backup,
+                contents_or_link: record,
+                mode: metadata.mode(),
+                inode: metadata.ino(),
+                modified: (metadata.mtime(), metadata.mtime_nsec()),
+            });
+        }
+        fixture.set_predecessor(BOUNDED_NATIVE_UI_WINE_11_IDENTITY);
+        let original = fs::read(&fixture.record_path).unwrap();
+        let contents = bottle_contents(&fixture);
+        let policy = test_bundled_steam_ui_policy(BOUNDED_NATIVE_UI_WINE_11_IDENTITY, &approved);
+        let current_backup = fixture.skipped_switchable_backup(&policy);
+        let rollback = fixture.migrate_bundled(&policy).unwrap().unwrap();
+        assert_eq!(fs::read(&current_backup).unwrap(), original);
+        assert_eq!(
+            fs::read_dir(fixture.home.join("runtime-migration-backups"))
+                .unwrap()
+                .count(),
+            4
+        );
+        assert_eq!(bottle_contents(&fixture), contents);
+        let record: PrefixRecord =
+            serde_json::from_slice(&fs::read(&fixture.record_path).unwrap()).unwrap();
+        assert!(runtime_record_matches(&record, &fixture.wine).unwrap());
+        assert!(fixture.migrate_bundled(&policy).unwrap().is_none());
+        rollback.restore().unwrap();
+        assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+        assert_eq!(fs::read(&current_backup).unwrap(), original);
+        assert_eq!(bottle_contents(&fixture), contents);
+        for backup in earlier {
+            let metadata = fs::metadata(&backup.path).unwrap();
+            assert_eq!(fs::read(&backup.path).unwrap(), backup.contents_or_link);
+            assert_eq!(metadata.mode(), backup.mode);
+            assert_eq!(metadata.ino(), backup.inode);
+            assert_eq!((metadata.mtime(), metadata.mtime_nsec()), backup.modified);
+        }
+    }
+
+    #[test]
+    fn bundled_steam_ui_transition_waits_for_the_bottle_lock_without_early_changes() {
+        let fixture = Fixture::new();
+        prepare_text_editing_fixture(&fixture);
+        fixture.set_predecessor(BOUNDED_NATIVE_UI_WINE_11_IDENTITY);
+        let approved = fixture.approved_identity();
+        let policy = test_bundled_steam_ui_policy(BOUNDED_NATIVE_UI_WINE_11_IDENTITY, &approved);
+        let lock = lock_bottle(&fixture.home, &fixture.bottle_id).unwrap();
+        let original = fs::read(&fixture.record_path).unwrap();
+        let contents = bottle_contents(&fixture);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                ready_tx.send(()).unwrap();
+                done_tx.send(fixture.migrate_bundled(&policy)).unwrap();
+            });
+            ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(matches!(
+                done_rx.recv_timeout(Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+            assert_eq!(bottle_contents(&fixture), contents);
+            assert!(!fixture.skipped_switchable_backup(&policy).exists());
+            drop(lock);
+            let rollback = done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            worker.join().unwrap();
+            rollback.restore().unwrap();
+        });
+        assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+        assert_eq!(bottle_contents(&fixture), contents);
+    }
+
+    #[test]
     fn refined_text_editing_transition_preserves_bottle_and_earlier_record_backup() {
         let fixture = Fixture::new();
         prepare_text_editing_fixture(&fixture);
@@ -3092,6 +3402,7 @@ mod tests {
         for previous in [
             NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
             REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+            BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
         ] {
             let fixture = Fixture::new();
             prepare_text_editing_fixture(&fixture);
@@ -3104,8 +3415,10 @@ mod tests {
             let approved = fixture.approved_identity();
             let policy = if previous == NATIVE_TEXT_EDITING_WINE_11_IDENTITY {
                 test_refined_text_editing_policy(&approved)
-            } else {
+            } else if previous == REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY {
                 test_bounded_native_ui_policy(previous, &approved)
+            } else {
+                test_bundled_steam_ui_policy(previous, &approved)
             };
             assert!(fixture.migrate_bundled(&policy).is_err());
             assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
@@ -3194,6 +3507,7 @@ mod tests {
         for previous in [
             NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
             REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+            BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
         ] {
             let fixture = Fixture::new();
             prepare_text_editing_fixture(&fixture);
@@ -3208,8 +3522,10 @@ mod tests {
             let approved = fixture.approved_identity();
             let policy = if previous == NATIVE_TEXT_EDITING_WINE_11_IDENTITY {
                 test_refined_text_editing_policy(&approved)
-            } else {
+            } else if previous == REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY {
                 test_bounded_native_ui_policy(previous, &approved)
+            } else {
+                test_bundled_steam_ui_policy(previous, &approved)
             };
             let error = fixture.migrate_bundled(&policy).err().unwrap();
             assert!(

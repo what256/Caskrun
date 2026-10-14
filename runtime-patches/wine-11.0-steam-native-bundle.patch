@@ -1,0 +1,125 @@
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -591,6 +591,87 @@
+     struct timespec now;
+     if (clock_gettime( CLOCK_MONOTONIC, &now )) return -1;
+     return (LONGLONG)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++}
++
++/* Steam's UI helper reuses the bundle Core validated before launching the
++ * client. Never call Core from this child startup path, and never carry the
++ * client's native identity into a game. Older/unrecognized bundles retain
++ * the original Steam loader. */
++static BOOL caskrun_native_steam_directory( const char *path )
++{
++    struct stat info;
++    char resolved[PATH_MAX];
++
++    return !lstat( path, &info ) && S_ISDIR( info.st_mode ) &&
++           info.st_uid == geteuid() && !(info.st_mode & 0022) &&
++           realpath( path, resolved ) && !strcmp( path, resolved );
++}
++
++static char *caskrun_native_steam_app_program( const char *command )
++{
++    const char *app = getenv( "CASKRUN_STEAM_NATIVE_APP" );
++    const char *home = getenv( "CASKRUN_NATIVE_DATA" );
++    const char *bottle = getenv( "CASKRUN_NATIVE_BOTTLE" );
++    const char *image = getenv( "CASKRUN_NATIVE_IMAGE" );
++    const char *core = getenv( "CASKRUN_NATIVE_CORE" );
++    const char *ntdll = getenv( "CASKRUN_NATIVE_NTDLL" );
++    const char *name = command, *cursor, *component, *slash;
++    static const char suffix[] = "/Contents/MacOS/WindowsApp";
++    char prefix[PATH_MAX], cache[PATH_MAX], directory[PATH_MAX], resolved_image[PATH_MAX], *expected;
++    size_t i, length, home_length;
++    BOOL selected;
++
++    if (!command || !caskrun_steam_dock_program( command )) return NULL;
++    for (cursor = command; *cursor; cursor++)
++        if (*cursor == '/' || *cursor == '\\') name = cursor + 1;
++    if (strcasecmp( name, "steamwebhelper.exe" ) || !caskrun_native_identity_enabled() ||
++        !caskrun_native_bottle_id( bottle ) || !app || strlen( app ) >= sizeof(directory) ||
++        !caskrun_native_owned_file( core, TRUE ) || !caskrun_native_owned_file( ntdll, FALSE ) ||
++        !realpath( image, resolved_image ) || !caskrun_native_owned_file( resolved_image, FALSE ) ||
++        !caskrun_native_owned_file( app, TRUE ) ||
++        !caskrun_native_steam_directory( home )) return NULL;
++    expected = build_path( ntdll_dir, "ntdll.so" );
++    selected = !strcmp( ntdll, expected );
++    free( expected );
++    if (!selected) return NULL;
++
++    length = snprintf( prefix, sizeof(prefix), "%s/bottles/%s/prefix/", home, bottle );
++    /* Wine reports ordinary DOS images through prefix/dosdevices/c:. Resolve
++     * only that image path; both forms must remain in this private prefix.
++     * Alias, Core, NTDLL and cache ancestor canonical checks stay unchanged. */
++    if (length >= sizeof(prefix) || strncmp( image, prefix, length ) ||
++        strncmp( resolved_image, prefix, length )) return NULL;
++    name = strrchr( resolved_image, '/' );
++    if (!name || strcasecmp( name + 1, "steamwebhelper.exe" )) return NULL;
++    length = snprintf( cache, sizeof(cache), "%s/bottles/%s/native-apps/", home, bottle );
++    if (length >= sizeof(cache) || strncmp( app, cache, length )) return NULL;
++    component = app + length;
++    if (strlen( component ) < 65) return NULL;
++    for (i = 0; i < 64; i++)
++        if (!((component[i] >= '0' && component[i] <= '9') ||
++              (component[i] >= 'a' && component[i] <= 'f'))) return NULL;
++    if (component[64] != '/') return NULL;
++    component += 65;
++    if (!(slash = strchr( component, '/' )) || strcmp( slash, suffix )) return NULL;
++    length = slash - component;
++    if (length <= 4 || length > 324 || memcmp( slash - 4, ".app", 4 ) ||
++        component[0] == '.' || component[0] == ' ' ||
++        slash[-5] == '.' || slash[-5] == ' ') return NULL;
++    for (i = 0; i < length; i++)
++        if ((unsigned char)component[i] < 32 || component[i] == 127 ||
++            component[i] == '\\' || component[i] == ':') return NULL;
++
++    /* Every cache ancestor is private, canonical, and unlinked. Core's
++     * normal bundle validation supplied the exact executable before spawn. */
++    strcpy( directory, app );
++    home_length = strlen( home );
++    while ((cursor = strrchr( directory, '/' )) && (size_t)(cursor - directory) >= home_length)
++    {
++        directory[cursor - directory] = 0;
++        if (!caskrun_native_steam_directory( directory )) return NULL;
++        if (strlen( directory ) == home_length) break;
++    }
++    return strdup( app );
+ }
+ 
+ /* Resolve the bundle without a shell. The short, bounded helper is required
+@@ -727,7 +808,14 @@
+ 
+     unsetenv( "CASKRUN_NATIVE_EXEC" );
+     if (!build_dir && argv[2] && caskrun_steam_dock_program( argv[2] ))
+-        argv[1] = build_path( ntdll_dir, "Steam" );
++    {
++#ifdef __APPLE__
++        if ((argv[1] = caskrun_native_steam_app_program( argv[2] )))
++            setenv( "CASKRUN_NATIVE_EXEC", "1", 1 );
++        else
++#endif
++            argv[1] = build_path( ntdll_dir, "Steam" );
++    }
+ #ifdef __APPLE__
+     else if (!build_dir && caskrun_native_identity_enabled())
+     {
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -153,9 +153,15 @@
+     if (![arguments count]) return NO;
+     first = CaskrunArgumentBasename(arguments[0]);
+     if ([first caseInsensitiveCompare:expected] == NSOrderedSame) return YES;
++    /* The prepared Steam UI bundle uses the independently packaged generic
++     * loader. Accept that host name only when this exact child was selected
++     * by the trusted Steam branch; ordinary games cannot inherit the marker. */
++    const char *native = getenv("CASKRUN_NATIVE_EXEC");
++    BOOL bundledSteam = CaskrunSteamDockEnabled() && native && !strcmp(native, "1") &&
++                        [first caseInsensitiveCompare:@"WindowsApp"] == NSOrderedSame;
+     if ([arguments count] < 2 ||
+         ([first caseInsensitiveCompare:@"Steam"] != NSOrderedSame &&
+-         [first caseInsensitiveCompare:@"wine"] != NSOrderedSame)) return NO;
++         [first caseInsensitiveCompare:@"wine"] != NSOrderedSame && !bundledSteam)) return NO;
+     return [CaskrunArgumentBasename(arguments[1]) caseInsensitiveCompare:expected] == NSOrderedSame;
+ }
+ 

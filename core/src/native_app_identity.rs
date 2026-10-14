@@ -2,11 +2,14 @@
 //!
 //! The Wine callback reads bounded PE metadata; it never executes the PE or
 //! chooses a host executable from its contents. Generated apps copy only the
-//! selected package's signed native loader. No bottle lock is taken here:
+//! selected package's native loader and seal the complete new bundle. No bottle lock is taken here:
 //! Wine can call this while the original launch holds that same lock.
 
 use super::*;
 use std::os::unix::ffi::OsStrExt;
+
+#[path = "native_app_signing.rs"]
+mod signing;
 
 const MAX_LOADER_BYTES: u64 = 1024 * 1024;
 const MAX_METADATA_BYTES: u64 = 512 * 1024;
@@ -18,6 +21,7 @@ const ENVIRONMENT: &[&str] = &[
     "CASKRUN_NATIVE_IMAGE",
     "CASKRUN_NATIVE_INITIAL_IMAGE",
     "CASKRUN_NATIVE_EXEC",
+    "CASKRUN_STEAM_NATIVE_APP",
 ];
 
 struct RuntimeInputs {
@@ -287,8 +291,61 @@ fn validate_shutdown_alias_with_inputs(
         return Err("Shutdown native loader path must be canonical".into());
     }
     let (loader_file, bytes) = read_stable_open_file(candidate, MAX_LOADER_BYTES)?;
-    if bytes != inputs.loader || !is_executable(candidate) {
+    if !is_executable(candidate) {
         return Err("Shutdown candidate differs from the selected package's native loader".into());
+    }
+    // Already-running v1/v2 aliases keep their exact copied-loader proof.
+    // New signed aliases additionally bind the complete bundle and its
+    // metadata to this bottle and the identity's private cache directory.
+    if bytes != inputs.loader {
+        if legacy || !signing::loader_code_matches(&inputs.loader, &bytes)? {
+            return Err(
+                "Shutdown candidate differs from the selected package's native loader".into(),
+            );
+        }
+        let key = identity
+            .unwrap()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Missing native identity key")?;
+        let id = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Missing native identity bottle")?;
+        let raw = read_stable_file(&contents.join("Info.plist"), 16 * 1024)?;
+        let text = std::str::from_utf8(&raw).map_err(|_| "Invalid native bundle metadata")?;
+        let encoded_name = text
+            .split_once("<key>CFBundleName</key><string>")
+            .and_then(|(_, rest)| rest.split_once("</string>"))
+            .map(|(name, _)| name)
+            .ok_or("Missing native bundle display name")?;
+        // Only accept our own exact XML serialization. The reconstructed
+        // complete plist below rejects extra/duplicate keys and other forms.
+        let name = encoded_name
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&");
+        if display_name(&name).as_deref() != Some(name.as_str())
+            || Some(filename_component(&name).as_str()) != app_name
+        {
+            return Err("Native bundle display name does not match its alias".into());
+        }
+        let resources = contents.join("Resources");
+        let (_resources, _) = open_stable_directory(&resources)?;
+        let icon =
+            resources.join("app.ico").is_file() || resources.join("app-source.png").is_file();
+        let native_icon = resources.join("app.icns").is_file();
+        if raw != plist(&name, id, key, icon, native_icon).as_bytes() {
+            return Err("Native bundle metadata differs from its generated bottle identity".into());
+        }
+        signing::verify_bundle(app, &bundle_identifier(id, key), &inputs.loader)?;
+        if read_stable_file(candidate, MAX_LOADER_BYTES)? != bytes
+            || read_stable_file(&contents.join("Info.plist"), 16 * 1024)? != raw
+        {
+            return Err("Native bundle changed during shutdown signature proof".into());
+        }
     }
     let loader_metadata = loader_file.metadata().map_err(|e| e.to_string())?;
     let before = fs::symlink_metadata(&inputs.ntdll).map_err(|e| e.to_string())?;
@@ -345,13 +402,17 @@ pub(super) fn configure_launch(
     } else {
         image.to_path_buf()
     };
-    // Steam retains its independently tested process-role/focus handling.
-    // Reuse the same native artwork renderer without changing its loader path.
+    // Steam's client retains its tested raw loader and accessory role. Its
+    // visible web helper reuses this prevalidated bundle and native artwork.
     if command
         .get_envs()
         .any(|(key, value)| key == "CASKRUN_STEAM_MODE" && value == Some(std::ffi::OsStr::new("1")))
     {
         if let Ok(loader) = prepare_with_inputs(home, id, image, Some(image), &inputs) {
+            // Reuse this prevalidated bundle for Steam's visible web helper.
+            // Wine selects it only for that exact child image, so no child
+            // needs a Core callback while Steam is starting or tracking UI.
+            command.env("CASKRUN_STEAM_NATIVE_APP", &loader);
             if let Some(contents) = loader.parent().and_then(Path::parent) {
                 let png = contents.join("Resources/app.png");
                 if read_stable_file(&png, 4 * 1024 * 1024).is_ok() {
@@ -696,9 +757,9 @@ fn prepare_with_inputs_mode(
     }
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
-    // Plist schema changes need a new cache key so existing verified bundles
-    // stay intact and this version generates its microphone purpose text.
-    digest.update(b"caskrun-native-app-v2\0");
+    // Complete-bundle signing needs a new cache key. Existing aliases stay
+    // intact; this schema creates signed bundles with their own metadata seal.
+    digest.update(b"caskrun-native-app-v3\0");
     digest.update(canonical.as_os_str().as_bytes());
     digest.update(display.as_bytes());
     for value in [
@@ -767,7 +828,7 @@ fn prepare_with_inputs_mode(
     if !create {
         return Err("No validated native artwork has been generated for this program yet".into());
     }
-    let temporary = identity.join(format!(".native-app-{}", Uuid::new_v4()));
+    let temporary = identity.join(format!(".native-app-{}.app", Uuid::new_v4()));
     let result = (|| {
         fs::create_dir(&temporary).map_err(|e| e.to_string())?;
         fs::create_dir(temporary.join("Contents")).map_err(|e| e.to_string())?;
@@ -842,6 +903,8 @@ fn prepare_with_inputs_mode(
                 0o600,
             )?;
         }
+        signing::sign_staging(&temporary, &inputs.loader)?;
+        validate_cached_app(&temporary, inputs, plist.as_bytes(), artwork.ico.as_deref())?;
         bottle_control::assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
         // Concurrent CEF helpers may prepare this exact identity. A losing
         // atomic rename accepts only an independently validated same bundle.
@@ -1120,6 +1183,10 @@ fn plist(name: &str, id: &str, key: &str, icon: bool, native_icon: bool) -> Stri
     )
 }
 
+fn bundle_identifier(id: &str, key: &str) -> String {
+    format!("dev.caskrun.windows.{}.{}", id.replace('-', ""), &key[..32])
+}
+
 fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
     use std::io::Write;
     let mut file = OpenOptions::new()
@@ -1186,7 +1253,8 @@ fn validate_cached_app(
     let (_macos_guard, _) = open_stable_directory(&app.join("Contents/MacOS"))?;
     let (_resources_guard, _) = open_stable_directory(&app.join("Contents/Resources"))?;
     let executable = app.join("Contents/MacOS/WindowsApp");
-    if read_stable_file(&executable, MAX_LOADER_BYTES)? != inputs.loader
+    let (loader_file, loader_bytes) = read_stable_open_file(&executable, MAX_LOADER_BYTES)?;
+    if !signing::loader_code_matches(&inputs.loader, &loader_bytes)?
         || !is_executable(&executable)
         || read_stable_file(&app.join("Contents/Info.plist"), 16 * 1024)? != plist
     {
@@ -1239,6 +1307,22 @@ fn validate_cached_app(
         if read_stable_file(&receipt, 160)? != expected.as_bytes() {
             return Err("Generated native icon was modified".into());
         }
+    }
+    let identifier = std::str::from_utf8(plist)
+        .map_err(|_| "Invalid generated native metadata")?
+        .split_once("<key>CFBundleIdentifier</key><string>")
+        .and_then(|(_, rest)| rest.split_once("</string>"))
+        .map(|(identifier, _)| identifier)
+        .ok_or("Missing generated bundle identifier")?;
+    signing::verify_bundle(app, identifier, &inputs.loader)?;
+    let snapshot = loader_file.metadata().map_err(|error| error.to_string())?;
+    if !same_snapshot(
+        &snapshot,
+        &fs::symlink_metadata(&executable).map_err(|error| error.to_string())?,
+    ) || read_stable_file(&executable, MAX_LOADER_BYTES)? != loader_bytes
+        || read_stable_file(&app.join("Contents/Info.plist"), 16 * 1024)? != plist
+    {
+        return Err("Generated native bundle changed during signature validation".into());
     }
     Ok(())
 }
@@ -2020,6 +2104,214 @@ exec /bin/sleep 10
                 .join("native-apps")
                 .exists()
         );
+    }
+
+    #[test]
+    fn signed_real_loader_cache_reuses_without_tools_and_shutdown_binds_metadata() {
+        let (mut fixture, image) = fallback_fixture(b"#!/bin/sh\nexit 7\n");
+        fixture.inputs.loader = signing::test_loader_bytes(0);
+        fs::create_dir_all(fixture.inputs.ntdll.parent().unwrap()).unwrap();
+        fs::write(&fixture.inputs.ntdll, b"Original fixture NTDLL").unwrap();
+        let before = signing::test_sign_count();
+        let loader = fixture.prepare(&image).unwrap();
+        let after = signing::test_sign_count();
+        assert_eq!(after, before + 1);
+        assert_ne!(fs::read(&loader).unwrap(), fixture.inputs.loader);
+        let app = loader.parent().unwrap().parent().unwrap().parent().unwrap();
+        let info = app.join("Contents/Info.plist");
+        let info_bytes = fs::read(&info).unwrap();
+        let dir = bottle_dir(&fixture.home, &fixture.bottle.id).unwrap();
+        let cache_before = fs::metadata(&loader).unwrap();
+        assert_eq!(fixture.prepare(&image).unwrap(), loader);
+        // Listing/cache/shutdown calls use Security.framework, not codesign
+        // or the icon renderer. Neither may replace the running executable.
+        assert!(
+            cached_icon_with_inputs(&fixture.home, &fixture.bottle.id, &image, &fixture.inputs)
+                .is_none()
+        );
+        assert!(
+            validate_shutdown_alias_with_inputs(&dir, &loader, &fixture.inputs)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(signing::test_sign_count(), after);
+        let cache_after = fs::metadata(&loader).unwrap();
+        assert_eq!(cache_before.ino(), cache_after.ino());
+        assert_eq!(
+            (cache_before.mtime(), cache_before.mtime_nsec()),
+            (cache_after.mtime(), cache_after.mtime_nsec())
+        );
+        fs::write(
+            &info,
+            String::from_utf8(info_bytes.clone()).unwrap().replace(
+                "<string>WindowsApp</string>",
+                "<string>OtherLoader</string>",
+            ),
+        )
+        .unwrap();
+        assert!(validate_shutdown_alias_with_inputs(&dir, &loader, &fixture.inputs).is_err());
+        assert!(fixture.prepare(&image).is_err());
+        fs::write(&info, &info_bytes).unwrap();
+        assert!(fixture.prepare(&image).is_ok());
+        let png = app.join("Contents/Resources/app.png");
+        let original_png = fs::read(&png).unwrap();
+        let mut changed_png = original_png.clone();
+        changed_png[32] ^= 1;
+        fs::write(&png, changed_png).unwrap();
+        assert!(fixture.prepare(&image).is_err());
+        assert!(validate_shutdown_alias_with_inputs(&dir, &loader, &fixture.inputs).is_err());
+        fs::write(&png, &original_png).unwrap();
+        // Re-signing different executable bytes cannot upgrade them into a
+        // package-owned alias, even with the correct original metadata.
+        let unrelated = signing::test_loader_bytes(9);
+        fs::write(&loader, unrelated).unwrap();
+        assert!(
+            Command::new("/usr/bin/codesign")
+                .args(["--force", "--sign", "-", "--timestamp=none"])
+                .arg(app)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(fixture.prepare(&image).is_err());
+        assert!(validate_shutdown_alias_with_inputs(&dir, &loader, &fixture.inputs).is_err());
+        assert_eq!(signing::test_sign_count(), after);
+    }
+
+    #[test]
+    fn real_byte_exact_legacy_alias_keeps_its_original_shutdown_proof() {
+        let mut fixture = Fixture::new();
+        fixture.inputs.loader = signing::test_loader_bytes(0);
+        fs::create_dir_all(fixture.inputs.ntdll.parent().unwrap()).unwrap();
+        fs::write(&fixture.inputs.ntdll, b"Original fixture NTDLL").unwrap();
+        let dir = bottle_dir(&fixture.home, &fixture.bottle.id).unwrap();
+        let legacy = dir.join("native-apps/Legacy-0123456789abcdef.app/Contents/MacOS/WindowsApp");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        write_new(&legacy, &fixture.inputs.loader, 0o755).unwrap();
+        let before = fs::read(&legacy).unwrap();
+        assert!(
+            validate_shutdown_alias_with_inputs(&dir, &legacy, &fixture.inputs)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(fs::read(&legacy).unwrap(), before);
+        let unrelated = signing::test_loader_bytes(9);
+        fs::write(&legacy, unrelated).unwrap();
+        assert!(validate_shutdown_alias_with_inputs(&dir, &legacy, &fixture.inputs).is_err());
+    }
+
+    #[test]
+    fn steam_launch_prepares_one_bundle_without_a_child_callback() {
+        let (fixture, wine) = runtime_views_fixture();
+        let image = fixture.image("Steam.exe");
+        add_launcher(&fixture.home, &fixture.bottle.id, "Example Steam", &image).unwrap();
+        let mut command = Command::new(&wine);
+        command.env("CASKRUN_STEAM_MODE", "1");
+        configure_launch(
+            &mut command,
+            &fixture.home,
+            &fixture.bottle.id,
+            &wine,
+            &image,
+        )
+        .unwrap();
+        let loader = command
+            .get_envs()
+            .find(|(key, _)| *key == "CASKRUN_STEAM_NATIVE_APP")
+            .and_then(|(_, value)| value)
+            .map(PathBuf::from)
+            .unwrap();
+        assert!(loader.ends_with("Example Steam.app/Contents/MacOS/WindowsApp"));
+        assert!(app_name(&loader).contains("<key>LSUIElement</key><true/>"));
+        assert!(app_name(&loader).contains("dev.caskrun.windows."));
+        let dir = bottle_dir(&fixture.home, &fixture.bottle.id).unwrap();
+        let proof = validate_shutdown_alias(&dir, &wine, &loader)
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.loader_path, loader);
+        assert_eq!(fs::read_dir(dir.join("native-apps")).unwrap().count(), 1);
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| { key == "CASKRUN_NATIVE_EXEC" && value.is_none() })
+        );
+    }
+
+    #[test]
+    fn ordinary_launch_does_not_reuse_a_steam_bundle() {
+        let (fixture, wine) = runtime_views_fixture();
+        let image = fixture.image("Example Game.exe");
+        let mut command = Command::new(&wine);
+        command.env(
+            "CASKRUN_STEAM_NATIVE_APP",
+            "/stale/Steam.app/Contents/MacOS/WindowsApp",
+        );
+        configure_launch(
+            &mut command,
+            &fixture.home,
+            &fixture.bottle.id,
+            &wine,
+            &image,
+        )
+        .unwrap();
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| { key == "CASKRUN_STEAM_NATIVE_APP" && value.is_none() })
+        );
+        assert!(
+            !bottle_dir(&fixture.home, &fixture.bottle.id)
+                .unwrap()
+                .join("native-apps")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn modified_optional_steam_bundle_does_not_reach_wine() {
+        let (fixture, wine) = runtime_views_fixture();
+        let image = fixture.image("Steam.exe");
+        let configure = |command: &mut Command| {
+            command.env("CASKRUN_STEAM_MODE", "1");
+            configure_launch(command, &fixture.home, &fixture.bottle.id, &wine, &image).unwrap();
+        };
+        let mut first = Command::new(&wine);
+        configure(&mut first);
+        let loader = first
+            .get_envs()
+            .find(|(key, _)| *key == "CASKRUN_STEAM_NATIVE_APP")
+            .and_then(|(_, value)| value)
+            .map(PathBuf::from)
+            .unwrap();
+        fs::write(&loader, b"modified fixture loader").unwrap();
+        let mut second = Command::new(&wine);
+        configure(&mut second);
+        assert!(
+            second
+                .get_envs()
+                .any(|(key, value)| { key == "CASKRUN_STEAM_NATIVE_APP" && value.is_none() })
+        );
+    }
+
+    #[test]
+    fn steam_bundles_have_separate_bottle_identifiers() {
+        let first = Fixture::new();
+        let second = Fixture::new();
+        let first_loader = first.prepare(&first.image("Steam.exe")).unwrap();
+        let second_loader = second.prepare(&second.image("Steam.exe")).unwrap();
+        let identifier = |loader: &Path| {
+            app_name(loader)
+                .split("<key>CFBundleIdentifier</key><string>")
+                .nth(1)
+                .unwrap()
+                .split("</string>")
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        assert_ne!(identifier(&first_loader), identifier(&second_loader));
     }
 
     #[test]
