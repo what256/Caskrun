@@ -3,19 +3,19 @@
 //! Every stop request goes through the existing per-bottle controls. A recorded
 //! predecessor is usable only after a separate full-package allowlist proof;
 //! bottle metadata alone never authorizes execution or signalling saved PIDs.
+//! A reviewed replacement at that same package location can only prove idle;
+//! it cannot stop a predecessor's processes or adopt its runtime record.
 
 use super::*;
 use std::io::{Seek, SeekFrom};
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 // Exact reviewed predecessor identities also used by runtime_migration.rs.
 // This shutdown-only fallback does not adopt or migrate any runtime record.
-const SHUTDOWN_PREDECESSORS: [&str; 3] = [
-    "sha256:6df2a9f5dfaa119ba3d6c84214d79f885c70e887ef7f3bc9d2255aeb8b2f88e6",
-    "sha256:07c5721ad17efa9d4ea89ff61522133407756c4aea8a47866625dcf118e7347c",
-    "sha256:9dcab17f21490998ad03f6ee4f553da0992a1d9234dfe40efd82956b63fd47ce",
-];
+#[cfg(test)]
+const SHUTDOWN_PREDECESSORS: [&str; 12] = runtime_migration::REVIEWED_RUNTIME_IDENTITIES;
 const RECORDED_PREDECESSOR_DISPATCH: &str =
     "Caskrun.app/Contents/Resources/wine-runtime/bin/_dispatch";
+const SELECTED_REPLACEMENT_WINE: &str = "Caskrun.app/Contents/Resources/wine-runtime/bin/wine";
 
 struct RuntimeRecordSnapshot {
     path: PathBuf,
@@ -103,7 +103,7 @@ impl RuntimeRecordSnapshot {
         if !record
             .runtime_identity
             .as_deref()
-            .is_some_and(|identity| SHUTDOWN_PREDECESSORS.contains(&identity))
+            .is_some_and(runtime_migration::is_reviewed_runtime)
         {
             return Err("The recorded engine is not a reviewed Caskrun predecessor".into());
         }
@@ -149,10 +149,16 @@ impl PredecessorRuntime {
     }
 }
 
-fn verified_predecessor_runtime(
+enum RecordedShutdownRuntime {
+    Exact(PredecessorRuntime),
+    Replaced(PredecessorRuntime),
+}
+
+fn verified_recorded_runtime(
     record: &RuntimeRecordSnapshot,
+    selected: Option<&Path>,
     attest: &mut impl FnMut(&Path) -> Result<Option<runtime_identity::BundleAttestation>, String>,
-) -> Result<PredecessorRuntime, String> {
+) -> Result<RecordedShutdownRuntime, String> {
     let parsed = record.predecessor_record()?;
     let dispatch = Path::new(&parsed.wine_path);
     if !dispatch.is_absolute()
@@ -186,13 +192,26 @@ fn verified_predecessor_runtime(
     let attestation =
         attest(&wine)?.ok_or("The recorded engine is not a complete Caskrun package")?;
     cancellation::check()?;
-    if !SHUTDOWN_PREDECESSORS.contains(&attestation.identity.as_str())
-        || parsed.runtime_identity.as_deref() != Some(attestation.identity.as_str())
-    {
+    if !runtime_migration::is_reviewed_runtime(&attestation.identity) {
         return Err("The recorded predecessor package does not match its reviewed bytes".into());
     }
     record.recheck()?;
-    if !runtime_record_matches(&parsed, &wine)? {
+    let exact = parsed.runtime_identity.as_deref() == Some(attestation.identity.as_str());
+    if !exact
+        && !selected.is_some_and(|selected| {
+            selected.is_absolute()
+                && selected.ends_with(SELECTED_REPLACEMENT_WINE)
+                && selected == wine
+                && selected.canonicalize().ok().as_deref() == Some(dispatch)
+                && runtime_migration::has_reviewed_direct_transition(
+                    parsed.runtime_identity.as_deref().unwrap_or_default(),
+                    &attestation.identity,
+                )
+        })
+    {
+        return Err("The recorded predecessor package does not match its reviewed bytes".into());
+    }
+    if exact && !runtime_record_matches(&parsed, &wine)? {
         return Err("The recorded predecessor failed ordinary runtime verification".into());
     }
     let verified = PredecessorRuntime {
@@ -204,7 +223,94 @@ fn verified_predecessor_runtime(
     };
     verified.recheck()?;
     record.recheck()?;
-    Ok(verified)
+    Ok(if exact {
+        RecordedShutdownRuntime::Exact(verified)
+    } else {
+        RecordedShutdownRuntime::Replaced(verified)
+    })
+}
+
+fn require_no_live_tracking_without_cleanup(dir: &Path) -> Result<(), String> {
+    for pid in read_active_processes(dir)? {
+        if process_alive(pid)? {
+            return Err("This bottle's previous Windows engine still has tracked processes. Close its Windows apps before quitting Caskrun.".into());
+        }
+    }
+    Ok(())
+}
+
+/// A replacement can observe the existing server lock, but must never send a
+/// quit request, launch Wine, repair XDG files, prune saved PIDs, or bind itself
+/// to the bottle. The caller retains and rechecks its original directory and
+/// record snapshots throughout this proof.
+fn verify_replaced_runtime_idle(
+    dir: &Path,
+    prefix: &Path,
+    runtime: &PredecessorRuntime,
+    timeout: Duration,
+    recheck: impl Fn() -> Result<(), String>,
+) -> Result<(), String> {
+    let xdg: Vec<_> = ["xdg", "xdg/config", "xdg/data", "xdg/desktop"]
+        .into_iter()
+        .map(|relative| {
+            let path = dir.join(relative);
+            let (guard, snapshot) = open_stable_directory(&path)?;
+            Ok((path, guard, snapshot))
+        })
+        .collect::<Result<_, String>>()?;
+    let recheck_all = || -> Result<(), String> {
+        recheck()?;
+        runtime.recheck()?;
+        for (path, guard, snapshot) in &xdg {
+            bottle_control::assert_same_prefix(path, guard, snapshot)?;
+        }
+        Ok(())
+    };
+    cancellation::check()?;
+    recheck_all()?;
+    require_no_live_tracking_without_cleanup(dir)?;
+    let server = runtime
+        .wine
+        .parent()
+        .ok_or("The reviewed replacement has no bin directory")?
+        .join("wineserver");
+    let mut command = Command::new(server);
+    // Match the normal shutdown server environment without the XDG preparation
+    // and log creation performed by the force-quit helper.
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    for key in [
+        "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
+    ] {
+        if let Some(value) = env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command
+        .arg("-w")
+        .env("WINEPREFIX", prefix)
+        .env("XDG_CONFIG_HOME", dir.join("xdg/config"))
+        .env("XDG_DATA_HOME", dir.join("xdg/data"))
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cancellation::check()?;
+    recheck_all()?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| "Could not observe this bottle's existing Wine server")?;
+    let (status, timed_out) = wait_child_bounded_status(&mut child, timeout)?;
+    recheck_all()?;
+    if timed_out || !status.success() {
+        return Err("Caskrun could not verify that this bottle's previous Windows engine is idle. Close its Windows apps and try Quit again; the runtime record was preserved.".into());
+    }
+    require_no_live_tracking_without_cleanup(dir)?;
+    prefix_processes::wait_until_idle(dir, timeout)?;
+    require_no_live_tracking_without_cleanup(dir)?;
+    cancellation::check()?;
+    recheck_all()
 }
 
 #[derive(Debug, Serialize)]
@@ -360,13 +466,24 @@ fn quit_one_with_attester(
         let snapshot = record_snapshot
             .as_ref()
             .ok_or("This initialized bottle has no runtime record")?;
-        Some(verified_predecessor_runtime(snapshot, &mut attest).map_err(|error| {
+        let verified = verified_recorded_runtime(snapshot, wine, &mut attest).map_err(|error| {
             if wine.is_none() {
                 format!("Caskrun's included Wine runtime is unavailable, and its recorded predecessor could not be verified: {error}")
             } else {
                 format!("This bottle uses a different Windows engine, and its recorded predecessor could not be verified: {error}")
             }
-        })?)
+        })?;
+        match verified {
+            RecordedShutdownRuntime::Exact(runtime) => Some(runtime),
+            RecordedShutdownRuntime::Replaced(runtime) => {
+                verify_replaced_runtime_idle(&dir, &prefix, &runtime, timeout, || {
+                    bottle_control::assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
+                    bottle_control::assert_same_prefix(&dir, &dir_guard, &dir_snapshot)?;
+                    snapshot.recheck()
+                })?;
+                return Ok(false);
+            }
+        }
     };
     let wine = predecessor
         .as_ref()
@@ -540,6 +657,68 @@ mod tests {
                 |wine| self.mock_reviewed_attestation(wine),
             )
         }
+
+        fn replace_package(&self, wait: &str) {
+            bottle_xdg::for_bottle(&self.dir).unwrap();
+            let script = format!(
+                "#!/bin/sh\ncase \"${{0##*/}}\" in\nwineserver) printf '%s\\n' \"$1\" >> \"$WINEPREFIX/../../../replacement-server-calls\"; test \"$1\" = -w || exit 99\n{wait}\n;;\n*) printf unexpected > \"$WINEPREFIX/../../../replacement-engine-call\"; exit 99;;\nesac\n"
+            );
+            fs::write(self.wine.parent().unwrap().join("_dispatch"), script).unwrap();
+            // Ensure snapshots taken by a test already contain the lock file.
+            drop(lock_bottle(&self.home, &self.bottle.id).unwrap());
+        }
+
+        fn replacement_proof(
+            &self,
+            wine: &Path,
+            identity: &str,
+        ) -> Result<Option<runtime_identity::BundleAttestation>, String> {
+            let mut proof = self.mock_reviewed_attestation(wine)?;
+            proof.as_mut().unwrap().identity = identity.into();
+            Ok(proof)
+        }
+
+        fn run_replaced_mocked(&self, identity: &str, timeout: Duration) -> Result<bool, String> {
+            quit_one_with_attester(
+                &self.home,
+                &self.bottle.id,
+                Some(&self.wine),
+                timeout,
+                |wine| self.replacement_proof(wine, identity),
+            )
+        }
+
+        fn replacement_calls(&self) -> String {
+            fs::read_to_string(self.home.join("replacement-server-calls")).unwrap_or_default()
+        }
+    }
+
+    fn bottle_files(dir: &Path) -> std::collections::BTreeMap<PathBuf, (Vec<u8>, u32, u64)> {
+        fn collect(
+            root: &Path,
+            dir: &Path,
+            files: &mut std::collections::BTreeMap<PathBuf, (Vec<u8>, u32, u64)>,
+        ) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                if metadata.is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    assert!(
+                        metadata.is_file(),
+                        "original fixture contains only regular files"
+                    );
+                    files.insert(
+                        path.strip_prefix(root).unwrap().into(),
+                        (fs::read(&path).unwrap(), metadata.mode(), metadata.ino()),
+                    );
+                }
+            }
+        }
+        let mut files = std::collections::BTreeMap::new();
+        collect(dir, dir, &mut files);
+        files
     }
 
     struct OwnedTestChild(Child);
@@ -570,7 +749,8 @@ mod tests {
 
     #[test]
     fn reviewed_predecessor_stops_its_running_fixture_without_using_selected_engine() {
-        let fixture = PredecessorFixture::new(SHUTDOWN_PREDECESSORS[1]);
+        let fixture =
+            PredecessorFixture::new(runtime_migration::RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY);
         let selected = fake_runtime(&fixture.home.join("selected"));
         fs::write(
             selected.parent().unwrap().join("wineserver"),
@@ -581,6 +761,287 @@ mod tests {
         assert!(fixture.run_mocked(Some(&selected)).unwrap());
         assert!(child.0.wait().unwrap().signal().is_some());
         assert!(!fixture.dir.join("prefix/wrong-selected-engine").exists());
+    }
+
+    #[test]
+    fn same_location_replacement_observes_idle_without_adopting_or_changing_the_bottle() {
+        let fixture =
+            PredecessorFixture::new(runtime_migration::RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY);
+        fixture.replace_package("exit 0");
+        // The observation neither repairs managed configuration nor cleans up
+        // stale tracked PIDs. Ordinary launch migration owns those decisions.
+        fs::write(
+            fixture.dir.join("xdg/config/user-dirs.dirs"),
+            b"retained fixture mapping\n",
+        )
+        .unwrap();
+        save_json(
+            &fixture.dir.join("active-processes.json"),
+            &vec![i32::MAX as u32],
+        )
+        .unwrap();
+        let backups = fixture.home.join("runtime-migration-backups");
+        fs::create_dir(&backups).unwrap();
+        fs::write(
+            backups.join("earlier-prefix-record.json"),
+            b"retained original backup",
+        )
+        .unwrap();
+        let before = bottle_files(&fixture.dir);
+        assert!(
+            !fixture
+                .run_replaced_mocked(
+                    runtime_migration::STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
+                    Duration::from_secs(2)
+                )
+                .unwrap()
+        );
+        assert_eq!(fixture.replacement_calls(), "-w\n");
+        assert_eq!(bottle_files(&fixture.dir), before);
+        assert_eq!(fs::read_dir(&backups).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(backups.join("earlier-prefix-record.json")).unwrap(),
+            b"retained original backup"
+        );
+        assert!(!fixture.home.join("replacement-engine-call").exists());
+        assert!(!fixture.dir.join("logs").exists());
+    }
+
+    #[test]
+    fn replacement_observation_refuses_live_failed_and_tracked_sessions_without_force_quit() {
+        for case in ["timeout", "failed-wait", "tracked"] {
+            let fixture =
+                PredecessorFixture::new(runtime_migration::RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY);
+            fixture.replace_package(if case == "timeout" {
+                "exec /bin/sleep 30"
+            } else if case == "failed-wait" {
+                "exit 7"
+            } else {
+                "exit 0"
+            });
+            if case == "tracked" {
+                save_json(
+                    &fixture.dir.join("active-processes.json"),
+                    &vec![std::process::id()],
+                )
+                .unwrap();
+            }
+            let before = bottle_files(&fixture.dir);
+            assert!(
+                fixture
+                    .run_replaced_mocked(
+                        runtime_migration::STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
+                        Duration::from_millis(250)
+                    )
+                    .is_err(),
+                "{case}"
+            );
+            assert_eq!(
+                fixture.replacement_calls(),
+                if case == "tracked" { "" } else { "-w\n" },
+                "{case}"
+            );
+            assert_eq!(bottle_files(&fixture.dir), before, "{case}");
+            assert!(process_alive(std::process::id()).unwrap());
+            assert!(!fixture.home.join("runtime-migration-backups").exists());
+        }
+    }
+
+    #[test]
+    fn replacement_observation_refuses_an_owner_after_a_successful_wait_without_signalling_it() {
+        use std::io::BufRead;
+        let fixture =
+            PredecessorFixture::new(runtime_migration::RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY);
+        fixture.replace_package("exit 0");
+        let held = fixture.dir.join("prefix/system.reg");
+        let mut owner = OwnedTestChild(
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "exec 3<\"$1\"; printf 'ready\\n'; read line; exit 0",
+                    "fixture",
+                ])
+                .arg(&held)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut ready = String::new();
+        std::io::BufReader::new(owner.0.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "ready\n");
+        let before = bottle_files(&fixture.dir);
+        assert!(
+            fixture
+                .run_replaced_mocked(
+                    runtime_migration::STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
+                    Duration::from_millis(700)
+                )
+                .is_err()
+        );
+        assert!(owner.0.try_wait().unwrap().is_none());
+        assert_eq!(fixture.replacement_calls(), "-w\n");
+        assert_eq!(bottle_files(&fixture.dir), before);
+        assert!(!fixture.home.join("runtime-migration-backups").exists());
+    }
+
+    #[test]
+    fn replacement_observation_requires_known_complete_packages_and_an_exact_direct_edge() {
+        for case in [
+            "unknown-record",
+            "unknown-package",
+            "unreviewed-bytes",
+            "downgrade",
+            "different-location",
+            "path-only-mismatch",
+            "missing-xdg",
+            "symlinked-xdg",
+        ] {
+            let fixture =
+                PredecessorFixture::new(runtime_migration::RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY);
+            fixture.replace_package("exit 0");
+            let path = fixture.dir.join("prefix-record.json");
+            let mut record: PrefixRecord =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            if case == "unknown-record" {
+                record.runtime_identity = Some("sha256:unknown".into());
+            } else if case == "downgrade" {
+                record.runtime_identity =
+                    Some(runtime_migration::STEAM_CLIENT_QUIT_WINE_11_IDENTITY.into());
+            } else if case == "path-only-mismatch" {
+                record.runtime_identity = None;
+                record.runtime_fingerprint = None;
+                record.wine_path = fixture
+                    .home
+                    .join("absent/Caskrun.app/Contents/Resources/wine-runtime/bin/_dispatch")
+                    .display()
+                    .to_string();
+            }
+            save_json(&path, &record).unwrap();
+            if case == "missing-xdg" || case == "symlinked-xdg" {
+                fs::remove_dir(&fixture.dir.join("xdg/data")).unwrap();
+                if case == "symlinked-xdg" {
+                    symlink(fixture.dir.join("xdg/config"), fixture.dir.join("xdg/data")).unwrap();
+                }
+            }
+            let before = fs::read(&path).unwrap();
+            let result = if case == "unreviewed-bytes" {
+                quit_one(
+                    &fixture.home,
+                    &fixture.bottle.id,
+                    Some(&fixture.wine),
+                    Duration::from_secs(1),
+                )
+            } else {
+                let selected = if case == "different-location" {
+                    fake_runtime(&fixture.home.join("other"))
+                } else {
+                    fixture.wine.clone()
+                };
+                quit_one_with_attester(
+                    &fixture.home,
+                    &fixture.bottle.id,
+                    Some(&selected),
+                    Duration::from_secs(1),
+                    |wine| {
+                        fixture.replacement_proof(
+                            wine,
+                            if case == "unknown-package" {
+                                "sha256:unknown"
+                            } else if case == "downgrade" {
+                                runtime_migration::RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY
+                            } else {
+                                runtime_migration::STEAM_CLIENT_QUIT_WINE_11_IDENTITY
+                            },
+                        )
+                    },
+                )
+            };
+            assert!(result.is_err(), "{case}");
+            assert_eq!(fs::read(&path).unwrap(), before, "{case}");
+            assert_eq!(fixture.replacement_calls(), "", "{case}");
+            assert!(!fixture.home.join("runtime-migration-backups").exists());
+            assert!(!fixture.dir.join("logs").exists());
+        }
+    }
+
+    #[test]
+    fn replacement_observation_rechecks_record_prefix_and_package_before_waiting() {
+        for case in ["record-bytes", "record-inode", "prefix", "package"] {
+            let fixture =
+                PredecessorFixture::new(runtime_migration::RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY);
+            fixture.replace_package("exit 0");
+            let path = fixture.dir.join("prefix-record.json");
+            let original = fs::read(&path).unwrap();
+            let result = quit_one_with_attester(
+                &fixture.home,
+                &fixture.bottle.id,
+                Some(&fixture.wine),
+                Duration::from_secs(1),
+                |wine| {
+                    let proof = fixture.replacement_proof(
+                        wine,
+                        runtime_migration::STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
+                    )?;
+                    match case {
+                        "record-bytes" => {
+                            let mut changed = original.clone();
+                            changed.push(b' ');
+                            fs::write(&path, changed).unwrap();
+                        }
+                        "record-inode" => {
+                            fs::rename(&path, path.with_extension("previous")).unwrap();
+                            fs::write(&path, &original).unwrap();
+                        }
+                        "prefix" => {
+                            fs::rename(
+                                fixture.dir.join("prefix"),
+                                fixture.dir.join("prefix-original"),
+                            )
+                            .unwrap();
+                            fs::create_dir(fixture.dir.join("prefix")).unwrap();
+                        }
+                        "package" => fs::write(
+                            wine.parent().unwrap().join("_dispatch"),
+                            b"#!/bin/sh\nexit 0\n",
+                        )
+                        .unwrap(),
+                        _ => unreachable!(),
+                    }
+                    Ok(proof)
+                },
+            );
+            assert!(result.unwrap_err().contains("changed"), "{case}");
+            assert_eq!(fixture.replacement_calls(), "", "{case}");
+            assert!(!fixture.home.join("runtime-migration-backups").exists());
+            if case == "record-bytes" {
+                assert_eq!(fs::read(&path).unwrap().last(), Some(&b' '));
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_observation_preserves_a_record_changed_during_the_wait() {
+        let fixture =
+            PredecessorFixture::new(runtime_migration::RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY);
+        fixture.replace_package("printf ' ' >> \"$WINEPREFIX/../prefix-record.json\"\nexit 0");
+        let path = fixture.dir.join("prefix-record.json");
+        let mut changed = fs::read(&path).unwrap();
+        changed.push(b' ');
+        assert!(
+            fixture
+                .run_replaced_mocked(
+                    runtime_migration::STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
+                    Duration::from_secs(1)
+                )
+                .unwrap_err()
+                .contains("record changed")
+        );
+        assert_eq!(fs::read(path).unwrap(), changed);
+        assert_eq!(fixture.replacement_calls(), "-w\n");
+        assert!(!fixture.home.join("runtime-migration-backups").exists());
     }
 
     #[test]
@@ -615,7 +1076,7 @@ mod tests {
     fn predecessor_shutdown_refuses_unrecognized_records_paths_and_incomplete_packages() {
         for case in [
             "unknown",
-            "current",
+            "reviewed-identity-mismatch",
             "path-only",
             "malformed",
             "extra",
@@ -630,7 +1091,7 @@ mod tests {
                 serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             match case {
                 "unknown" => value["runtime_identity"] = format!("{}0", fixture.identity).into(),
-                "current" => {
+                "reviewed-identity-mismatch" => {
                     value["runtime_identity"] =
                         runtime_migration::SWITCHABLE_WINE_11_IDENTITY.into()
                 }

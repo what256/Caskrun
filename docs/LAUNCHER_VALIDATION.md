@@ -257,3 +257,43 @@ Caskrun copy. Fixtures were stopped and removed after zero-owner checks.
 These checks used no publisher client or game. See [native controls validation](NATIVE_TEXT_EDITING.md)
 for the source/runtime proof, test-runner correction and remaining Steam/game
 boundaries.
+
+## Quitting after an engine update — 15 October 2026
+
+Replacing the local app left an imported bottle recording the preceding engine
+at the same canonical package path. Full Quit rejected that reviewed identity
+because shutdown still carried an older, separate three-package allowlist.
+Widening the allowlist alone would not resolve the replaced-package mismatch.
+
+Shutdown now shares the exact reviewed package identities with migration. An
+intact, fully attested predecessor keeps its existing shutdown path. A fully
+attested, declared direct successor at the exact same canonical location can
+only observe the existing server lock with a bounded `wineserver -w` and prove
+zero live tracking/file owners. It cannot send `-k`, start a Windows client,
+adopt the successor, prune tracking, repair XDG configuration or write a
+migration backup. Record, package and directory snapshots are rechecked.
+The replacement route still refuses missing, custom, unknown, changed,
+differently located and undeclared packages; a live or unverifiable replaced
+session remains a refusal.
+
+The focused serial suites passed 27 shutdown and 78 migration tests. Original
+fixtures cover replacement success, unchanged bottle contents and records,
+live/failed/timed-out waits, current owners, malformed identities and paths,
+and record/prefix/package races. The shared-approval test covers every endpoint
+of all declared migration policies without widening graphics capabilities or
+relaxing launch-time recipe/PE guards.
+
+The complete serial Core suite passed 537 unit and 7 integration tests, with
+2 existing unit tests ignored; `cargo fmt --check` passed.
+
+The optimized Core then verified the actual idle imported bottle against the
+updated canonical package: full Quit completed with zero stop requests and zero
+current owners. Runtime-record bytes, tracking, existing JSON backups, XDG
+configuration and prefix identity were unchanged. This checks the reported
+update failure, not publisher sign-in or gameplay.
+
+Local build 50 was packaged and its app signature and DMG checksum verified.
+Normal Command-Q exited the installed app successfully against that same
+library, preserving the recorded predecessor and existing backups; the app
+then reopened. The bundled Wine package is unchanged from build 49. No Windows
+client or game was launched for this host-only regression check.

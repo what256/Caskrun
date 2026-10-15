@@ -69,6 +69,39 @@ pub(super) const RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY: &str =
 pub(super) const STEAM_CLIENT_QUIT_WINE_11_IDENTITY: &str =
     "sha256:cae84f3978b2e0820bbdfc95c1e9dd5fa6c79c8d1f1aca825ac86bd2afb77c29";
 
+// Shared exact-package approval for shutdown. This does not grant switchable
+// graphics capabilities or bypass any migration's launcher and idle gates.
+pub(super) const REVIEWED_RUNTIME_IDENTITIES: [&str; 12] = [
+    TLS_WINE_11_IDENTITY,
+    STEAM_WINE_11_IDENTITY,
+    NATIVE_WINE_11_IDENTITY,
+    SWITCHABLE_WINE_11_IDENTITY,
+    NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+    REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+    BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
+    BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+    SINGLE_STEAM_UI_WINE_11_IDENTITY,
+    CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY,
+    RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY,
+    STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
+];
+
+pub(super) fn is_reviewed_runtime(identity: &str) -> bool {
+    REVIEWED_RUNTIME_IDENTITIES.contains(&identity)
+}
+
+/// An exact declared edge can authorize a read-only shutdown observation after
+/// package replacement. Actually migrating a bottle still requires all of the
+/// relevant policy's recipe, launcher, PE, idle, and backup checks below.
+pub(super) fn has_reviewed_direct_transition(previous: &str, approved: &str) -> bool {
+    is_reviewed_runtime(previous)
+        && is_reviewed_runtime(approved)
+        && STEAM_RUNTIME_POLICIES
+            .iter()
+            .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .any(|policy| policy.previous == previous && policy.approved == approved)
+}
+
 /// Capability proof stays tied to explicitly reviewed complete packages. A
 /// component receipt or an engine's major version cannot add a new package.
 pub(super) fn is_reviewed_switchable_runtime(identity: &str) -> bool {
@@ -1127,6 +1160,34 @@ fn wait_for_idle_wineserver(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_migration_endpoint_has_shared_exact_package_approval() {
+        let mut endpoints = std::collections::BTreeSet::new();
+        for policy in STEAM_RUNTIME_POLICIES
+            .iter()
+            .chain(BUNDLED_RUNTIME_POLICIES.iter())
+        {
+            assert!(is_reviewed_runtime(policy.previous));
+            assert!(is_reviewed_runtime(policy.approved));
+            assert!(has_reviewed_direct_transition(
+                policy.previous,
+                policy.approved
+            ));
+            endpoints.extend([policy.previous, policy.approved]);
+        }
+        assert_eq!(endpoints, REVIEWED_RUNTIME_IDENTITIES.into_iter().collect());
+        for identity in REVIEWED_RUNTIME_IDENTITIES {
+            assert!(!has_reviewed_direct_transition(identity, identity));
+            assert!(!is_reviewed_runtime(&format!("{identity}0")));
+            assert!(!has_reviewed_direct_transition(identity, "sha256:unknown"));
+            assert!(!has_reviewed_direct_transition("sha256:unknown", identity));
+        }
+        assert!(!has_reviewed_direct_transition(
+            STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
+            RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY
+        ));
+    }
 
     struct Fixture {
         home: PathBuf,

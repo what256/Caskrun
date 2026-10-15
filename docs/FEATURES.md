@@ -14,8 +14,14 @@ Reviewed Steam bottles can skip the earlier TLS/Steam engine releases when
 moving to the switchable DXMT package. These exact upgrades retain the Steam
 recipe, PE, idle, backup and runtime verification guards. During full Quit,
 a mismatched recorded predecessor is used only after a separate full-package
-hash matches its recorded identity and the fixed reviewed allowlist. Missing,
-custom and unknown packages remain errors. Shutdown clears inherited loader
+hash matches its recorded identity and the shared reviewed-package allowlist.
+If an app update replaced that exact canonical package location with a reviewed
+direct successor, shutdown can instead prove the bottle is already idle: it
+only waits on the existing Wine server and checks current file owners. It
+does not send a stop request, change the runtime record, create a migration
+backup or repair bottle configuration. A running or unverifiable old session
+still prevents this idle-only exit. Missing, custom and unknown packages remain
+errors. Shutdown clears inherited loader
 and library overrides, retains the user's server lookup context and sets the
 exact bottle paths. This does not migrate the record or establish compatibility
 with unreviewed engines. The existing race between checking a user-writable
