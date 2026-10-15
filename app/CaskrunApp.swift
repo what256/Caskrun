@@ -979,6 +979,85 @@ final class CaskrunModel: ObservableObject {
     private var activeManualInstaller: CoreInvocationCancellation?
     private var activeCatalogCancellation: CoreInvocationCancellation?
     private var activeMaintenanceCancellation: CoreInvocationCancellation?
+    @Published private(set) var bottleSessions: [String: BottleSessionState] = [:]
+    private var checkingBottleActivity: Set<String> = []
+    private struct BottleStopOperation {
+        let id: UUID
+        let cancellation: CoreInvocationCancellation
+        let task: Task<Void, Never>
+    }
+    private var bottleStopOperations: [String: BottleStopOperation] = [:]
+
+    func sessionState(for bottle: Bottle) -> BottleSessionState {
+        bottleSessions[bottle.id] ?? BottleSessionState()
+    }
+
+    func isStoppingBottle(_ id: String) -> Bool {
+        bottleSessions[id]?.isStopping == true
+    }
+
+    func refreshBottleActivity(in bottle: Bottle) async {
+        guard !isQuitting, !checkingBottleActivity.contains(bottle.id) else { return }
+        checkingBottleActivity.insert(bottle.id)
+        let token = bottleSessions[bottle.id]?.operationID
+        defer { checkingBottleActivity.remove(bottle.id) }
+        do {
+            let result = try await callAsync(["bottle-activity", bottle.id], as: BottleActivitySnapshot.self)
+            guard !isQuitting, !Task.isCancelled, result.bottle_id == bottle.id,
+                  bottleSessions[bottle.id]?.operationID == token else { return }
+            bottleSessions[bottle.id, default: BottleSessionState()].checked(running: result.running)
+        } catch {
+            guard !isQuitting, !Task.isCancelled,
+                  bottleSessions[bottle.id]?.operationID == token else { return }
+            bottleSessions[bottle.id, default: BottleSessionState()].checkFailed(error.localizedDescription)
+        }
+    }
+
+    func requestQuitApps(in bottle: Bottle) {
+        guard !isQuitting, !isManagingBottle, !isLaunching,
+              bottleStopOperations[bottle.id] == nil,
+              let token = bottleSessions[bottle.id, default: BottleSessionState()].beginQuit() else { return }
+        let cancellation = CoreInvocationCancellation()
+        let task = Task { @MainActor in
+            defer {
+                if bottleStopOperations[bottle.id]?.id == token {
+                    bottleStopOperations[bottle.id] = nil
+                    if cancellation.isCancelRequested { bottleSessions[bottle.id]?.interrupted(token) }
+                }
+            }
+            do {
+                let result = try await callAsync(["request-bottle-quit", bottle.id], as: BottleQuitRequestResult.self,
+                                                 cancellation: cancellation)
+                guard !isQuitting, result.bottle_id == bottle.id,
+                      bottleSessions[bottle.id]?.operationID == token else { return }
+                bottleSessions[bottle.id]?.requestFinished(token, submitted: result.request_submitted)
+            } catch {
+                guard !isQuitting, !cancellation.isCancelRequested else { return }
+                bottleSessions[bottle.id]?.failed(token, message: error.localizedDescription)
+            }
+            await refreshBottleActivity(in: bottle)
+            await monitorBottleQuit(in: bottle, token: token, cancellation: cancellation)
+        }
+        bottleStopOperations[bottle.id] = BottleStopOperation(id: token, cancellation: cancellation, task: task)
+    }
+
+    private func monitorBottleQuit(in bottle: Bottle, token: UUID,
+                                   cancellation: CoreInvocationCancellation) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(120))
+        while !isQuitting, !cancellation.isCancelRequested,
+              bottleSessions[bottle.id]?.operationID == token,
+              bottleSessions[bottle.id]?.phase == .waiting {
+            guard clock.now < deadline else {
+                bottleSessions[bottle.id]?.failed(token, message: "This bottle still has activity. Check its open apps or choose Force Quit.")
+                return
+            }
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            guard !isQuitting, !cancellation.isCancelRequested,
+                  bottleSessions[bottle.id]?.operationID == token else { return }
+            await refreshBottleActivity(in: bottle)
+        }
+    }
 
     var hasBundledRuntime: Bool { Self.bundledWinePath != nil }
     var usesBundledRuntime: Bool { Self.bundledWinePath == wineExecutable && hasBundledRuntime }
@@ -1015,7 +1094,7 @@ final class CaskrunModel: ObservableObject {
         let readCommands: Set<String> = ["overview", "status", "list", "deleted", "catalog-attempts",
                                          "apps", "app-icon", "bottle-icon", "bottle-resolution", "bottle-graphics",
                                          "discover-apps", "steam-games", "logs", "read-log", "prefix-path",
-                                         "installed-programs", "diagnostics", "bottle-notes", "bottle-windows-version", "browser-games", "publisher-games"]
+                                         "installed-programs", "diagnostics", "bottle-notes", "bottle-windows-version", "browser-games", "publisher-games", "bottle-activity"]
         if isQuitting, let command = arguments.first,
            command != "quit-all-bottles", !readCommands.contains(command) {
             throw NSError(domain: "Caskrun", code: 1,
@@ -1030,10 +1109,11 @@ final class CaskrunModel: ObservableObject {
         activeManualInstaller?.cancel()
         activeCatalogCancellation?.cancel()
         activeMaintenanceCancellation?.cancel()
+        for operation in bottleStopOperations.values { operation.cancellation.cancel() }
         do {
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: .seconds(30))
-            while isLaunching || isManagingBottle || isProbingRuntime || editingBrowserGames {
+            while isLaunching || isManagingBottle || isProbingRuntime || editingBrowserGames || !bottleStopOperations.isEmpty {
                 guard clock.now < deadline else {
                     throw NSError(domain: "Caskrun", code: 1,
                                   userInfo: [NSLocalizedDescriptionKey: "A setup or bottle operation is still finishing. Wait for it to finish, then choose Quit Caskrun again."])
@@ -1468,7 +1548,7 @@ final class CaskrunModel: ObservableObject {
     }
 
     func runSteamGame(_ game: SteamGame, in bottle: Bottle) {
-        guard !isQuitting, status.wine_path != nil, !isLaunching, !isManagingBottle else { return }
+        guard !isStoppingBottle(bottle.id), !isQuitting, status.wine_path != nil, !isLaunching, !isManagingBottle else { return }
         isLaunching = true
         Task {
             defer { isLaunching = false }
@@ -1664,7 +1744,7 @@ final class CaskrunModel: ObservableObject {
             onFailure?()
             return
         }
-        guard !isQuitting && !isLaunching && !isManagingBottle else { return }
+        guard !isQuitting && !isLaunching && !isManagingBottle && !isStoppingBottle(bottle.id) else { return }
         isLaunching = true
         Task {
             defer { isLaunching = false }
@@ -1684,7 +1764,7 @@ final class CaskrunModel: ObservableObject {
     }
 
     func runCommand(in bottle: Bottle) {
-        guard !isQuitting, status.wine_path != nil, !isLaunching, !isManagingBottle else { return }
+        guard !isQuitting, status.wine_path != nil, !isLaunching, !isManagingBottle, !isStoppingBottle(bottle.id) else { return }
         let panel = NSOpenPanel()
         panel.message = "Choose a Windows .exe to run once in \(bottle.name)"
         panel.canChooseFiles = true
@@ -1705,7 +1785,7 @@ final class CaskrunModel: ObservableObject {
     }
 
     func runOnce(_ program: OneTimeProgram, arguments: [String], launcher: SavedLauncher?) {
-        guard !isQuitting && !isLaunching && !isManagingBottle && status.wine_path != nil else { return }
+        guard !isQuitting && !isLaunching && !isManagingBottle && !isStoppingBottle(program.bottle.id) && status.wine_path != nil else { return }
         if let saved = launcher {
             // Preserve saved recipe options, Steam identity and bootstrap routing.
             runLauncher(saved, in: program.bottle, arguments: arguments)
@@ -1722,16 +1802,36 @@ final class CaskrunModel: ObservableObject {
         }
     }
 
-    func quitWindowsApps(in bottle: Bottle) {
-        guard !isQuitting && !isManagingBottle && !isLaunching else { return }
-        isManagingBottle = true
-        Task {
-            defer { isManagingBottle = false }
+    func forceQuitApps(in bottle: Bottle) {
+        guard !isQuitting, !isManagingBottle, !isLaunching,
+              sessionState(for: bottle).phase != .forcing else { return }
+        let pending = bottleStopOperations[bottle.id]
+        let token = bottleSessions[bottle.id, default: BottleSessionState()].beginForceQuit()
+        pending?.cancellation.cancel()
+        let cancellation = CoreInvocationCancellation()
+        let task = Task { @MainActor in
+            defer {
+                if bottleStopOperations[bottle.id]?.id == token {
+                    bottleStopOperations[bottle.id] = nil
+                    if cancellation.isCancelRequested { bottleSessions[bottle.id]?.interrupted(token) }
+                }
+            }
+            // Reap the polite request before forcing the bottle. Otherwise its
+            // late cleanup could overwrite the Force Quit tracking record.
+            await pending?.task.value
+            guard !isQuitting, !cancellation.isCancelRequested else { return }
             do {
-                let result = try await callAsync(["quit-bottle", bottle.id], as: BottleQuitResult.self)
-                message = result.message
-            } catch { message = error.localizedDescription }
+                _ = try await callAsync(["quit-bottle", bottle.id], as: BottleQuitResult.self,
+                                       cancellation: cancellation)
+                bottleSessions[bottle.id]?.forceFinished(token)
+            } catch {
+                guard !isQuitting else { return }
+                bottleSessions[bottle.id]?.failed(token, message: error.localizedDescription)
+            }
+            await refreshBottleActivity(in: bottle)
+            await monitorBottleQuit(in: bottle, token: token, cancellation: cancellation)
         }
+        bottleStopOperations[bottle.id] = BottleStopOperation(id: token, cancellation: cancellation, task: task)
     }
 
     func openUninstaller(in bottle: Bottle) {
@@ -3075,17 +3175,17 @@ struct CaskrunApp: App {
             } message: {
                 Text("All apps, games and files in this deleted bottle will be erased. This cannot be undone.")
             }
-            .alert("Quit Windows apps in this bottle?", isPresented: Binding(
+            .alert("Force quit apps in this bottle?", isPresented: Binding(
                 get: { quitTarget != nil },
                 set: { if !$0 { quitTarget = nil } }
             )) {
-                Button("Quit Windows Apps", role: .destructive) {
-                    if let bottle = quitTarget { model.quitWindowsApps(in: bottle) }
+                Button("Force Quit", role: .destructive) {
+                    if let bottle = quitTarget { model.forceQuitApps(in: bottle) }
                     quitTarget = nil
                 }
                 Button("Cancel", role: .cancel) { quitTarget = nil }
             } message: {
-                Text("All Windows apps in \(quitTarget?.name ?? "this bottle") will close. Unsaved work in those apps may be lost.")
+                Text("All Windows apps in \(quitTarget?.name ?? "this bottle") will stop immediately. Unsaved work may be lost.")
             }
             .alert("Simulate a Windows reboot?", isPresented: Binding(
                 get: { rebootTarget != nil },
@@ -3974,6 +4074,10 @@ struct CaskrunApp: App {
             if let bottle = selectedBottle {
                 model.refreshBottleResolution(in: bottle)
                 model.refreshBottleGraphics(in: bottle)
+                while !Task.isCancelled {
+                    await model.refreshBottleActivity(in: bottle)
+                    do { try await Task.sleep(for: .seconds(3)) } catch { break }
+                }
             }
         }
     }
@@ -4007,11 +4111,12 @@ struct CaskrunApp: App {
     private func inspectorApps(for bottle: Bottle) -> some View {
         let apps = model.launchers[bottle.id] ?? []
         let games = (model.steamGames[bottle.id] ?? []).filter { $0.app_id != 228980 }
-        let busy = model.isManagingBottle || model.isLaunching
+        let busy = model.isManagingBottle || model.isLaunching || model.isStoppingBottle(bottle.id)
         return VStack(alignment: .leading, spacing: 12) {
             if let entry = selectedCollectionItem, entry.id.hasPrefix("publisher:") {
-                Button("Open store for \(entry.name)") { openCollectionItem(entry) }
-                    .buttonStyle(.borderedProminent).disabled(!entry.canOpen)
+                inspectorOpenControls(for: bottle, title: "Open store", canOpen: entry.canOpen && !busy) {
+                    openCollectionItem(entry)
+                }
                 Text("This installed title was found in its local store manifest. Start it from the store; gameplay is not verified.")
                     .font(.caption).foregroundStyle(.secondary)
             } else if let item = inspectedProgram {
@@ -4034,16 +4139,11 @@ struct CaskrunApp: App {
                         ForEach(games) { Text($0.name).tag("game:" + $0.id) }
                     }
                 }
-                Button {
+                inspectorOpenControls(for: bottle, title: "Open \(selectedSteamGame?.name ?? item.launcher.name)",
+                                      canOpen: !busy && model.status.wine_path != nil) {
                     if let game = selectedSteamGame { model.runSteamGame(game, in: bottle) }
                     else { model.runLauncher(item.launcher, in: bottle) }
-                } label: {
-                    Label("Open \(selectedSteamGame?.name ?? item.launcher.name)", systemImage: "play.fill")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(maxWidth: .infinity).frame(height: 30)
                 }
-                .buttonStyle(.borderedProminent).tint(.accentColor)
-                .disabled(busy || model.status.wine_path == nil)
                 if selectedSteamGame != nil {
                     Text("Opens through Steam in this bottle.").font(.caption).foregroundStyle(.secondary)
                 } else {
@@ -4065,19 +4165,17 @@ struct CaskrunApp: App {
                 }
                 }
             } else if let game = selectedSteamGame {
-                Button { model.runSteamGame(game, in: bottle) } label: {
-                    Label("Open " + game.name, systemImage: "play.fill")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(maxWidth: .infinity).frame(height: 30)
+                inspectorOpenControls(for: bottle, title: "Open " + game.name,
+                                      canOpen: !busy && model.status.wine_path != nil) {
+                    model.runSteamGame(game, in: bottle)
                 }
-                .buttonStyle(.borderedProminent).tint(.accentColor)
-                .disabled(busy || model.status.wine_path == nil)
                 Text("Add Steam from this bottle with Find installed apps to open its games.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("No saved apps yet").font(.system(size: 13, weight: .semibold))
                 Text("Install an app or add a program already in this bottle.")
                     .font(.caption).foregroundStyle(.secondary)
+                bottleQuitControls(for: bottle)
             }
             Menu {
                 Button("Install from file…") { model.chooseInstaller(in: bottle.id) }
@@ -4093,6 +4191,83 @@ struct CaskrunApp: App {
         }
     }
 
+    private func inspectorOpenControls(for bottle: Bottle, title: String, canOpen: Bool,
+                                       action: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button(action: action) {
+                    Label(title, systemImage: "play.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity).frame(height: 28)
+                }
+                .buttonStyle(.borderedProminent).tint(.accentColor)
+                .disabled(!canOpen || model.isQuitting)
+                .help(title)
+                bottleQuitButton(for: bottle)
+            }
+            bottleQuitStatus(for: bottle)
+        }
+    }
+
+    private func bottleQuitControls(for bottle: Bottle) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            bottleQuitButton(for: bottle)
+            bottleQuitStatus(for: bottle)
+        }
+    }
+
+    private func bottleQuitButton(for bottle: Bottle) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let session = model.sessionState(for: bottle)
+            if session.showsQuitControl {
+                let force = session.canForceQuit(at: context.date)
+                Button {
+                    if force { quitTarget = bottle }
+                    else { model.requestQuitApps(in: bottle) }
+                } label: {
+                    HStack(spacing: 5) {
+                        if session.isStopping && !force {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: force ? "stop.fill" : "stop")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        Text(force ? "Force Quit…" : session.isStopping ? "Quitting…" : "Quit Apps")
+                            .font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    }
+                    .frame(height: 28)
+                }
+                .buttonStyle(.bordered)
+                .fixedSize(horizontal: true, vertical: false)
+                .disabled(model.isQuitting || model.isManagingBottle || model.isLaunching ||
+                          (session.isStopping && !force))
+                .help(force ? "Force quit all Windows apps in this bottle" : "Quit all Windows apps in this bottle")
+                .accessibilityLabel(force ? "Force quit apps in \(bottle.name)" : "Quit apps in \(bottle.name)")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func bottleQuitStatus(for bottle: Bottle) -> some View {
+        let session = model.sessionState(for: bottle)
+        if let error = session.error {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(session.activity == .unknown ? "Couldn’t check running apps." : "Apps could not finish quitting.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .help(error)
+                Spacer(minLength: 0)
+                Button(session.activity == .unknown ? "Retry" : "Check") {
+                    Task { await model.refreshBottleActivity(in: bottle) }
+                }
+                .buttonStyle(.plain).font(.system(size: 11, weight: .medium))
+            }
+        } else if session.isStopping {
+            Text(session.phase == .forcing ? "Stopping the remaining apps…" : "Save any open work. Stuck apps can be force quit.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+
     private func inspectorManagement(for bottle: Bottle) -> some View {
         VStack(spacing: 6) {
             bottleAction("Rename…", symbol: "pencil") { renameText = bottle.name; renameTarget = bottle }
@@ -4100,7 +4275,7 @@ struct CaskrunApp: App {
             bottleAction("Export Backup…", symbol: "square.and.arrow.up") { model.exportBottle(bottle) }
             bottleAction("Move to Recently Deleted…", symbol: "trash") { deleteTarget = bottle }
         }
-        .disabled(model.isManagingBottle || model.isLaunching)
+        .disabled(model.isManagingBottle || model.isLaunching || model.isStoppingBottle(bottle.id))
     }
 
     private var inspectorLibraryActions: some View {
@@ -4176,7 +4351,7 @@ struct CaskrunApp: App {
     }
 
     private func bottleActionsPanel(for bottle: Bottle) -> some View {
-        let busy = model.isLaunching || model.isManagingBottle
+        let busy = model.isLaunching || model.isManagingBottle || model.isStoppingBottle(bottle.id)
         let runtimeMissing = model.status.wine_path == nil
         return VStack(alignment: .leading, spacing: 14) {
             DisclosureGroup(isExpanded: $showBottleDisplay) {
@@ -4184,6 +4359,7 @@ struct CaskrunApp: App {
                     bottleDisplayPanel(for: bottle)
                     bottleGraphicsPanel(for: bottle)
                 }
+                .disabled(model.isStoppingBottle(bottle.id))
                 .padding(.top, 12)
                 .padding(.bottom, 4)
             } label: {
@@ -4218,7 +4394,7 @@ struct CaskrunApp: App {
                     bottleAction("Open C: Drive", symbol: "folder") { model.openDriveC(in: bottle) }
                     bottleAction("Uninstall Windows app…", symbol: "minus.circle") { model.openUninstaller(in: bottle) }
                         .disabled(busy || runtimeMissing)
-                    bottleAction("Quit Windows apps…", symbol: "xmark.circle") { quitTarget = bottle }
+                    bottleAction("Force Quit Apps…", symbol: "stop.circle") { quitTarget = bottle }
                         .disabled(busy || runtimeMissing)
                     bottleAction("View Logs", symbol: "doc.text") { logBottle = bottle }
                     bottleAction("Installed Programs…", symbol: "list.bullet.rectangle") { inventoryBottle = bottle }

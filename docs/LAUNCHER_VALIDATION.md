@@ -239,3 +239,21 @@ limits are in [UI smoke](UI_SMOKE.md). Real
 publisher sign-in, browser gameplay and actual games remain manual tests; see
 [the checklist](MANUAL_TEST_CHECKLIST.md). DXMT rendering evidence and its
 explicit limits are recorded in [DXMT options](DXMT_OPTIONS.md).
+
+
+## Bottle quit controls — 15 October 2026
+
+The development app adds Quit Apps next to Open for an active Windows bottle,
+Quitting progress, and explicit Force Quit after four seconds or a failed clean
+request. An idle bottle hides the quit control. The exact-runtime Core paths
+retain prefix isolation and never use a global Wine stop.
+
+Two disposable original Win32 apps verified clean end-session acceptance and
+refusal. The refusing app stayed alive until the sidebar's Force Quit was
+confirmed; the sibling bottle stayed active. The clean app received its end
+session messages and exited through the polite Core path. Both reached zero
+owners, the UI returned to its idle controls, and full Quit closed the isolated
+Caskrun copy. Fixtures were stopped and removed after zero-owner checks.
+These checks used no publisher client or game. See [native controls validation](NATIVE_TEXT_EDITING.md)
+for the source/runtime proof, test-runner correction and remaining Steam/game
+boundaries.

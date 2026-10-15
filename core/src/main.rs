@@ -2570,6 +2570,326 @@ fn launch_with_wine_args_in_directory(
     })
 }
 
+#[derive(Debug, Serialize)]
+struct SteamQuitRequest {
+    pid: u32,
+    request_submitted: bool,
+    log_path: String,
+}
+
+fn steam_quit_client(home: &Path, id: &str) -> Result<PathBuf, String> {
+    let dir = bottle_dir(home, id)?;
+    let bottle = read_bottle_record(&dir, id)?;
+    let launchers = list_launchers(home, id)?;
+    let clients = saved_steam_clients(home, &bottle, &launchers);
+    let verified: std::collections::BTreeSet<_> = clients
+        .iter()
+        .filter_map(|saved| {
+            launchers
+                .iter()
+                .find(|launcher| launcher.id == saved.launcher_id)
+                .filter(|launcher| steam_install::is_steam_client_launcher(home, id, launcher))
+        })
+        .filter_map(|launcher| Path::new(&launcher.path).canonicalize().ok())
+        .collect();
+    if verified.len() != 1 {
+        return Err("Quit needs one verified saved Steam client in this bottle; game shortcuts and custom commands cannot be used".into());
+    }
+    let path = verified.into_iter().next().unwrap();
+    // Recipe validation intentionally trusts its installed receipt. A Quit
+    // control must additionally verify the current executable itself, including
+    // recipe clients, rather than executing a replaced/non-PE file.
+    let before = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+    if !before.is_file() || before.len() < 70 {
+        return Err("Steam's saved client is not a Windows executable".into());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW_ANY | 0x4)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    if !same_snapshot(&before, &file.metadata().map_err(|e| e.to_string())?) {
+        return Err("Steam's saved client changed while checking it".into());
+    }
+    let mut dos = [0_u8; 64];
+    file.read_exact(&mut dos).map_err(|e| e.to_string())?;
+    let offset = u64::from(u32::from_le_bytes(dos[0x3c..0x40].try_into().unwrap()));
+    if &dos[..2] != b"MZ"
+        || !(64..=64 * 1024).contains(&offset)
+        || offset.saturating_add(6) > before.len()
+    {
+        return Err("Steam's saved client has invalid Windows headers".into());
+    }
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| e.to_string())?;
+    let mut pe = [0_u8; 6];
+    file.read_exact(&mut pe).map_err(|e| e.to_string())?;
+    if &pe[..4] != b"PE\0\0"
+        || !matches!(u16::from_le_bytes([pe[4], pe[5]]), 0x014c | 0x8664)
+        || !same_snapshot(&before, &file.metadata().map_err(|e| e.to_string())?)
+        || !same_snapshot(
+            &before,
+            &fs::symlink_metadata(&path).map_err(|e| e.to_string())?,
+        )
+    {
+        return Err("Steam's saved client changed or is not an x86/x64 Windows executable".into());
+    }
+    Ok(path)
+}
+
+/// Internal native-menu action: submit only Steam's graceful `-shutdown`
+/// request to a freshly proven, already running client in this exact bottle.
+/// It never initializes/migrates a prefix, merges shortcut arguments, generates
+/// an alias, or signals a Windows process. A successful result means that the
+/// request child exited successfully, not that Steam or its games have exited.
+fn request_steam_quit(home: &Path, id: &str) -> Result<SteamQuitRequest, String> {
+    let wine = wine_path().ok_or("Caskrun could not find its included Wine runtime")?;
+    request_steam_quit_with_wine_checked(
+        home,
+        id,
+        &wine,
+        prefix_processes::steam_client_owner,
+        |proof, dir, wine, client, prefix| proof.revalidate(dir, wine, client, prefix),
+    )
+}
+
+fn configure_steam_quit_command(
+    command: &mut Command,
+    home: &Path,
+    id: &str,
+    dir: &Path,
+    wine: &Path,
+    client: &Path,
+) -> Result<(), String> {
+    configure_control_environment(command, dir, wine)?;
+    let root = bottle_graphics::selected_runtime_root(dir, wine)?
+        .canonicalize()
+        .map_err(|_| "The recorded Windows engine is unavailable")?;
+    let ntdll = root.join("lib/wine/x86_64-unix/ntdll.so");
+    if !path_is_real_file(&ntdll) {
+        return Err("The recorded Windows engine has no native Steam loader binding".into());
+    }
+    command
+        .env("CASKRUN_STEAM_MODE", "1")
+        .env(
+            "CASKRUN_NATIVE_CORE",
+            env::current_exe()
+                .and_then(|p| p.canonicalize())
+                .map_err(|e| e.to_string())?,
+        )
+        .env(
+            "CASKRUN_NATIVE_DATA",
+            home.canonicalize().map_err(|e| e.to_string())?,
+        )
+        .env("CASKRUN_NATIVE_BOTTLE", id)
+        .env("CASKRUN_NATIVE_NTDLL", ntdll)
+        .env("CASKRUN_NATIVE_IMAGE", client)
+        .env("CASKRUN_NATIVE_INITIAL_IMAGE", client);
+    Ok(())
+}
+
+/// Read-only setup shared only by explicit control requests. Ordinary launch
+/// still uses its existing integration/renderer preparation path.
+fn configure_control_environment(
+    command: &mut Command,
+    dir: &Path,
+    wine: &Path,
+) -> Result<(), String> {
+    let _ = bottle_graphics::selected_runtime_root(dir, wine)?;
+    // Native callbacks inherit the parent Wine loader's private socket and
+    // reservations. They belong to that execution, never to a new loader.
+    for name in [
+        "WINESERVERSOCKET",
+        "WINELOADERNOEXEC",
+        "WINEPRELOADRESERVE",
+        "WINELOADER",
+        "WINESERVER",
+        "WINEDLLPATH",
+        "WINEDATADIR",
+        "WINEARCH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "CASKRUN_NATIVE_CORE",
+        "CASKRUN_NATIVE_BOTTLE",
+        "CASKRUN_NATIVE_DATA",
+        "CASKRUN_NATIVE_NTDLL",
+        "CASKRUN_NATIVE_IMAGE",
+        "CASKRUN_NATIVE_INITIAL_IMAGE",
+        "CASKRUN_NATIVE_EXEC",
+        "CASKRUN_STEAM_NATIVE_APP",
+        "CASKRUN_STEAM_ICON",
+        "CASKRUN_STEAM_MODE",
+    ] {
+        command.env_remove(name);
+    }
+    let inherited_names: Vec<_> = env::vars_os()
+        .map(|(name, _)| name)
+        .chain(command.get_envs().map(|(name, _)| name.to_owned()))
+        .collect();
+    for name in inherited_names {
+        if name.as_encoded_bytes().starts_with(b"CASKRUN_NATIVE_") {
+            command.env_remove(name);
+        }
+    }
+    // Reuse only existing private integration folders. Unlike ordinary launch,
+    // a Quit request must not create or repair a Desktop mapping or a bridge.
+    for path in [
+        dir.join("xdg"),
+        dir.join("xdg/config"),
+        dir.join("xdg/data"),
+    ] {
+        let _ = open_stable_directory(&path)?;
+    }
+    let backend = match bottle_graphics::selected_backend(dir)? {
+        bottle_graphics::Backend::Dxmt => "dxmt",
+        _ => "wined3d",
+    };
+    command
+        .env("CASKRUN_GRAPHICS_BACKEND", backend)
+        .env("XDG_CONFIG_HOME", dir.join("xdg/config"))
+        .env("XDG_DATA_HOME", dir.join("xdg/data"))
+        .env("WINEPREFIX", dir.join("prefix"));
+    Ok(())
+}
+
+/// Called only after this invocation's exact control child has been reaped.
+/// Reopen/compare inode guards after waiting, and remove only the appended PID
+/// occurrence. Never prune another session's saved process records.
+fn remove_control_child_record(
+    dir: &Path,
+    prefix: &Path,
+    dir_snapshot: &fs::Metadata,
+    prefix_snapshot: &fs::Metadata,
+    pid: u32,
+    original_pid_count: usize,
+) -> Result<(), String> {
+    let _lock = lock_bottle_directory_with_cancel(dir, false)?;
+    let (cleanup_dir, _) = open_stable_directory(dir)?;
+    let (cleanup_prefix, _) = open_stable_directory(prefix)?;
+    bottle_control::assert_same_prefix(dir, &cleanup_dir, dir_snapshot)?;
+    bottle_control::assert_same_prefix(prefix, &cleanup_prefix, prefix_snapshot)?;
+    let mut current = read_active_processes(dir)?;
+    if current
+        .iter()
+        .filter(|tracked_pid| **tracked_pid == pid)
+        .count()
+        > original_pid_count
+        && let Some(index) = current.iter().rposition(|tracked_pid| *tracked_pid == pid)
+    {
+        current.remove(index);
+    }
+    save_json(&dir.join("active-processes.json"), &current)
+}
+
+// Injection is limited to the in-process read-only ownership proof, so unit
+// fixtures can exercise the actual spawn, environment and tracking lifecycle
+// with a fake loader without launching Wine or touching a user's bottle.
+fn request_steam_quit_with_wine_checked<P>(
+    home: &Path,
+    id: &str,
+    wine: &Path,
+    prove: impl FnOnce(&Path, &Path, &Path, &fs::Metadata) -> Result<P, String>,
+    revalidate: impl FnOnce(&P, &Path, &Path, &Path, &fs::Metadata) -> Result<(), String>,
+) -> Result<SteamQuitRequest, String> {
+    let lock = lock_bottle(home, id)?;
+    let (dir, prefix, _server, prefix_guard, prefix_snapshot) =
+        bottle_control::checked_control_paths(home, id, wine)?;
+    let (dir_guard, dir_snapshot) = open_stable_directory(&dir)?;
+    let client = steam_quit_client(home, id)?;
+    let proof = prove(&dir, wine, &client, &prefix_snapshot)?;
+    let mut command = Command::new(wine);
+    configure_steam_quit_command(&mut command, home, id, &dir, wine, &client)?;
+    let mut tracked = read_active_processes(&dir)?;
+    let logs = dir.join("logs");
+    let (_logs_guard, _) = open_stable_directory(&logs)?;
+    bottle_control::assert_same_prefix(&dir, &dir_guard, &dir_snapshot)?;
+    bottle_control::assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
+    // Nothing above repairs or initializes bottle state. Recheck both the
+    // selected recorded runtime and the same plain client immediately before
+    // the final live-process proof, all while the normal bottle lock is held.
+    let _ = bottle_control::checked_control_paths(home, id, wine)?;
+    if steam_quit_client(home, id)? != client {
+        return Err("The saved Steam client changed before its Quit request".into());
+    }
+    revalidate(&proof, &dir, wine, &client, &prefix_snapshot)?;
+    bottle_control::assert_same_prefix(&dir, &dir_guard, &dir_snapshot)?;
+    bottle_control::assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    let log_path = logs.join(format!("launch-{stamp}-{}.log", Uuid::new_v4()));
+    let log = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(O_NOFOLLOW_ANY)
+        .open(&log_path)
+        .map_err(|e| e.to_string())?;
+    let errors = log.try_clone().map_err(|e| e.to_string())?;
+    // Deliberately ignore every saved argument and working-directory override.
+    command
+        .arg(&client)
+        .arg("-shutdown")
+        .current_dir(client.parent().ok_or("Steam has no parent directory")?)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(errors));
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Could not request Steam Quit: {e}"))?;
+    let pid = child.id();
+    let original_pid_count = tracked
+        .iter()
+        .filter(|tracked_pid| **tracked_pid == pid)
+        .count();
+    tracked.push(pid);
+    let tracking = save_json(&dir.join("active-processes.json"), &tracked);
+    // A request waiting for Steam must not hold Caskrun's bottle lock. Keep
+    // this Core invocation alive to prevent repeated native-menu requests,
+    // and reap only our exact control child. There is no cancellation/kill path.
+    // Drop every bottle/runtime file handle too: a waiting control must not
+    // itself appear as an unknown prefix owner during Caskrun's normal Quit.
+    drop(command);
+    drop(proof);
+    drop(_logs_guard);
+    drop(prefix_guard);
+    drop(dir_guard);
+    drop(lock);
+    let status = child.wait().map_err(|e| {
+        format!("Could not confirm the Steam Quit request; its tracking record was retained: {e}")
+    })?;
+    if let Err(error) = tracking {
+        return Err(format!(
+            "Steam's Quit request was started but could not be tracked: {error}"
+        ));
+    }
+    let cleanup = remove_control_child_record(
+        &dir,
+        &prefix,
+        &dir_snapshot,
+        &prefix_snapshot,
+        pid,
+        original_pid_count,
+    );
+    cleanup.map_err(|error| {
+        format!("Steam's Quit request exited but its tracking record could not be updated: {error}")
+    })?;
+    if !status.success() {
+        return Err(format!(
+            "Steam did not accept its Quit request (exit {:?}, signal {:?}); its other processes were not signalled",
+            status.code(),
+            status.signal()
+        ));
+    }
+    Ok(SteamQuitRequest {
+        pid,
+        request_submitted: true,
+        log_path: log_path.display().to_string(),
+    })
+}
+
 fn launch_wait_with_wine(
     home: &Path,
     id: &str,
@@ -2830,6 +3150,7 @@ fn run() -> Result<(), String> {
                 | "install-catalog"
                 | "retry-catalog"
                 | "quit-all-bottles"
+                | "request-bottle-quit"
                 | "duplicate"
                 | "export"
                 | "import"
@@ -2950,6 +3271,12 @@ fn run() -> Result<(), String> {
             serde_json::to_value(shutdown::quit_all(&home)?),
         [command, id] if command == "quit-bottle" =>
             serde_json::to_value(bottle_control::quit_windows_apps(&home, id)?),
+        [command, id] if command == "request-steam-quit" =>
+            serde_json::to_value(request_steam_quit(&home, id)?),
+        [command, id] if command == "bottle-activity" =>
+            serde_json::to_value(bottle_control::activity(&home, id)?),
+        [command, id] if command == "request-bottle-quit" =>
+            serde_json::to_value(bottle_control::request_quit(&home, id)?),
         [command, id] if command == "bottle-resolution" =>
             serde_json::to_value(bottle_resolution::bottle_resolution(&home, id)?),
         [command, id] if command == "bottle-graphics" =>
@@ -4068,6 +4395,451 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&dispatch, permissions).unwrap();
         root.join("bin/wine")
+    }
+
+    struct SteamQuitFixture {
+        home: PathBuf,
+        bottle: Bottle,
+        dir: PathBuf,
+        wine: PathBuf,
+        client: PathBuf,
+        launcher: Launcher,
+    }
+
+    impl SteamQuitFixture {
+        fn new(script: &[u8]) -> Self {
+            let home = test_home();
+            fs::create_dir_all(&home).unwrap();
+            let bin = home.join("Engine/bin");
+            fs::create_dir_all(&bin).unwrap();
+            let wine = fake_wait_runtime(&bin, script);
+            for name in ["wineboot", "wineserver"] {
+                let path = bin.join(name);
+                fs::write(
+                    &path,
+                    b"#!/bin/sh\ntouch \"$WINEPREFIX/unexpected-bootstrap\"\nexit 9\n",
+                )
+                .unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let native = home.join("Engine/runtime/lib/wine/x86_64-unix");
+            fs::create_dir_all(&native).unwrap();
+            fs::write(native.join("ntdll.so"), b"original test NTDLL").unwrap();
+            let bottle = create(&home, "Graceful Steam fixture").unwrap();
+            let dir = bottle_dir(&home, &bottle.id).unwrap();
+            for path in [
+                "logs",
+                "xdg/config",
+                "xdg/data",
+                "prefix/drive_c/Program Files/Steam",
+            ] {
+                fs::create_dir_all(dir.join(path)).unwrap();
+            }
+            fs::write(dir.join("prefix/system.reg"), b"existing registry\n").unwrap();
+            save_json(
+                &dir.join("prefix-record.json"),
+                &PrefixRecord {
+                    wine_path: wine.canonicalize().unwrap().display().to_string(),
+                    runtime_identity: None,
+                    runtime_fingerprint: None,
+                },
+            )
+            .unwrap();
+            let client = dir.join("prefix/drive_c/Program Files/Steam/Steam.exe");
+            let mut pe = vec![0_u8; 0x86];
+            pe[..2].copy_from_slice(b"MZ");
+            pe[0x3c..0x40].copy_from_slice(&0x80_u32.to_le_bytes());
+            pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+            pe[0x84..0x86].copy_from_slice(&0x014c_u16.to_le_bytes());
+            fs::write(&client, pe).unwrap();
+            let launcher = add_launcher_with_arguments(
+                &home,
+                &bottle.id,
+                "Steam",
+                &client,
+                vec![
+                    "-silent".into(),
+                    steam_install::STEAM_CEF_SOFTWARE_FLAG.into(),
+                ],
+            )
+            .unwrap();
+            Self {
+                home,
+                bottle,
+                dir,
+                wine,
+                client,
+                launcher,
+            }
+        }
+
+        fn request(&self) -> Result<SteamQuitRequest, String> {
+            request_steam_quit_with_wine_checked(
+                &self.home,
+                &self.bottle.id,
+                &self.wine,
+                |dir, wine, client, _| {
+                    assert_eq!(dir, self.dir);
+                    assert_eq!(wine, self.wine);
+                    assert_eq!(client, self.client.canonicalize().unwrap());
+                    Ok(())
+                },
+                |_, _, _, _, _| Ok(()),
+            )
+        }
+    }
+
+    impl Drop for SteamQuitFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.home);
+        }
+    }
+
+    #[test]
+    fn steam_quit_uses_only_shutdown_preserves_tracking_and_ignores_corrupt_sibling() {
+        let fixture = SteamQuitFixture::new(br#"#!/bin/sh
+printf 'COUNT=%s\n' "$#"
+printf 'ARG=%s\n' "$@"
+printf 'PREFIX=%s\nMODE=%s\nBOTTLE=%s\nNTDLL=%s\nIMAGE=%s\n' "$WINEPREFIX" "$CASKRUN_STEAM_MODE" "$CASKRUN_NATIVE_BOTTLE" "$CASKRUN_NATIVE_NTDLL" "$CASKRUN_NATIVE_IMAGE"
+"#);
+        save_json(
+            &fixture.dir.join("active-processes.json"),
+            &vec![101_u32, 202],
+        )
+        .unwrap();
+        let sibling = create(&fixture.home, "Untouched sibling").unwrap();
+        let sibling_dir = bottle_dir(&fixture.home, &sibling.id).unwrap();
+        fs::write(sibling_dir.join("bottle.json"), b"invalid sibling fixture").unwrap();
+        fs::write(sibling_dir.join("active-processes.json"), b"[303]\n").unwrap();
+        let record = fs::read(fixture.dir.join("prefix-record.json")).unwrap();
+        let result = fixture.request().unwrap();
+        assert!(result.request_submitted);
+        let output = fs::read_to_string(result.log_path).unwrap();
+        assert!(
+            output.starts_with(&format!(
+                "COUNT=2\nARG={}\nARG=-shutdown\n",
+                fixture.client.display()
+            )),
+            "{output}"
+        );
+        assert!(!output.contains("-silent"));
+        assert!(!output.contains(steam_install::STEAM_CEF_SOFTWARE_FLAG));
+        assert!(output.contains(&format!(
+            "PREFIX={}\nMODE=1\nBOTTLE={}\n",
+            fixture.dir.join("prefix").display(),
+            fixture.bottle.id
+        )));
+        assert!(output.contains(&format!("IMAGE={}\n", fixture.client.display())));
+        assert_eq!(read_active_processes(&fixture.dir).unwrap(), vec![101, 202]);
+        assert_eq!(
+            fs::read(sibling_dir.join("active-processes.json")).unwrap(),
+            b"[303]\n"
+        );
+        assert_eq!(
+            fs::read(fixture.dir.join("prefix-record.json")).unwrap(),
+            record
+        );
+        assert!(!fixture.dir.join("prefix/unexpected-bootstrap").exists());
+        assert!(!fixture.dir.join("xdg/config/user-dirs.dirs").exists());
+        assert!(!fixture.dir.join("native-apps").exists());
+        assert_eq!(fs::read_dir(fixture.dir.join("logs")).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn steam_quit_refuses_missing_game_only_wrong_bottle_and_ambiguous_clients() {
+        let fixture = SteamQuitFixture::new(b"#!/bin/sh\nexit 0\n");
+        assert!(
+            request_steam_quit_with_wine_checked(
+                &fixture.home,
+                "invalid",
+                &fixture.wine,
+                |_, _, _, _| Ok(()),
+                |_, _, _, _, _| Ok(())
+            )
+            .is_err()
+        );
+        for arguments in [
+            vec!["-applaunch".into(), "480".into()],
+            vec!["-shutdown".into()],
+            vec!["steam://run/480".into()],
+        ] {
+            set_launcher_arguments(
+                &fixture.home,
+                &fixture.bottle.id,
+                &fixture.launcher.id,
+                &arguments,
+            )
+            .unwrap();
+            assert!(fixture.request().is_err());
+        }
+        set_launcher_arguments(&fixture.home, &fixture.bottle.id, &fixture.launcher.id, &[])
+            .unwrap();
+        let sibling = create(&fixture.home, "Other Steam bottle").unwrap();
+        assert!(
+            request_steam_quit_with_wine_checked(
+                &fixture.home,
+                &sibling.id,
+                &fixture.wine,
+                |_, _, _, _| Ok(()),
+                |_, _, _, _, _| Ok(())
+            )
+            .is_err()
+        );
+        let other = fixture
+            .dir
+            .join("prefix/drive_c/Program Files (x86)/Steam/Steam.exe");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        fs::copy(&fixture.client, &other).unwrap();
+        add_launcher(&fixture.home, &fixture.bottle.id, "Other client", &other).unwrap();
+        assert!(fixture.request().unwrap_err().contains("one verified"));
+        assert_eq!(fs::read_dir(fixture.dir.join("logs")).unwrap().count(), 0);
+        assert!(!fixture.dir.join("active-processes.json").exists());
+    }
+
+    #[test]
+    fn steam_quit_runtime_or_live_proof_refusal_never_bootstraps_or_changes_records() {
+        let fixture = SteamQuitFixture::new(b"#!/bin/sh\nexit 0\n");
+        let original = fs::read(fixture.dir.join("prefix-record.json")).unwrap();
+        save_json(&fixture.dir.join("active-processes.json"), &vec![404_u32]).unwrap();
+        let other = fixture.home.join("other/bin");
+        fs::create_dir_all(&other).unwrap();
+        let wine = fake_wait_runtime(&other, b"#!/bin/sh\nexit 0\n");
+        assert!(
+            request_steam_quit_with_wine_checked(
+                &fixture.home,
+                &fixture.bottle.id,
+                &wine,
+                |_, _, _, _| -> Result<(), String> {
+                    panic!("runtime mismatch must precede live proof")
+                },
+                |_, _, _, _, _| Ok(())
+            )
+            .is_err()
+        );
+        for initial in [true, false] {
+            let error = request_steam_quit_with_wine_checked(
+                &fixture.home,
+                &fixture.bottle.id,
+                &fixture.wine,
+                |_, _, _, _| {
+                    if initial {
+                        Err("no live client".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_, _, _, _, _| Err("stale live client".into()),
+            )
+            .unwrap_err();
+            assert!(error.contains("live client"));
+        }
+        assert_eq!(read_active_processes(&fixture.dir).unwrap(), vec![404]);
+        assert_eq!(
+            fs::read(fixture.dir.join("prefix-record.json")).unwrap(),
+            original
+        );
+        assert_eq!(fs::read_dir(fixture.dir.join("logs")).unwrap().count(), 0);
+        assert!(!fixture.dir.join("prefix/unexpected-bootstrap").exists());
+        fs::remove_file(fixture.dir.join("prefix/system.reg")).unwrap();
+        assert!(fixture.request().unwrap_err().contains("Initialize"));
+        assert!(!fixture.dir.join("prefix/system.reg").exists());
+    }
+
+    #[test]
+    fn steam_quit_filters_inherited_native_loader_state_without_changing_normal_launch() {
+        let fixture = SteamQuitFixture::new(b"#!/bin/sh\nexit 0\n");
+        let mut command = Command::new(&fixture.wine);
+        for key in [
+            "WINESERVERSOCKET",
+            "WINELOADERNOEXEC",
+            "WINEPRELOADRESERVE",
+            "CASKRUN_NATIVE_EXEC",
+            "CASKRUN_STEAM_NATIVE_APP",
+            "CASKRUN_STEAM_ICON",
+        ] {
+            command.env(key, "stale-parent-value");
+        }
+        command.env("CASKRUN_NATIVE_IMAGE", "/stale-parent-image.exe");
+        configure_steam_quit_command(
+            &mut command,
+            &fixture.home,
+            &fixture.bottle.id,
+            &fixture.dir,
+            &fixture.wine,
+            &fixture.client,
+        )
+        .unwrap();
+        let values: BTreeMap<_, _> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_owned)))
+            .collect();
+        for key in [
+            "WINESERVERSOCKET",
+            "WINELOADERNOEXEC",
+            "WINEPRELOADRESERVE",
+            "CASKRUN_NATIVE_EXEC",
+            "CASKRUN_STEAM_NATIVE_APP",
+            "CASKRUN_STEAM_ICON",
+        ] {
+            assert_eq!(values.get(OsStr::new(key)), Some(&None));
+        }
+        assert_eq!(values[OsStr::new("CASKRUN_STEAM_MODE")], Some("1".into()));
+        assert_eq!(
+            values[OsStr::new("CASKRUN_NATIVE_IMAGE")],
+            Some(fixture.client.as_os_str().to_owned())
+        );
+        assert_eq!(
+            values[OsStr::new("CASKRUN_NATIVE_INITIAL_IMAGE")],
+            Some(fixture.client.as_os_str().to_owned())
+        );
+    }
+
+    #[test]
+    fn steam_quit_reaps_one_control_child_and_releases_lock_while_waiting() {
+        let fixture = SteamQuitFixture::new(
+            br#"#!/bin/sh
+echo "$$" > "$WINEPREFIX/control.pid"
+while test ! -f "$WINEPREFIX/release-control"; do sleep 0.02; done
+exit 0
+"#,
+        );
+        let expected_dir = fixture.dir.clone();
+        let observer =
+            std::thread::spawn(move || {
+                struct Release(PathBuf);
+                impl Drop for Release {
+                    fn drop(&mut self) {
+                        let _ = fs::write(&self.0, b"continue");
+                    }
+                }
+                let _release = Release(expected_dir.join("prefix/release-control"));
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !expected_dir.join("prefix/control.pid").is_file() {
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let lock_path = expected_dir.join(".caskrun.lock");
+                let lock = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&lock_path)
+                    .unwrap();
+                assert!(
+                    lock.try_lock().is_ok(),
+                    "control child retained the bottle lock"
+                );
+                let pid: u32 = fs::read_to_string(expected_dir.join("prefix/control.pid"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                assert!(read_active_processes(&expected_dir).unwrap().contains(&pid));
+                // A Core waiting for IPC must retain no prefix/log/code handles.
+                let output = Command::new("/usr/sbin/lsof")
+                    .args(["-nP", "-p", &std::process::id().to_string(), "-Fn"])
+                    .output()
+                    .unwrap();
+                let paths = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    !paths.lines().any(|line| line
+                        .strip_prefix('n')
+                        .is_some_and(|path| Path::new(path).starts_with(&expected_dir)
+                            && Path::new(path) != lock_path)),
+                    "waiting Core retained a bottle file"
+                );
+                pid
+            });
+        let result = fixture.request().unwrap();
+        assert_eq!(result.pid, observer.join().unwrap());
+        assert!(!process_alive(result.pid).unwrap());
+        assert!(read_active_processes(&fixture.dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn steam_quit_nonzero_control_exit_is_reported_without_stopping_sibling() {
+        let fixture = SteamQuitFixture::new(b"#!/bin/sh\nexit 7\n");
+        let mut sibling = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        save_json(
+            &fixture.dir.join("active-processes.json"),
+            &vec![sibling.id()],
+        )
+        .unwrap();
+        assert!(fixture.request().unwrap_err().contains("Some(7)"));
+        assert!(sibling.try_wait().unwrap().is_none());
+        assert_eq!(
+            read_active_processes(&fixture.dir).unwrap(),
+            vec![sibling.id()]
+        );
+        drop(sibling.stdin.take());
+        assert!(sibling.wait().unwrap().success());
+    }
+
+    #[test]
+    fn steam_quit_tracking_failure_never_kills_the_control_child() {
+        let fixture = SteamQuitFixture::new(
+            br#"#!/bin/sh
+sleep 0.1
+printf 'finished naturally\n' > "$WINEPREFIX/control-finished"
+exit 0
+"#,
+        );
+        let error = request_steam_quit_with_wine_checked(
+            &fixture.home,
+            &fixture.bottle.id,
+            &fixture.wine,
+            |_, _, _, _| Ok(()),
+            |_, dir, _, _, _| {
+                // Fail only the post-spawn atomic record update, after its
+                // initial read succeeded. No real process or data is involved.
+                fs::create_dir(dir.join("active-processes.json")).map_err(|e| e.to_string())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("could not be tracked"));
+        assert_eq!(
+            fs::read(fixture.dir.join("prefix/control-finished")).unwrap(),
+            b"finished naturally\n"
+        );
+        assert!(fixture.dir.join("active-processes.json").is_dir());
+    }
+
+    #[test]
+    fn steam_quit_checks_recipe_client_bytes_and_deduplicates_same_executable() {
+        let fixture = SteamQuitFixture::new(b"#!/bin/sh\nexit 0\n");
+        let mut duplicate = fixture.launcher.clone();
+        duplicate.id = Uuid::new_v4().to_string();
+        duplicate.name = "Same Steam client".into();
+        save_json(
+            &fixture.dir.join("launchers.json"),
+            &vec![fixture.launcher.clone(), duplicate],
+        )
+        .unwrap();
+        assert_eq!(
+            steam_quit_client(&fixture.home, &fixture.bottle.id).unwrap(),
+            fixture.client
+        );
+        let mut attempt = steam_install::CatalogAttempt::new(
+            &fixture.bottle.id,
+            "steam",
+            "a".repeat(64),
+            "https://cdn.fastly.steamstatic.com/client/installer/SteamSetup.exe".into(),
+        )
+        .unwrap();
+        attempt.set_stage(steam_install::CatalogStage::Installed);
+        save_json(&fixture.dir.join("catalog-attempt.json"), &attempt).unwrap();
+        fs::write(&fixture.client, vec![0_u8; 256]).unwrap();
+        assert!(steam_install::is_steam_client_launcher(
+            &fixture.home,
+            &fixture.bottle.id,
+            &fixture.launcher
+        ));
+        assert!(fixture.request().is_err());
+        assert_eq!(fs::read_dir(fixture.dir.join("logs")).unwrap().count(), 0);
+        assert!(!fixture.dir.join("active-processes.json").exists());
     }
 
     #[test]

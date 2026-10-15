@@ -90,6 +90,17 @@ pub(super) fn wait_until_idle(dir: &Path, timeout: Duration) -> Result<(), Strin
     wait_until_idle_with_inspector(dir, timeout, Path::new(INSPECTOR))
 }
 
+/// One bounded, read-only current-UID ownership snapshot. An inspection failure
+/// is unknown activity, never evidence that the bottle is idle.
+pub(super) fn owner_count(dir: &Path) -> Result<usize, String> {
+    let (guard, snapshot) = open_stable_directory(dir)?;
+    let dir = dir.canonicalize().map_err(|_| CHECK_FAILURE)?;
+    bottle_control::assert_same_prefix(&dir, &guard, &snapshot)?;
+    let count = inspect_owners(&dir, Path::new(INSPECTOR), PROBE_TIMEOUT)?;
+    bottle_control::assert_same_prefix(&dir, &guard, &snapshot)?;
+    Ok(count)
+}
+
 fn wait_until_idle_with_inspector(
     dir: &Path,
     timeout: Duration,
@@ -701,6 +712,196 @@ fn unchanged_owner(
         && owner.scope_snapshot.ino() == current.scope_snapshot.ino())
 }
 
+const STEAM_OWNER_FAILURE: &str = "Caskrun could not verify one running Steam client in this bottle. Open Steam from this bottle before requesting Quit.";
+
+struct SteamCodeFile {
+    path: PathBuf,
+    guard: File,
+    snapshot: fs::Metadata,
+}
+
+impl SteamCodeFile {
+    fn open(path: PathBuf) -> Result<Self, String> {
+        let before = fs::symlink_metadata(&path).map_err(|_| STEAM_OWNER_FAILURE)?;
+        if !before.is_file() || path.canonicalize().ok().as_ref() != Some(&path) {
+            return Err(STEAM_OWNER_FAILURE.into());
+        }
+        let guard = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW_ANY | 0x4)
+            .open(&path)
+            .map_err(|_| STEAM_OWNER_FAILURE)?;
+        let file = Self {
+            path,
+            guard,
+            snapshot: before,
+        };
+        file.revalidate()?;
+        Ok(file)
+    }
+
+    fn revalidate(&self) -> Result<(), String> {
+        let current = fs::symlink_metadata(&self.path).map_err(|_| STEAM_OWNER_FAILURE)?;
+        let held = self.guard.metadata().map_err(|_| STEAM_OWNER_FAILURE)?;
+        if !current.is_file()
+            || !same_snapshot(&self.snapshot, &current)
+            || !same_snapshot(&self.snapshot, &held)
+        {
+            return Err(STEAM_OWNER_FAILURE.into());
+        }
+        Ok(())
+    }
+
+    fn mapped(&self, files: &ProcessFiles) -> bool {
+        files
+            .files
+            .iter()
+            .any(|file| mapped_file(file, &self.path, self.snapshot.dev(), self.snapshot.ino()))
+    }
+}
+
+/// Opaque, read-only evidence for a raw Steam client, never a signal target.
+/// The caller holds the bottle lock and its initialized prefix inode. Saved
+/// PIDs and process names are not ownership evidence. All three mapped code
+/// vnodes, a current bottle log/cwd and the kernel execution identity must agree.
+pub(super) struct SteamClientOwner {
+    pid: u32,
+    identity: ProcessIdentity,
+    code: [SteamCodeFile; 3],
+    _scope_guard: File,
+    scope_path: PathBuf,
+    scope_snapshot: fs::Metadata,
+}
+
+fn steam_scope(
+    dir: &Path,
+    prefix: &fs::Metadata,
+    code: &[SteamCodeFile; 3],
+    files: &ProcessFiles,
+) -> Result<Option<(File, PathBuf, fs::Metadata)>, String> {
+    if !code[2].mapped(files) {
+        return Ok(None);
+    }
+    scope_file(
+        files,
+        dir,
+        MappedAlias {
+            loader: &code[0].path,
+            loader_dev: code[0].snapshot.dev(),
+            loader_ino: code[0].snapshot.ino(),
+            ntdll: &code[1].path,
+            ntdll_dev: code[1].snapshot.dev(),
+            ntdll_ino: code[1].snapshot.ino(),
+        },
+        prefix,
+    )
+}
+
+fn steam_code_paths(dir: &Path, wine: &Path, client: &Path) -> Result<[PathBuf; 3], String> {
+    let root = bottle_graphics::selected_runtime_root(dir, wine)?
+        .canonicalize()
+        .map_err(|_| STEAM_OWNER_FAILURE)?;
+    Ok([
+        root.join("lib/wine/x86_64-unix/Steam"),
+        root.join("lib/wine/x86_64-unix/ntdll.so"),
+        client.to_path_buf(),
+    ])
+}
+
+pub(super) fn steam_client_owner(
+    dir: &Path,
+    wine: &Path,
+    client: &Path,
+    prefix: &fs::Metadata,
+) -> Result<SteamClientOwner, String> {
+    let code = steam_code_paths(dir, wine, client)?.map(SteamCodeFile::open);
+    let [loader, ntdll, image] = code;
+    let code = [loader?, ntdll?, image?];
+    if !is_executable(&code[0].path) {
+        return Err(STEAM_OWNER_FAILURE.into());
+    }
+    let discovery = inventory(dir, PROBE_TIMEOUT)?;
+    let identities: Vec<_> = discovery
+        .iter()
+        .filter(|files| code.iter().all(|file| file.mapped(files)))
+        .filter_map(|files| current_identity(files.pid).map(|identity| (files.pid, identity)))
+        .filter(|(_, identity)| identity.executable == code[0].path)
+        .collect();
+    let proof = inventory(dir, PROBE_TIMEOUT)?;
+    let mut matches = Vec::new();
+    for (pid, identity) in identities {
+        let Some(files) = proof.iter().find(|files| files.pid == pid) else {
+            continue;
+        };
+        if current_identity(pid).as_ref() != Some(&identity) {
+            continue;
+        }
+        if let Some(scope) = steam_scope(dir, prefix, &code, files)? {
+            matches.push((pid, identity, scope));
+        }
+    }
+    if matches.len() != 1 {
+        return Err(STEAM_OWNER_FAILURE.into());
+    }
+    for file in &code {
+        file.revalidate()?;
+    }
+    let (pid, identity, (scope_guard, scope_path, scope_snapshot)) = matches.pop().unwrap();
+    Ok(SteamClientOwner {
+        pid,
+        identity,
+        code,
+        _scope_guard: scope_guard,
+        scope_path,
+        scope_snapshot,
+    })
+}
+
+impl SteamClientOwner {
+    /// Recheck immediately before spawning the shutdown request. No files are
+    /// repaired and no process is signalled, including when proof becomes stale.
+    pub(super) fn revalidate(
+        &self,
+        dir: &Path,
+        wine: &Path,
+        client: &Path,
+        prefix: &fs::Metadata,
+    ) -> Result<(), String> {
+        let paths = steam_code_paths(dir, wine, client)?;
+        if self
+            .code
+            .iter()
+            .zip(paths)
+            .any(|(file, path)| file.path != path)
+            || current_identity(self.pid).as_ref() != Some(&self.identity)
+        {
+            return Err(STEAM_OWNER_FAILURE.into());
+        }
+        for file in &self.code {
+            file.revalidate()?;
+        }
+        let current = inventory(dir, PROBE_TIMEOUT)?;
+        let files = current
+            .iter()
+            .find(|files| files.pid == self.pid)
+            .ok_or(STEAM_OWNER_FAILURE)?;
+        let Some((_guard, path, snapshot)) = steam_scope(dir, prefix, &self.code, files)? else {
+            return Err(STEAM_OWNER_FAILURE.into());
+        };
+        if path != self.scope_path
+            || snapshot.dev() != self.scope_snapshot.dev()
+            || snapshot.ino() != self.scope_snapshot.ino()
+            || current_identity(self.pid).as_ref() != Some(&self.identity)
+        {
+            return Err(STEAM_OWNER_FAILURE.into());
+        }
+        for file in &self.code {
+            file.revalidate()?;
+        }
+        Ok(())
+    }
+}
+
 /// Caller has already stopped this exact prefix's verified server, and holds
 /// its bottle lock plus the original prefix inode. Only generated native aliases
 /// receive audit-token signals; every other owner remains detection-only.
@@ -1046,6 +1247,180 @@ mod tests {
         ] {
             assert!(parse_inventory(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn steam_quit_owner_requires_mapped_code_and_exact_bottle_scope() {
+        let root = Fixture::new();
+        let dir = root.0.join("bottles").join(Uuid::new_v4().to_string());
+        fs::create_dir_all(dir.join("prefix")).unwrap();
+        let mut code = Vec::new();
+        for name in ["Steam", "ntdll.so", "Steam.exe"] {
+            let path = root.0.join(name);
+            fs::write(&path, b"original owned fixture code").unwrap();
+            code.push(SteamCodeFile::open(path).unwrap());
+        }
+        let code: [SteamCodeFile; 3] = code.try_into().ok().unwrap();
+        let prefix = fs::metadata(dir.join("prefix")).unwrap();
+        let file = |index: usize| OpenFile {
+            descriptor: "txt".into(),
+            kind: "REG".into(),
+            path: Some(code[index].path.clone()),
+            device: Some(code[index].snapshot.dev()),
+            inode: Some(code[index].snapshot.ino()),
+        };
+        let cwd = OpenFile {
+            descriptor: "cwd".into(),
+            kind: "DIR".into(),
+            path: Some(dir.join("prefix")),
+            device: Some(prefix.dev()),
+            inode: Some(prefix.ino()),
+        };
+        let good = vec![file(0), file(1), file(2), cwd];
+        assert!(
+            steam_scope(
+                &dir,
+                &prefix,
+                &code,
+                &ProcessFiles {
+                    pid: 42,
+                    files: good.clone()
+                }
+            )
+            .unwrap()
+            .is_some()
+        );
+        for index in 0..3 {
+            for field in ["descriptor", "inode", "device"] {
+                let mut files = good.clone();
+                match field {
+                    "descriptor" => files[index].descriptor = "3".into(),
+                    "inode" => files[index].inode = Some(0),
+                    _ => files[index].device = Some(0),
+                }
+                assert!(
+                    steam_scope(&dir, &prefix, &code, &ProcessFiles { pid: 42, files })
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+        let sibling = dir.parent().unwrap().join(Uuid::new_v4().to_string());
+        for path in [sibling.join("prefix"), sibling.join("logs/launch-1.log")] {
+            let mut files = good.clone();
+            files.push(OpenFile {
+                descriptor: "4".into(),
+                kind: "REG".into(),
+                path: Some(path),
+                ..OpenFile::default()
+            });
+            assert!(
+                steam_scope(&dir, &prefix, &code, &ProcessFiles { pid: 42, files })
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let mut files = good;
+        files.pop();
+        assert!(
+            steam_scope(&dir, &prefix, &code, &ProcessFiles { pid: 42, files })
+                .unwrap()
+                .is_none()
+        );
+        for file in &code {
+            let replacement = root.0.join("replacement");
+            fs::write(&replacement, b"original owned fixture code").unwrap();
+            fs::rename(&replacement, &file.path).unwrap();
+            assert!(
+                file.revalidate().is_err(),
+                "a new vnode with identical bytes is stale proof"
+            );
+        }
+    }
+
+    #[test]
+    fn steam_quit_owner_binds_live_original_native_fixture_and_rejects_stale_identity() {
+        let fixture = NativeFixture::new();
+        let library = fixture.ntdll.parent().unwrap();
+        let loader = library.join("Steam");
+        let client = fixture.dir.join("prefix/Steam.exe");
+        fs::write(&client, vec![0_u8; 4096]).unwrap();
+        let source = fixture.root.0.join("steam-owner.c");
+        fs::write(&source, br#"#include <dlfcn.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+ if(argc != 3 || !dlopen(argv[1], RTLD_NOW)) return 2;
+ int fd = open(argv[2], O_RDONLY); struct stat st;
+ if(fd < 0 || fstat(fd, &st) || mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0) == MAP_FAILED) return 3;
+ close(fd); write(2,"ready\n",6); char byte;
+ return read(0,&byte,1) < 0 ? 4 : 0;
+}
+"#).unwrap();
+        let output = Command::new("/usr/bin/clang")
+            .args(["-arch", "x86_64", "-O0"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&loader)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "original fixture did not compile");
+        let log = OpenOptions::new().append(true).open(&fixture.log).unwrap();
+        let mut child = InspectionChild(
+            Command::new(&loader)
+                .arg(&fixture.ntdll)
+                .arg(&client)
+                .current_dir(fixture.dir.join("prefix"))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(log))
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fs::read(&fixture.log)
+            .unwrap()
+            .windows(6)
+            .any(|window| window == b"ready\n")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "original Steam owner fixture did not become ready"
+            );
+            assert!(child.0.try_wait().unwrap().is_none());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let prefix = fs::metadata(fixture.dir.join("prefix")).unwrap();
+        let mut owner = steam_client_owner(&fixture.dir, &fixture.wine, &client, &prefix).unwrap();
+        assert_eq!(owner.pid, child.0.id());
+        owner
+            .revalidate(&fixture.dir, &fixture.wine, &client, &prefix)
+            .unwrap();
+        owner.identity.token.values[7] ^= 1;
+        assert!(
+            owner
+                .revalidate(&fixture.dir, &fixture.wine, &client, &prefix)
+                .is_err()
+        );
+        owner.identity.token.values[7] ^= 1;
+        fs::write(&client, vec![1_u8; 4096]).unwrap();
+        assert!(
+            owner
+                .revalidate(&fixture.dir, &fixture.wine, &client, &prefix)
+                .is_err()
+        );
+        drop(child.0.stdin.take());
+        assert!(child.0.wait().unwrap().success());
+        assert!(steam_client_owner(&fixture.dir, &fixture.wine, &client, &prefix).is_err());
+        assert!(!fs::read_dir(&fixture.dir).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".caskrun-process-check-")
+        }));
     }
 
     struct NativeFixture {

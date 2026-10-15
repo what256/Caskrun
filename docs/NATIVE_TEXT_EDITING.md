@@ -13,7 +13,7 @@ balanced right-button pair targets the Windows control without changing its
 selection. A bounded asynchronous query verifies the original window, root,
 GUI thread and owner before requesting cancellation of a standard Windows menu.
 
-The new development candidate also recognizes one captured Chromium popup:
+The development driver also recognizes one captured Chromium popup:
 exact class `Chrome_WidgetWin_1`, a visible, enabled top-level popup directly
 owned by the original root on its GUI thread. It must have tool-window and
 no-activate styles and must not have the transparent style. Chromium toggles
@@ -32,7 +32,9 @@ new capture or changed focus refuses the replacement. GUI focus identifies a
 Windows control; it does not inspect Chromium's individual DOM fields. The
 two menus are never deliberately displayed together. Unrecognized popups
 retain their original menu; **Edit → Paste** and **Command-V** remain available.
-The actual Steam outcome for this new candidate is still pending.
+The user and Claude verified a single native menu on the first and repeated
+right-clicks in the foreground Steam sign-in window in build 48. The v12
+package retains that exact editing patch; its new changes concern Quit.
 
 A new key, click, scroll, loss of focus or closing window cancels the pending
 replacement. Queries expire after 450 milliseconds. Four outstanding query
@@ -69,9 +71,57 @@ Steam logo and input fields are retained. Changed titles, sizes, parents,
 resizable windows and other Windows processes retain their original surface.
 Drawing is bounded at the view, layer and dirty-rectangle levels so the native
 header cannot paint over Wine's client image.
-Explicit **Quit** remains unchanged. **Hide Steam** (Command-H) is also
-available. Logged-in Steam windows and active-game retention require separate
+**Hide Steam** (Command-H) is also available. Explicit **Quit Steam** uses
+the separate graceful client request described below. Logged-in Steam windows and active-game retention require separate
 user-led testing; this policy does not change their close behavior.
+
+## Explicit Quit Steam
+
+An explicit macOS **Quit Steam** from the prepared visible Steam browser asks
+Core to run the saved Windows Steam client with only `-shutdown`. It does not
+terminate just the supervised web helper, send a bottle-wide kill, or use a
+saved game's arguments. Closing the sign-in window continues to hide it.
+Steam decides whether its own apps can finish closing; retained games, save
+prompts and logged-in-client behavior are not yet validated.
+
+The native callback verifies its canonical Core, private data/bottle paths and
+exact `WINEPREFIX` binding. Core rechecks the selected recorded runtime, one
+plain saved client and its Windows headers, then requires the live client's
+mapped loader, NTDLL and image vnodes, current kernel execution identity and
+bottle scope. Stale identities, ambiguous distinct clients, a different engine
+or a sibling bottle cannot select the request. There is no explicit Core
+initialization, migration, icon generation or bottle-wide shutdown in this path.
+
+Only one callback can be pending. Its child starts outside the bottle with
+standard streams redirected and no inherited Wine descriptors or stale loader
+state. AppKit remains responsive while that exact child is waited for and
+reaped. Failure keeps the Steam UI process alive and reports an error rather
+than killing only the helper and provoking a replacement. A successful request
+means the control child completed successfully, not that Steam or every game
+has exited.
+System logout, restart and shutdown retain Wine's existing session handling.
+
+## Bottle sidebar controls
+
+A Windows bottle's sidebar places **Quit Apps** next to Open while current
+file-owner inspection reports activity. The control is hidden when idle;
+inspection errors remain unknown and offer a retry, never an idle result.
+A normal request uses the selected initialized bottle's existing Wine server
+and exact `wineboot -e -s` arguments. It performs no explicit Core initialization,
+migration or mapping repair, and applications can show save prompts or decline.
+The prerequisite is checked again before launch. The last server can still exit
+between that check and startup, and Wine's loader can perform its own bootstrap;
+this is not a promise that no Wine startup can ever occur.
+
+While the request is pending, the sidebar shows **Quitting…**. After four
+seconds, or a reported failure, **Force Quit…** becomes available with an
+unsaved-work warning and explicit confirmation. There is no automatic
+escalation. Force first cancels and reaps the polite request's own control child,
+then uses the existing `quit-bottle` path with the exact selected runtime and
+current ownership checks. Other bottles stay outside that action. Open and
+maintenance actions for the stopping bottle are disabled until it finishes.
+Full **Quit Caskrun** drains these operations before its own session shutdown;
+an interrupted or failed full Quit leaves completed canceled operations retryable.
 
 ## Steam's macOS app identity
 
@@ -111,7 +161,9 @@ independently built seed and switchable development package under `.build`.
 The check reconstructs every Wine source file from its exact upstream archive
 and reviewed patch sequence before accepting the seed.
 
-The builder makes two isolated clones and rebuilds the complete macOS driver,
+The builder pins three base, four UI and two DXMT Wine patches, applying the
+reviewed sequence to each appropriate graphics view. It makes two isolated
+clones and rebuilds the complete macOS driver,
 both Windows halves and the native child loader for each graphics view. The
 DXMT driver retains its
 exact ten exports; the default driver retains its two Unix-call table exports.
@@ -122,12 +174,13 @@ engine files remain intact. Only changed Mach-O files are
 repaired and signed. App packaging checks the entire runtime identity after
 outer app signing and refuses a changed engine.
 
-The new package has exact content identity
-`sha256:fb91add5bbcdddef39738259595c2da592bed8afb863fccd6384ae6b1337a5ee`.
-Ten known predecessor packages, including the captured-popup package
-`sha256:46998fc3cf95d882e14c3b5978dba2ee086c5b92e826400fda528517f3808082`,
-have explicit direct migration edges to this complete package. All 36 historical edges and their separate backup names
-remain available; no intermediate engine is adopted during a skipped release.
+The v12 package has independently attested exact content identity
+`sha256:cae84f3978b2e0820bbdfc95c1e9dd5fa6c79c8d1f1aca825ac86bd2afb77c29`.
+Eleven known predecessor packages, including build 48's recognized-popup package
+`sha256:fb91add5bbcdddef39738259595c2da592bed8afb863fccd6384ae6b1337a5ee`,
+have explicit direct migration edges to it. All 55 historical policy fields and
+separate backup names remain unchanged, for 66 total transitions. No intermediate
+engine is adopted during a skipped release.
 The native and switchable predecessors use record-only migration; older
 TLS/Steam predecessors retain their Steam recipe and PE validation gates.
 Migration occurs under the bottle lock only after all relevant owners are
@@ -179,16 +232,20 @@ and query ordinals remain fixed and all driver views are rebuilt together.
   and refused helper bindings make no child Core callback; games retain
   their existing callback path. Isolated Steam helpers also registered the
   expected bundle identity and emitted the helper/mode startup canary.
-  That establishes routing, not a usable sign-in window or native context menu.
+  Those routing probes alone did not establish a usable sign-in window or
+  native context menu; the later build-48 foreground check below did verify
+  the menu in the real sign-in client.
 - Real AppKit lifecycle tests cover repeated close, retained window/session,
   delegate forwarding, framework replacement, unrelated windows and explicit
   application termination.
-- The native sign-in header passes 72 headless and 110 actual AppKit checks
+- The earlier native sign-in header passed 72 headless and 110 actual AppKit checks
   using the extracted production methods. Its standard close control hides
   the window while preserving its client geometry and an independent owned
   process. Unhide restores it; minimize follows the modeled Wine acknowledgment.
-  Paired input, foreign windows, eligibility changes and explicit Quit are
-  covered. Both changed production objects compile with Wine's build flags.
+  Paired input, foreign windows and eligibility changes are covered. The v12
+  headless header fixture passes 83 checks plus 16 composition checks; a separate
+  three-group extracted Quit harness covers the new dispatch and callback
+  lifecycle. These fixtures do not establish actual Steam shutdown or game retention.
 - An exact WineContentView composition regression checks the client image and
   rendered body pixels with the header attached, repainted and removed, including
   attaching it before the first client image. An intermediate local candidate
@@ -202,13 +259,13 @@ and query ordinals remain fixed and all driver views are rebuilt together.
   menu tests model a real Windows popup, delayed cancellation unwind,
   unsupported popups, clock failure, input cancellation and late queued owners
   retaining the four-slot limit. A reused HWND is refused unless it still maps
-  to the captured Cocoa window. The new candidate passes seven extracted
-  editing test groups, including 53 captured-popup outcomes: delayed unwind,
+  to the captured Cocoa window. The driver passes seven extracted
+  editing test groups, including captured-popup outcomes for delayed unwind,
   replacement capture, same-root focus changes, late ownership/style changes,
   truncated class-name prefixes and failed cancellation. Cocoa tests carry the
   exact popup and focus across successor queries. Query-state layout checks
-  cover Unix64, PE32 and PE64. These fixtures do not establish the real Steam
-  first-click result.
+  cover Unix64, PE32 and PE64. These fixtures alone do not establish the real
+  Steam first-click result; build 48 supplied the separate foreground evidence.
 - The original Windows probe uses two fields and a fixed synthetic marker;
   it never reads or writes the real clipboard. Its source is
   `scripts/probes/native-text-edit.c`.
@@ -227,17 +284,23 @@ and query ordinals remain fixed and all driver views are rebuilt together.
   sign-in, game compatibility and game save handling remain unvalidated.
 - After installing the bounded-header package, the user confirmed that the
   real login window rendered again. Its right-click menu remained the single,
-  usable Windows fallback; that case still needs verification of the native
-  replacement. A separate live main-window close check found Caskrun's window
-  off screen while its process and Steam's sign-in window remained running.
+  usable Windows fallback at that point. Build 48 later verified the native
+  replacement in a genuinely foreground session. A separate live main-window
+  close check found Caskrun's window off screen while its process and Steam's
+  sign-in window remained running.
   This does not establish retention of a logged-in client or an active game.
 
-The preceding combined source passed 500 Rust unit tests and seven integration
-tests, with two existing ignored tests, in a serial run. The new candidate's
-focused Core checks pass 70 migration tests and 20 graphics tests. They cover
-all nine direct predecessors, historical destinations, backup preservation,
-lock waiting, owner refusal, package-change rollback and exact renderer approval.
-These checks do not establish gameplay or repeated real-client reopen behavior.
+The build-48 combined source passed 507 Rust unit tests and seven integration
+tests, with two existing ignored tests. The v12 focused Core checks pass 77
+migration tests and 20 graphics tests. They cover all eleven direct predecessors,
+all 55 historical destinations, seven earlier backup records, lock waiting,
+owner refusal, package-change rollback and exact renderer approval. Twenty-six
+Foundation-only checks cover the sidebar's running/unknown/idle states, stale
+operation tokens, slow-Quit escalation and recovery after an interrupted full
+Quit. Full Swift typechecking passed. Live checks with original owned Windows
+processes for the new sidebar controls and explicit Steam Quit are pending;
+these source/fixture results do not establish Steam shutdown, game retention or
+save behavior.
 
 The first bundled-helper package was installed locally as build 45 after normal
 Caskrun Quit and a zero-owner check on the previous app. The imported bottle's
@@ -277,8 +340,9 @@ foreign cursor handles through `GetIconInfo` cannot establish the cursor shape
 used by Wine's Cocoa driver. The actual eligibility guard reads that driver's
 own `WineApplicationController` cursor and still requires its standard I-beam
 or vertical I-beam. The captured-popup implementation does not relax that guard.
-Its first-right-click replacement and repeated Dock hide/reopen cycles remain
-pending live checks.
+At that point its first-right-click replacement and repeated Dock hide/reopen
+cycles were pending. Build 48 later verified the first and repeated foreground
+menu; Dock hide/reopen cycles remain a separate live check.
 
 After unlocking and inspecting the existing permissions, a normal launch with
 audio enabled reached a usable real sign-in window. The permissions were
@@ -337,8 +401,9 @@ force activation or replace an unrelated application's menu.
 
 Work stopped at the user's request. Only the Caskrun-owned test bottle was
 stopped; the separate compatibility application was left alone. Temporary
-keep-awake and cursor tracing ended. Actual foreground menu behavior remains
-unverified. No claim of a completed Steam menu repair follows from this build.
+keep-awake and cursor tracing ended. Actual foreground menu behavior remained
+unverified at that stopping point. No claim of a completed Steam menu repair
+follows from build 47; build 48 below supplied the later foreground evidence.
 
 ### Build 48: the captured-popup recognizer was too strict
 
@@ -369,8 +434,8 @@ and packaged as local build 48, with verified nested and outer signatures,
 exact engine identity, ARM64 architecture and DMG checksum. The full serial
 Core suite passed 507 unit and seven integration tests, with two intentionally
 ignored. Focused native editing passed seven groups and the packager six.
-Ten direct predecessor edges, including build 47's engine, retain all 36
-historical transitions and their backups. Build 47 and its DMG are retained in
+Ten direct predecessor edges, including build 47's engine, retained all 45
+earlier transitions and their backups, for 55 at that release. Build 47 and its DMG are retained in
 an ignored recovery directory.
 
 The real imported Steam client migrated to this engine under the bottle lock and
@@ -391,3 +456,44 @@ round-trip ending in Paste was not completed before testing stopped at the
 user's request. No account sign-in occurred, no clipboard contents were read,
 and the right-click path while the application is not frontmost deliberately
 still retains Steam's own menu.
+
+### V12: graceful Steam Quit and separate bottle controls
+
+The final independently signed and fully attested package is
+`sha256:cae84f3978b2e0820bbdfc95c1e9dd5fa6c79c8d1f1aca825ac86bd2afb77c29`.
+Its existing native editing patch is byte-identical to build 48. The additional
+Wine patch routes explicit native Steam Quit through the verified Core request;
+red-close and menu guards remain intact. Both complete source trees match a
+fresh nine-patch replay, default/DXMT exports and architectures passed checks,
+and translator files are unchanged. Native fixture checks passed. Original-process bottle checks also passed as
+recorded below; explicit native Steam shutdown remains a separate live check. No native-game
+compatibility or retention claim is added.
+
+
+### V12 bottle shutdown live checks
+
+The signed ARM64 candidate passed its package signature, exact engine identity
+and development-DMG verification. The complete Core suite passed **530 unit
+and 7 integration tests**, with two existing unit tests ignored, plus 26 Swift
+state checks and full SwiftUI typechecking. Native Quit extracted-production
+fixtures passed 3,815 guard, spawn, environment, descriptor and lifecycle checks;
+these remain distinct from an actual Steam-client shutdown test.
+
+Two original Win32 apps ran in separate disposable bottles using the candidate's
+exact engine location. One accepted `WM_QUERYENDSESSION`, received
+`WM_ENDSESSION` and exited cleanly. The other refused the request and remained
+running, with no automatic force. The sidebar offered Force Quit with its
+unsaved-work confirmation; confirming it stopped only that bottle, while the
+first still had nine current owners. The clean app then exited through the
+polite Core path. Both bottles reached zero current owners after Wine's normal
+background shutdown. The UI hid the quit control and kept Open available.
+The test UI completed full Quit, and both prefixes and the isolated UI copy
+were removed only after independent zero-owner checks.
+
+The first live attempt was invalidated by the test runner ending while its
+Wine descendants still needed its process group. A bounded supervisor fixed
+the test lifetime; no product change was needed for that attempt. No publisher
+client, account or real game was used, and no existing user bottle was run.
+The Steam text-menu patch remains unchanged. Explicit native Steam Quit,
+logged-in Steam windows, games and full-Quit cancellation during an active
+real app remain separate user-led checks.

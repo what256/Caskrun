@@ -40,10 +40,12 @@ STEAM_WINDOW_PATCH = "wine-11.0-steam-native-window.patch"
 PATCHES[STEAM_WINDOW_PATCH] = "c34c8c207febd966fc9aa7fb6cd8b31bd9325bcc820b6a35cc266f4164bc5412"
 STEAM_BUNDLE_PATCH = "wine-11.0-steam-native-bundle.patch"
 PATCHES[STEAM_BUNDLE_PATCH] = "faf14b29f591f66b82b38a4eee97a842675aa29f66960ec499429f27ac6be09a"
+STEAM_QUIT_PATCH = "wine-11.0-steam-quit.patch"
+PATCHES[STEAM_QUIT_PATCH] = "bbd76b35cf49b36865fdec94ded7003e196d6d989d33ceda3c7b5c7df2205da4"
 BASE_PATCHES = ["wine-11.0-steam-cef-commandline.patch", "wine-11.0-steam-dock.patch",
                 "wine-11.0-native-app-identity.patch"]
 TEXT_PATCH = "wine-11.0-native-text-editing.patch"
-UI_PATCHES = [TEXT_PATCH, STEAM_WINDOW_PATCH, STEAM_BUNDLE_PATCH]
+UI_PATCHES = [TEXT_PATCH, STEAM_WINDOW_PATCH, STEAM_BUNDLE_PATCH, STEAM_QUIT_PATCH]
 DXMT_PATCHES = ["wine-11.0-winemac-metal-exports.patch", "wine-11.0-dxmt-client-surface.patch"]
 DRIVERS = {
     "lib/wine/x86_64-unix/winemac.so": "winemac.so",
@@ -215,6 +217,16 @@ def package(base: Path, output: Path) -> str:
         "explicit_background_helpers_use_raw_loader": True,
         "game_validation": False,
     }
+    receipt["native_steam_quit"] = {
+        "format": "caskrun-steam-client-quit-v1",
+        "explicit_quit_action": "verified-core-steam-client-shutdown-request",
+        "one_pending_request": True,
+        "appkit_waits_for_child": False,
+        "signals_sent": False,
+        "sign_in_close_action": "native-hide",
+        "running_game_validation": False,
+        "game_validation": False,
+    }
     (candidate / "components.json").write_text(json.dumps(receipt, indent=2) + "\n")
     for name in UI_PATCHES:
         shutil.copyfile(REPO / "runtime-patches" / name, candidate / "source/patches" / name)
@@ -228,11 +240,17 @@ def package(base: Path, output: Path) -> str:
                      "Original Steam sign-in native controls: source/patches/" + STEAM_WINDOW_PATCH + "\n"
                      "SHA-256: " + PATCHES[STEAM_WINDOW_PATCH] + "\n"
                      "Only the recognized sign-in window gets native Hide/Minimize controls.\n"
-                     "Client geometry, app files and explicit Quit behavior are retained.\n"
+                     "Client geometry and app files are retained; explicit Quit has a separate patch.\n"
                      "Original Steam web-helper bundle reuse: source/patches/" + STEAM_BUNDLE_PATCH + "\n"
                      "SHA-256: " + PATCHES[STEAM_BUNDLE_PATCH] + "\n"
                      "Both native child loaders retain their exports. Only Steam's web helper uses\n"
                      "the preprepared per-bottle app bundle; no child Core callback is added.\n"
+                     "Original Steam client quit: source/patches/" + STEAM_QUIT_PATCH + "\n"
+                     "SHA-256: " + PATCHES[STEAM_QUIT_PATCH] + "\n"
+                     "An explicit Quit asks Core to verify the running Steam client and selected\n"
+                     "engine, then send Steam's shutdown command in the same bottle. One pending\n"
+                     "request is reaped asynchronously; failure keeps the interface open. No\n"
+                     "process is signalled. System termination retains Wine session handling.\n"
                      "Build: scripts/build-wine-native-text-dev.py; not a public binary release.\n")
     allowed = set(inputs) | {"components.json", "SOURCES.txt", "native-text-editing.txt"} | {
         "source/patches/" + name for name in UI_PATCHES}
@@ -251,7 +269,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", type=Path, default=REPO / ".build/dxmt-wine-runtime-dev-v4")
     parser.add_argument("--seed", type=Path, default=REPO / ".build/wine-native-apps-11.0-dev")
-    parser.add_argument("--output", type=Path, default=REPO / ".build/native-text-runtime-v10")
+    parser.add_argument("--output", type=Path, default=REPO / ".build/native-text-runtime-v12")
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     try:

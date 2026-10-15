@@ -55,7 +55,8 @@ def main() -> None:
     assert "[self caskrunUpdateSteamHeader];" in extract(window, "- (void) adjustFeaturesForState")
     template = (REPO / "scripts/fixtures/steam-native-window.m.in").read_text()
     functions = "\n".join(extract(app, name) for name in (
-        "static BOOL CaskrunSteamDockEnabled", "static NSString* CaskrunArgumentBasename", "static BOOL CaskrunIsWindowsProcess"))
+        "static BOOL CaskrunSteamDockEnabled", "static NSString* CaskrunArgumentBasename", "static BOOL CaskrunIsWindowsProcess",
+        "static BOOL CaskrunNativeDockEnabled", "static NSString* CaskrunNativeImageName", "static BOOL CaskrunNativeBackgroundProcess"))
     controller_methods = "\n".join(extract(app, name) for name in (
         "- (BOOL) caskrunSteamNativeWindowEnabled", "- (BOOL) caskrunHandleSteamHeaderEvent:",
         "- (void) unminimizeWindowIfNoneVisible", "- (BOOL) applicationShouldHandleReopen:",

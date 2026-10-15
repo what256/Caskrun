@@ -1,0 +1,222 @@
+/* Original inert fixtures. Only exact production functions are substituted.
+ * No Wine, publisher executable, user prefix, clipboard or native UI is used. */
+#import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>
+#include <assert.h>
+#include <crt_externs.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <spawn.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static unsigned int checks;
+#define CHECK(x) do { assert(x); checks++; } while (0)
+static char dataPath[PATH_MAX], corePath[PATH_MAX], prefixPath[PATH_MAX];
+static const char *bottle="11111111-1111-4111-8111-111111111111";
+static NSMutableArray *backgroundBlocks, *mainBlocks;
+static int failStep, ownershipMode, spawnCalls, waitCalls, waitMode, interrupts, failures;
+static BOOL realSpawn, failAllocation, failAsprintf;
+static pid_t spawned;
+static void fixture_dispatch(dispatch_queue_t queue, dispatch_block_t block)
+{ [(queue==dispatch_get_main_queue()?mainBlocks:backgroundBlocks) addObject:[[block copy] autorelease]]; }
+static void step(NSMutableArray *blocks)
+{ CHECK(blocks.count==1); dispatch_block_t block=[[blocks objectAtIndex:0] retain]; [blocks removeObjectAtIndex:0]; block(); [block release]; }
+static void CaskrunSteamQuitFailed(void) { failures++; }
+static int fixture_lstat(const char *path, struct stat *info)
+{
+    int ret=lstat(path,info);
+    if (!ret && ((ownershipMode==1&&!strcmp(path,corePath)) || (ownershipMode==2&&!strcmp(path,dataPath)))) info->st_uid=geteuid()+1;
+    if (!ret && ownershipMode==3&&!strcmp(path,corePath)) info->st_uid=0;
+    return ret;
+}
+static void *fixture_calloc(size_t count,size_t size) { return failAllocation?NULL:calloc(count,size); }
+static int fixture_asprintf(char **text,const char *format,...)
+{ if(failAsprintf)return -1;va_list args;va_start(args,format);int ret=vasprintf(text,format,args);va_end(args);return ret; }
+static int fixture_actions_init(posix_spawn_file_actions_t *actions) { return failStep==1?EIO:posix_spawn_file_actions_init(actions); }
+static int fixture_addopen(posix_spawn_file_actions_t *actions,int fd,const char *path,int flags,mode_t mode)
+{ return failStep==2+fd?EIO:posix_spawn_file_actions_addopen(actions,fd,path,flags,mode); }
+static int fixture_addchdir(posix_spawn_file_actions_t *actions,const char *path)
+{ CHECK(!strcmp(path,"/"));return failStep==5?EIO:posix_spawn_file_actions_addchdir_np(actions,path); }
+static int fixture_attr_init(posix_spawnattr_t *attributes) { return failStep==6?EIO:posix_spawnattr_init(attributes); }
+static int fixture_attr_flags(posix_spawnattr_t *attributes,short flags)
+{ CHECK(flags==POSIX_SPAWN_CLOEXEC_DEFAULT);return failStep==7?EIO:posix_spawnattr_setflags(attributes,flags); }
+static int fixture_spawn(pid_t *child,const char *path,const posix_spawn_file_actions_t *actions,
+                         const posix_spawnattr_t *attributes,char *const argv[],char *const environment[])
+{
+    spawnCalls++;
+    CHECK(!strcmp(path,corePath));CHECK(!strcmp(argv[0],corePath));CHECK(!strcmp(argv[1],"request-steam-quit"));
+    CHECK(!strcmp(argv[2],bottle));CHECK(argv[3]==NULL);
+    unsigned int homes=0,kept=0;
+    for(size_t i=0;environment[i];i++)
+    {
+        const char *entry=environment[i];
+        CHECK(strncmp(entry,"CASKRUN_NATIVE_",15));CHECK(strncmp(entry,"WINESERVERSOCKET=",17));
+        CHECK(strncmp(entry,"WINELOADERNOEXEC=",17));CHECK(strncmp(entry,"WINEPRELOADRESERVE=",19));
+        CHECK(strncmp(entry,"CASKRUN_STEAM_MODE=",19));CHECK(strncmp(entry,"CASKRUN_STEAM_NATIVE_APP=",25));
+        CHECK(strncmp(entry,"CASKRUN_STEAM_ICON=",19));
+        if(!strncmp(entry,"CASKRUN_HOME=",13)){homes++;CHECK(!strcmp(entry+13,dataPath));}
+        if(!strcmp(entry,"CASKRUN_QUIT_FIXTURE_KEEP=present"))kept++;
+    }
+    CHECK(homes==1&&kept==1);
+    if(failStep==8)return EIO;
+    if(realSpawn){int ret=posix_spawn(child,path,actions,attributes,argv,environment);spawned=*child;return ret;}
+    *child=spawned=12345;return 0;
+}
+static pid_t fixture_waitpid(pid_t child,int *status,int options)
+{
+    waitCalls++;CHECK(child==spawned&&options==0);
+    if(interrupts){interrupts--;errno=EINTR;return -1;}
+    if(realSpawn)return waitpid(child,status,options);
+    if(waitMode==4){errno=ECHILD;return -1;}
+    *status=waitMode==1?256:waitMode==2?SIGTERM:0;
+    return waitMode==3?child+1:child;
+}
+#define lstat fixture_lstat
+#define calloc fixture_calloc
+#define asprintf fixture_asprintf
+#define posix_spawn_file_actions_init fixture_actions_init
+#define posix_spawn_file_actions_addopen fixture_addopen
+#define posix_spawn_file_actions_addchdir_np fixture_addchdir
+#define posix_spawnattr_init fixture_attr_init
+#define posix_spawnattr_setflags fixture_attr_flags
+#define posix_spawn fixture_spawn
+#define waitpid fixture_waitpid
+#define dispatch_async(queue,block) fixture_dispatch(queue,block)
+@@HELPERS@@
+#undef lstat
+#undef calloc
+#undef asprintf
+#undef posix_spawn_file_actions_init
+#undef posix_spawn_file_actions_addopen
+#undef posix_spawn_file_actions_addchdir_np
+#undef posix_spawnattr_init
+#undef posix_spawnattr_setflags
+#undef posix_spawn
+#undef waitpid
+#undef dispatch_async
+
+static int quitReason;
+@interface QuitDescriptor:NSObject
+- (id)attributeDescriptorForKeyword:(AEKeyword)keyword;
+- (SInt32)int32Value;
+@end
+@implementation QuitDescriptor
+- (id)attributeDescriptorForKeyword:(AEKeyword)keyword { (void)keyword;return self; }
+- (SInt32)int32Value { return quitReason; }
+@end
+@interface QuitEventManager:NSObject
++ (id)sharedAppleEventManager;
+- (QuitDescriptor *)currentAppleEvent;
+@end
+@implementation QuitEventManager
++ (id)sharedAppleEventManager { static id value;if(!value)value=[self new];return value; }
+- (QuitDescriptor *)currentAppleEvent { return [[[QuitDescriptor alloc] init] autorelease]; }
+@end
+static BOOL steamMode=YES,nativeMode=YES,helperMode=YES,backgroundMode;
+static BOOL CaskrunSteamDockEnabled(void) { return steamMode; }
+static BOOL CaskrunNativeDockEnabled(void) { return nativeMode; }
+static BOOL CaskrunIsWindowsProcess(NSString *name) { return helperMode&&[name isEqualToString:@"steamwebhelper.exe"]; }
+static BOOL CaskrunNativeBackgroundProcess(void) { return backgroundMode; }
+enum { APP_QUIT_REQUESTED=1 };
+enum { QUIT_REASON_NONE,QUIT_REASON_LOGOUT,QUIT_REASON_RESTART,QUIT_REASON_SHUTDOWN };
+typedef struct {int type,deliver;struct{int reason;}app_quit_requested;} macdrv_event;
+static unsigned int eventsCreated,eventsReleased;
+static macdrv_event *macdrv_create_event(int type,id window){(void)window;eventsCreated++;macdrv_event *event=calloc(1,sizeof(*event));event->type=type;return event;}
+static void macdrv_release_event(macdrv_event *event){eventsReleased++;free(event);}
+@interface WineEventQueue:NSObject
+@property int posted,reason;
+- (void)postEvent:(macdrv_event *)event;
+@end
+@implementation WineEventQueue
+@synthesize posted,reason;
+- (void)postEvent:(macdrv_event *)event {CHECK(event->type==APP_QUIT_REQUESTED&&event->deliver==1);self.posted++;self.reason=event->app_quit_requested.reason;}
+@end
+@interface QuitController:NSObject {NSLock *eventQueuesLock;NSMutableArray *eventQueues;}
+- (void)addQueue:(WineEventQueue *)queue;
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender;
+@end
+@implementation QuitController
+- (id)init {if((self=[super init])){eventQueuesLock=[NSLock new];eventQueues=[NSMutableArray new];}return self;}
+- (void)addQueue:(WineEventQueue *)queue {[eventQueues addObject:queue];}
+#define NSAppleEventManager QuitEventManager
+#define NSAppleEventDescriptor QuitDescriptor
+@@DELEGATE@@
+#undef NSAppleEventManager
+#undef NSAppleEventDescriptor
+@end
+
+static void env(void)
+{
+    setenv("CASKRUN_NATIVE_CORE",corePath,1);setenv("CASKRUN_NATIVE_DATA",dataPath,1);
+    setenv("CASKRUN_NATIVE_BOTTLE",bottle,1);setenv("WINEPREFIX",prefixPath,1);
+    setenv("CASKRUN_HOME","/invalid-inherited-data",1);
+    setenv("WINESERVERSOCKET","fixture-only",1);setenv("WINELOADERNOEXEC","1",1);setenv("WINEPRELOADRESERVE","fixture-only",1);
+    setenv("CASKRUN_NATIVE_EXEC","1",1);setenv("CASKRUN_STEAM_MODE","1",1);setenv("CASKRUN_STEAM_NATIVE_APP","fixture-only",1);setenv("CASKRUN_STEAM_ICON","fixture-only",1);
+    setenv("CASKRUN_QUIT_FIXTURE_KEEP","present",1);
+}
+static void reset(void)
+{ CHECK(!caskrunSteamShutdownPending&&!backgroundBlocks.count&&!mainBlocks.count);failStep=ownershipMode=waitMode=interrupts=0;realSpawn=failAllocation=failAsprintf=NO;spawnCalls=waitCalls=failures=0;env(); }
+static void drain(void) { step(backgroundBlocks);CHECK(caskrunSteamShutdownPending);step(mainBlocks);CHECK(!caskrunSteamShutdownPending); }
+int main(int argc,char **argv)
+{
+    @autoreleasepool {
+    CHECK(argc==3);backgroundBlocks=[NSMutableArray new];mainBlocks=[NSMutableArray new];
+    CHECK(snprintf(corePath,sizeof(corePath),"%s",argv[2])<(int)sizeof(corePath));
+    CHECK(snprintf(dataPath,sizeof(dataPath),"%s/data",argv[1])<(int)sizeof(dataPath));CHECK(!mkdir(dataPath,0700));
+    char path[PATH_MAX];CHECK(snprintf(path,sizeof(path),"%s/bottles",dataPath)<(int)sizeof(path));CHECK(!mkdir(path,0700));
+    CHECK(snprintf(path,sizeof(path),"%s/bottles/%s",dataPath,bottle)<(int)sizeof(path));CHECK(!mkdir(path,0700));
+    CHECK(snprintf(prefixPath,sizeof(prefixPath),"%s/prefix",path)<(int)sizeof(prefixPath));CHECK(!mkdir(prefixPath,0700));env();
+    CHECK(CaskrunOwnedProgram(corePath));CHECK(CaskrunSteamQuitDirectory(dataPath));CHECK(CaskrunSteamQuitBindings(corePath,dataPath,bottle,prefixPath));
+    CHECK(!CaskrunOwnedProgram(NULL));CHECK(!CaskrunOwnedProgram("relative"));CHECK(!CaskrunOwnedProgram(dataPath));
+    char alias[PATH_MAX];CHECK(snprintf(alias,sizeof(alias),"%s/core-link",argv[1])<(int)sizeof(alias));CHECK(!symlink(corePath,alias));CHECK(!CaskrunOwnedProgram(alias));
+    CHECK(snprintf(alias,sizeof(alias),"%s/data-link",argv[1])<(int)sizeof(alias));CHECK(!symlink(dataPath,alias));CHECK(!CaskrunSteamQuitDirectory(alias));
+    CHECK(!CaskrunSteamQuitDirectory(corePath));CHECK(!CaskrunSteamQuitDirectory(NULL));CHECK(!CaskrunSteamQuitDirectory("relative"));
+    CHECK(!chmod(corePath,0775));CHECK(!CaskrunOwnedProgram(corePath));CHECK(!chmod(corePath,0600));CHECK(!CaskrunOwnedProgram(corePath));CHECK(!chmod(corePath,0700));
+    CHECK(!chmod(dataPath,0770));CHECK(!CaskrunSteamQuitDirectory(dataPath));CHECK(!chmod(dataPath,0700));
+    ownershipMode=1;CHECK(!CaskrunOwnedProgram(corePath));ownershipMode=2;CHECK(!CaskrunSteamQuitDirectory(dataPath));ownershipMode=3;CHECK(CaskrunOwnedProgram(corePath));ownershipMode=0;
+    for(const char **bad=(const char*[]){"", "11111111-1111-4111-8111-11111111111", "11111111-1111-4111-8111-11111111111A", "11111111_1111-4111-8111-111111111111",NULL};*bad;bad++) CHECK(!CaskrunSteamQuitBindings(corePath,dataPath,*bad,prefixPath));
+    CHECK(!CaskrunSteamQuitBindings(corePath,dataPath,NULL,prefixPath));CHECK(!CaskrunSteamQuitBindings(corePath,dataPath,bottle,NULL));CHECK(!CaskrunSteamQuitBindings(corePath,dataPath,bottle,dataPath));
+    CHECK(!chmod(prefixPath,0777));CHECK(!CaskrunSteamQuitBindings(corePath,dataPath,bottle,prefixPath));CHECK(!chmod(prefixPath,0700));
+    // Every private directory component is checked independently, including a
+    // symlink whose destination is otherwise the exact same owned directory.
+    char saved[PATH_MAX], bottlesPath[PATH_MAX];
+    CHECK(snprintf(bottlesPath,sizeof(bottlesPath),"%s/bottles",dataPath)<(int)sizeof(bottlesPath));
+    CHECK(!chmod(bottlesPath,0770));CHECK(!CaskrunSteamQuitBindings(corePath,dataPath,bottle,prefixPath));CHECK(!chmod(bottlesPath,0700));
+    CHECK(snprintf(saved,sizeof(saved),"%s/saved-bottles",dataPath)<(int)sizeof(saved));
+    CHECK(!rename(bottlesPath,saved));CHECK(!symlink(saved,bottlesPath));CHECK(!CaskrunSteamQuitBindings(corePath,dataPath,bottle,prefixPath));CHECK(!unlink(bottlesPath));CHECK(!rename(saved,bottlesPath));
+    CHECK(snprintf(saved,sizeof(saved),"%s.saved",prefixPath)<(int)sizeof(saved));
+    CHECK(!rename(prefixPath,saved));CHECK(!symlink(saved,prefixPath));CHECK(!CaskrunSteamQuitBindings(corePath,dataPath,bottle,prefixPath));CHECK(!unlink(prefixPath));CHECK(!rename(saved,prefixPath));
+    char deep[PATH_MAX];CHECK(snprintf(deep,sizeof(deep),"%s/deep",argv[1])<(int)sizeof(deep));CHECK(!mkdir(deep,0700));
+    while(strlen(deep)<PATH_MAX-40){size_t n=strlen(deep),add=PATH_MAX-40-n;if(add>100)add=100;CHECK(add>1);deep[n++]='/';memset(deep+n,'a',add-1);deep[n+add-1]=0;CHECK(!mkdir(deep,0700));}
+    CHECK(snprintf(path,sizeof(path),"%s/bottles",deep)<(int)sizeof(path));CHECK(!mkdir(path,0700));CHECK(!CaskrunSteamQuitBindings(corePath,deep,bottle,"/not-a-prefix"));
+    for(const char **entry=(const char*[]){"CASKRUN_HOME=x","WINESERVERSOCKET=x","WINELOADERNOEXEC=x","WINEPRELOADRESERVE=x","CASKRUN_NATIVE_ANY=x","CASKRUN_STEAM_MODE=x","CASKRUN_STEAM_NATIVE_APP=x","CASKRUN_STEAM_ICON=x",NULL};*entry;entry++) CHECK(!CaskrunSteamQuitKeepEnvironment(*entry));
+    CHECK(CaskrunSteamQuitKeepEnvironment("WINEPREFIX=fixture"));CHECK(CaskrunSteamQuitKeepEnvironment("HOME=fixture"));CHECK(CaskrunSteamQuitKeepEnvironment("PATH=fixture"));CHECK(CaskrunSteamQuitKeepEnvironment("OTHER_CASKRUN_HOME=x"));
+    for(int error=1;error<=8;error++){reset();failStep=error;CHECK(!CaskrunRequestSteamShutdown());CHECK(!caskrunSteamShutdownPending&&!backgroundBlocks.count&&!mainBlocks.count);CHECK(!failures);}
+    reset();failAllocation=YES;CHECK(!CaskrunRequestSteamShutdown());CHECK(!spawnCalls);reset();failAsprintf=YES;CHECK(!CaskrunRequestSteamShutdown());CHECK(!spawnCalls);reset();setenv("WINEPREFIX",dataPath,1);CHECK(!CaskrunRequestSteamShutdown());CHECK(!spawnCalls);env();
+    reset();CHECK(CaskrunRequestSteamShutdown());CHECK(caskrunSteamShutdownPending&&spawnCalls==1&&waitCalls==0);CHECK(CaskrunRequestSteamShutdown());CHECK(spawnCalls==1);interrupts=1;drain();CHECK(waitCalls==2&&!failures);
+    for(int mode=1;mode<=4;mode++){reset();waitMode=mode;CHECK(CaskrunRequestSteamShutdown());drain();CHECK(failures==1);}
+    // A real original tiny child proves Core argv, replacement home, inherited
+    // native variables removed, all standard fds null, extra fd closed, cwd '/'.
+    reset();char report[PATH_MAX];CHECK(snprintf(report,sizeof(report),"%s/child-result",argv[1])<(int)sizeof(report));setenv("CASKRUN_QUIT_FIXTURE_REPORT",report,1);
+    int leaked=open(corePath,O_RDONLY);CHECK(leaked>2);char fdText[32];snprintf(fdText,sizeof(fdText),"%d",leaked);setenv("CASKRUN_QUIT_FIXTURE_FD",fdText,1);
+    setenv("CASKRUN_QUIT_FIXTURE_DATA",dataPath,1);setenv("CASKRUN_QUIT_FIXTURE_PREFIX",prefixPath,1);realSpawn=YES;CHECK(CaskrunRequestSteamShutdown());drain();CHECK(!failures);CHECK(!close(leaked));CHECK(!access(report,F_OK));
+    // Exact termination delegate is controlled without an NSApplication or UI.
+    reset();QuitController *controller=[QuitController new];WineEventQueue *queue=[WineEventQueue new];[controller addQueue:queue];
+    quitReason=0;CHECK([controller applicationShouldTerminate:nil]==NSTerminateCancel);CHECK(queue.posted==0&&spawnCalls==1);drain();
+    reset();failStep=8;CHECK([controller applicationShouldTerminate:nil]==NSTerminateCancel);CHECK(queue.posted==0&&failures==1);
+    for(int gate=0;gate<4;gate++){reset();steamMode=nativeMode=helperMode=YES;backgroundMode=NO;if(gate==0)steamMode=NO;if(gate==1)nativeMode=NO;if(gate==2)helperMode=NO;if(gate==3)backgroundMode=YES;int before=queue.posted;CHECK([controller applicationShouldTerminate:nil]==NSTerminateLater);CHECK(queue.posted==before+1&&!spawnCalls&&!failures);}
+    steamMode=nativeMode=helperMode=YES;backgroundMode=NO;
+    int reasons[]={kAELogOut,kAEReallyLogOut,kAEShowRestartDialog,kAEShowShutdownDialog};int expected[]={QUIT_REASON_LOGOUT,QUIT_REASON_LOGOUT,QUIT_REASON_RESTART,QUIT_REASON_SHUTDOWN};
+    for(unsigned int i=0;i<sizeof(reasons)/sizeof(*reasons);i++){reset();quitReason=reasons[i];int before=queue.posted;CHECK([controller applicationShouldTerminate:nil]==NSTerminateLater);CHECK(queue.posted==before+1&&queue.reason==expected[i]&&!spawnCalls&&!failures);}
+    reset();steamMode=NO;quitReason=0;QuitController *empty=[QuitController new];CHECK([empty applicationShouldTerminate:nil]==NSTerminateNow);CHECK(!spawnCalls&&!failures);
+    CHECK(eventsCreated==eventsReleased);CHECK(!backgroundBlocks.count&&!mainBlocks.count);printf("%u exact native Quit guards, process lifecycle and delegate checks passed\n",checks);
+    }
+    return 0;
+}

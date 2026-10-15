@@ -1,0 +1,183 @@
+From: Caskrun contributors
+Subject: Route explicit native Steam Quit through a verified Core request
+
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -31,6 +31,12 @@
+ #include <sys/stat.h>
+ #include <stdatomic.h>
+ #include <time.h>
++#include <crt_externs.h>
++#include <spawn.h>
++#include <fcntl.h>
++#include <sys/wait.h>
++#include <errno.h>
++#include <unistd.h>
+ 
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+ 
+@@ -177,6 +183,142 @@
+     return [[[NSImage alloc] initWithContentsOfFile:path] autorelease];
+ }
+ 
++
++
++/* Explicit Quit controls the verified Steam client through Core. Closing the
++ * sign-in window still hides it. One exact child may be pending; waiting never
++ * blocks AppKit, and no process is signalled by this path. */
++static BOOL caskrunSteamShutdownPending;
++
++static BOOL CaskrunOwnedProgram(const char *path)
++{
++    struct stat info;
++    char resolved[PATH_MAX];
++    return path && *path == '/' && !lstat(path, &info) && S_ISREG(info.st_mode) &&
++           (info.st_uid == geteuid() || info.st_uid == 0) && !(info.st_mode & 0022) &&
++           realpath(path, resolved) && !strcmp(path, resolved) && !access(path, X_OK);
++}
++
++static BOOL CaskrunSteamQuitDirectory(const char *path)
++{
++    struct stat info;
++    char resolved[PATH_MAX];
++    return path && *path == '/' && !lstat(path, &info) && S_ISDIR(info.st_mode) &&
++           info.st_uid == geteuid() && !(info.st_mode & 0022) &&
++           realpath(path, resolved) && !strcmp(path, resolved);
++}
++
++static BOOL CaskrunSteamQuitBindings(const char *core, const char *data,
++                                    const char *bottle, const char *prefix)
++{
++    char expected[PATH_MAX];
++    unsigned int i;
++    int length;
++    if (!CaskrunOwnedProgram(core) || !CaskrunSteamQuitDirectory(data) ||
++        !bottle || strlen(bottle) != 36 || !prefix) return NO;
++    for (i = 0; i < 36; i++)
++    {
++        if (i == 8 || i == 13 || i == 18 || i == 23)
++        {
++            if (bottle[i] != '-') return NO;
++        }
++        else if (!((bottle[i] >= '0' && bottle[i] <= '9') ||
++                   (bottle[i] >= 'a' && bottle[i] <= 'f'))) return NO;
++    }
++    length = snprintf(expected, sizeof(expected), "%s/bottles", data);
++    if (length < 0 || (size_t)length >= sizeof(expected) || !CaskrunSteamQuitDirectory(expected)) return NO;
++    length = snprintf(expected, sizeof(expected), "%s/bottles/%s", data, bottle);
++    if (length < 0 || (size_t)length >= sizeof(expected) || !CaskrunSteamQuitDirectory(expected)) return NO;
++    length = snprintf(expected, sizeof(expected), "%s/bottles/%s/prefix", data, bottle);
++    return length >= 0 && (size_t)length < sizeof(expected) && !strcmp(prefix, expected) &&
++           CaskrunSteamQuitDirectory(prefix);
++}
++
++static void CaskrunSteamQuitFailed(void)
++{
++    static BOOL showing;
++    NSAlert *alert;
++    NSWindow *window;
++    if (showing) return;
++    showing = YES;
++    alert = [[[NSAlert alloc] init] autorelease];
++    alert.messageText = @"Steam couldn’t quit.";
++    alert.informativeText = @"The quit request could not be completed. Please try again.";
++    [alert addButtonWithTitle:@"OK"];
++    window = NSApp.keyWindow;
++    if (window.isVisible && !window.attachedSheet)
++        [alert beginSheetModalForWindow:window completionHandler:^(NSModalResponse response) { showing = NO; }];
++    else
++    {
++        [alert runModal];
++        showing = NO;
++    }
++}
++
++static BOOL CaskrunSteamQuitKeepEnvironment(const char *entry)
++{
++    static const char * const removed[] = {
++        "CASKRUN_HOME=", "WINESERVERSOCKET=", "WINELOADERNOEXEC=", "WINEPRELOADRESERVE=",
++        "CASKRUN_NATIVE_", "CASKRUN_STEAM_MODE=", "CASKRUN_STEAM_NATIVE_APP=", "CASKRUN_STEAM_ICON="
++    };
++    unsigned int i;
++    for (i = 0; i < sizeof(removed) / sizeof(removed[0]); i++)
++        if (!strncmp(entry, removed[i], strlen(removed[i]))) return NO;
++    return YES;
++}
++
++static BOOL CaskrunRequestSteamShutdown(void)
++{
++    const char *core = getenv("CASKRUN_NATIVE_CORE");
++    const char *data = getenv("CASKRUN_NATIVE_DATA");
++    const char *bottle = getenv("CASKRUN_NATIVE_BOTTLE");
++    const char *prefix = getenv("WINEPREFIX");
++    char *arguments[] = {(char *)core, (char *)"request-steam-quit", (char *)bottle, NULL};
++    char **environment, **inherited = *_NSGetEnviron();
++    char *home;
++    size_t count, used, i;
++    posix_spawn_file_actions_t actions;
++    posix_spawnattr_t attributes;
++    pid_t child;
++    int error;
++
++    if (caskrunSteamShutdownPending) return YES;
++    if (!CaskrunSteamQuitBindings(core, data, bottle, prefix)) return NO;
++    for (count = 0; inherited[count]; count++) ;
++    environment = calloc(count + 2, sizeof(*environment));
++    if (!environment) return NO;
++    if (asprintf(&home, "CASKRUN_HOME=%s", data) < 0) { free(environment); return NO; }
++    for (i = used = 0; i < count; i++)
++        if (CaskrunSteamQuitKeepEnvironment(inherited[i])) environment[used++] = inherited[i];
++    environment[used] = home;
++    if (posix_spawn_file_actions_init(&actions)) { free(home); free(environment); return NO; }
++    error = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
++    if (!error) error = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
++    if (!error) error = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
++    if (!error) error = posix_spawn_file_actions_addchdir_np(&actions, "/");
++    if (!error && !(error = posix_spawnattr_init(&attributes)))
++    {
++        error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
++        if (!error) error = posix_spawn(&child, core, &actions, &attributes, arguments, environment);
++        posix_spawnattr_destroy(&attributes);
++    }
++    posix_spawn_file_actions_destroy(&actions);
++    free(home);
++    free(environment);
++    if (error) return NO;
++    caskrunSteamShutdownPending = YES;
++    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
++        int status = 0;
++        pid_t waited;
++        do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
++        BOOL failed = waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
++        dispatch_async(dispatch_get_main_queue(), ^{
++            caskrunSteamShutdownPending = NO;
++            if (failed) CaskrunSteamQuitFailed();
++        });
++    });
++    return YES;
++}
+ 
+ /* A native identity belongs to this Windows image, not its launcher. The
+  * generated .app's Info.plist overrides the loader's neutral embedded plist. */
+@@ -2722,6 +2864,19 @@
+                 break;
+         }
+ 
++        /* System termination retains Wine's normal session handling. Only
++         * the prepared visible Steam app delegates an explicit Quit to Core;
++         * failure retains its UI rather than triggering a helper respawn. */
++        if (event->app_quit_requested.reason == QUIT_REASON_NONE &&
++            CaskrunSteamDockEnabled() && CaskrunNativeDockEnabled() &&
++            CaskrunIsWindowsProcess(@"steamwebhelper.exe") && !CaskrunNativeBackgroundProcess())
++        {
++            BOOL requested = CaskrunRequestSteamShutdown();
++            macdrv_release_event(event);
++            if (!requested) CaskrunSteamQuitFailed();
++            return NSTerminateCancel;
++        }
++
+         [eventQueuesLock lock];
+ 
+         if ([eventQueues count])

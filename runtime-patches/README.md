@@ -27,9 +27,9 @@ Steam.exe icon through `CASKRUN_STEAM_ICON`; no icon asset is copied here.
 The isolated tests are recorded in ignored `.build/steam-cef-flags-probe/`
 and `.build/steam-dock-probe/`. A combined disposable Steam prototype rendered
 a usable sign-in and a single Steam Dock item whose click brought that window
-forward. The final tracked Dock patch has one fewer environment guard and must
-be retested in the complete source-built runtime. This is a focused development
-validation, not a general release or game-compatibility claim.
+forward. Those initial probes alone did not validate the complete source-built
+runtime. Later native-bundle and build-48 foreground observations are recorded
+below; none establishes general release or game compatibility.
 
 Run `./scripts/build-wine-steam-dev.sh --check` to verify the source archive
 and patch context. The full command builds into a new ignored `.build/`
@@ -113,16 +113,18 @@ callback. Success only requests cancellation: later queries carry that exact
 popup and original focus, then require it hidden or destroyed with capture
 released before showing the native menu. No clipboard or field values are read.
 Foreign Win32 cursor handles do not establish the actual Cocoa cursor shape;
-the source retains its original driver-local I-beam guard. In the real client
-the first right-click, and repeated dismiss/reopen, each produced one native
+the source retains its original driver-local I-beam guard. In build 48 the user
+and Claude verified that the real client’s first right-click and repeated
+dismiss/reopen each produced one native
 editing menu with no Chromium popup behind it. Dock hide/reopen cycles and a
 full clipboard round-trip ending in Paste remain unvalidated.
 
 `wine-11.0-steam-native-window.patch` follows the editing patch. Its closed
 process/title/size policy adds native AppKit controls over the empty top strip
 of Steam's fixed English sign-in window. Close hides that UI without a Windows
-close request; minimize follows the existing Wine path. Other windows and
-explicit Quit retain their behavior. The client geometry is unchanged.
+close request; minimize follows the existing Wine path. Other windows retain
+their original close behavior and the client geometry is unchanged. Explicit
+Quit is handled separately by the following client-shutdown patch.
 
 `wine-11.0-steam-native-bundle.patch` follows the window patch. Steam's visible
 browser helper reuses the per-bottle native app bundle Core prepares before launch;
@@ -137,20 +139,51 @@ policy before Dock promotion. Type-switch parsing matches the Cocoa policy,
 including both forms, overrides and the positional separator. The visible
 browser retains its independent bundle identity.
 
-`scripts/build-wine-native-text-dev.py` pins all three patches and rebuilds
+`wine-11.0-steam-quit.patch` follows the bundle patch. An explicit macOS Quit
+from the prepared visible Steam browser invokes `request-steam-quit` in the
+verified Core. Canonical Core/data/bottle paths and the exact private prefix
+are checked before spawn. Core validates the plain saved Steam client and
+current Windows headers, selected runtime and live mapped-code/kernel ownership,
+then sends only `steam.exe -shutdown`. There is no bottle-wide kill or saved
+game argument. The native path accepts one pending callback, isolates its file
+descriptors, loader environment and working directory, and reaps that exact
+child asynchronously. Failure preserves the UI and reports an error rather than
+quitting only the supervised helper. System termination retains Wine’s normal
+session handling. Red-close remains hide; real Steam shutdown and game/save
+outcomes need live validation.
+
+`scripts/build-wine-native-text-dev.py` pins four UI patches, plus three base
+and two DXMT Wine patches in the complete reviewed sequence, and rebuilds
 the base and DXMT macOS drivers, their x86/x64 Windows halves and both native
 NTDLL child loaders in isolated clones. Export sets stay unchanged. The
 packaged source records carry the corresponding patches. See
 [native editing validation](../docs/NATIVE_TEXT_EDITING.md) for the exact runtime
 identity, tests and limits; these changes do not establish gameplay support.
 
-The complete recognized-popup package is pinned to
+The final complete signed v12 package is independently attested as
+`sha256:cae84f3978b2e0820bbdfc95c1e9dd5fa6c79c8d1f1aca825ac86bd2afb77c29`.
+Its text-editing patch is unchanged from the build-48 recognized-popup package
 `sha256:fb91add5bbcdddef39738259595c2da592bed8afb863fccd6384ae6b1337a5ee`.
-Ten direct predecessor edges, including the captured-popup package
-`sha256:46998fc3cf95d882e14c3b5978dba2ee086c5b92e826400fda528517f3808082`,
-retain all 36 historical transitions and backup names. TLS/Steam sources keep recipe/PE gates; later reviewed native packages
-use locked, idle-only record migration and retain rollback. Query-state layout
-is checked for Unix64/PE32/PE64 and existing event/query ordinals stay fixed.
+Eleven direct predecessor edges preserve all 55 historical policy fields and
+backup names, for 66 total transitions. TLS/Steam sources retain recipe/PE
+gates; nine later reviewed predecessors use locked, idle-only record migration
+and retain rollback. Focused checks pass 77 migration and 20 graphics tests,
+including all direct sources, old destinations, seven earlier backups, owner
+refusals, post-idle package changes and lock waiting. Fresh nine-patch replay
+matches both complete source trees, exports/architectures are unchanged and
+translators remain intact. Query-state layout stays checked for Unix64/PE32/PE64
+and existing event/query ordinals remain fixed.
+
+Caskrun’s sidebar separately offers Open and polite Quit Apps while a fresh
+file-owner check reports activity; idle hides Quit and inspection failure stays
+unknown. The selected existing-server request uses only `wineboot -e -s` and
+performs no explicit Core initialization, migration or repair. Wine can still
+bootstrap if its last server exits before the control child starts. After four
+seconds or a failure, Force Quit requires explicit confirmation and an
+unsaved-work warning; it never runs automatically. The polite control child
+is canceled and reaped before the existing exact-runtime/current-ownership
+bottle force-stop action. Twenty-six Foundation state checks pass; current
+original-process live checks remain pending. No real-game claim is added.
 
 Earlier audio-device probes stalled, but normal audio-enabled Steam startup
 later succeeded after unlock and inspection of already-enabled permissions.

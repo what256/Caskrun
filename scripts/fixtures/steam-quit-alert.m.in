@@ -1,0 +1,62 @@
+/* The exact failure producer runs against inert objects, never AppKit UI. */
+#import <Foundation/Foundation.h>
+#include <assert.h>
+typedef NSInteger NSModalResponse;
+static int alerts, sheets, modals;
+static void (^completion)(NSModalResponse);
+static NSString *message, *detail;
+@interface ProbeWindow:NSObject
+@property BOOL visible;
+@property(retain) id attachedSheet;
+@end
+@implementation ProbeWindow
+@synthesize visible,attachedSheet;
+- (BOOL)isVisible { return self.visible; }
+@end
+@interface ProbeApplication:NSObject
+@property(retain) ProbeWindow *keyWindow;
+@end
+@implementation ProbeApplication
+@synthesize keyWindow;
+@end
+static ProbeApplication *probeApp;
+@interface ProbeAlert:NSObject
+@property(copy) NSString *messageText,*informativeText;
+- (void)addButtonWithTitle:(NSString *)title;
+- (void)beginSheetModalForWindow:(ProbeWindow *)window completionHandler:(void (^)(NSModalResponse))handler;
+- (NSInteger)runModal;
+@end
+@implementation ProbeAlert
+@synthesize messageText,informativeText;
+- (id)init { if((self=[super init]))alerts++;return self; }
+- (void)addButtonWithTitle:(NSString *)title { assert([title isEqualToString:@"OK"]);message=[self.messageText copy];detail=[self.informativeText copy]; }
+- (void)beginSheetModalForWindow:(ProbeWindow *)window completionHandler:(void (^)(NSModalResponse))handler
+{ assert(window==probeApp.keyWindow&&window.visible&&!completion);sheets++;completion=[handler copy]; }
+- (NSInteger)runModal { modals++;return 0; }
+@end
+#define NSWindow ProbeWindow
+#define NSAlert ProbeAlert
+#define NSApp probeApp
+@@FAILURE@@
+#undef NSWindow
+#undef NSAlert
+#undef NSApp
+static void finish(void) { assert(completion);void (^block)(NSModalResponse)=[completion copy];[completion release];completion=nil;block(0);[block release]; }
+int main(void)
+{
+    @autoreleasepool {
+        probeApp=[ProbeApplication new];probeApp.keyWindow=[[[ProbeWindow alloc] init] autorelease];probeApp.keyWindow.visible=YES;
+        CaskrunSteamQuitFailed();assert(alerts==1&&sheets==1&&!modals);
+        assert([message isEqualToString:@"Steam couldn’t quit."]);
+        assert([detail isEqualToString:@"The quit request could not be completed. Please try again."]);
+        CaskrunSteamQuitFailed();assert(alerts==1&&sheets==1);finish();
+        CaskrunSteamQuitFailed();assert(alerts==2&&sheets==2);finish();
+        probeApp.keyWindow.visible=NO;CaskrunSteamQuitFailed();assert(alerts==3&&modals==1);
+        CaskrunSteamQuitFailed();assert(alerts==4&&modals==2);
+        probeApp.keyWindow.visible=YES;probeApp.keyWindow.attachedSheet=@1;
+        CaskrunSteamQuitFailed();assert(alerts==5&&modals==3&&!completion);
+        probeApp.keyWindow=nil;CaskrunSteamQuitFailed();assert(alerts==6&&modals==4);
+        puts("exact failure producer: neutral message, duplicate suppression and sheet/modal completion passed");
+    }
+    return 0;
+}

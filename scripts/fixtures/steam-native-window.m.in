@@ -23,6 +23,10 @@ static NSArray *probeArguments;
 #define NSProcessInfo ProbeProcessInfo
 /* PROCESS_FUNCTIONS */
 #undef NSProcessInfo
+static BOOL quitRequestSucceeds=YES;
+static int quitRequests, quitFailures;
+static BOOL CaskrunRequestSteamShutdown(void) { quitRequests++; return quitRequestSucceeds; }
+static void CaskrunSteamQuitFailed(void) { quitFailures++; }
 
 @class WineWindow;
 enum { WINDOW_CLOSE_REQUESTED, WINDOW_MINIMIZE_REQUESTED, APP_QUIT_REQUESTED };
@@ -144,8 +148,8 @@ static BOOL stage_manager_enabled(void) { return NO; }
 /* WINDOW_METHODS */
 @end
 
-/* The real AppKit Quit action must reach the original producer. The fixture
- * vetoes only its own exit after recording the original terminate-later reply. */
+/* The real AppKit Quit action reaches the exact production delegate. The
+ * fixture records its managed-Cancel reply without exiting its own process. */
 @interface ProbeQuitDelegate : NSObject <NSApplicationDelegate>
 @property(assign) NSApplicationTerminateReply reply;
 @end
@@ -193,6 +197,8 @@ int main(int argc, char **argv)
         WineApplicationController *controller=[WineApplicationController sharedController];
         [NSApp setDelegate:controller];
         setenv("CASKRUN_STEAM_MODE","1",1);
+        setenv("CASKRUN_NATIVE_EXEC","1",1);
+        setenv("CASKRUN_NATIVE_IMAGE","/original-fixture/steamwebhelper.exe",1);
         arguments(@[@"wine", @"C:\\Steam\\steamwebhelper.exe"]);
         CHECK([controller caskrunSteamNativeWindowEnabled]);
         for (NSArray *args in @[@[@"wine",@"C:\\Steam\\steam.exe"],@[@"game.exe"],@[@"helper.exe",@"steamwebhelper.exe"],@[]])
@@ -246,6 +252,18 @@ int main(int argc, char **argv)
         CHECK([router windowForEvent:drag beginWindow:nil]==nil);
         CHECK([router windowForEvent:down beginWindow:window]==window); [router cancel];
         CHECK([router windowForEvent:up beginWindow:nil]==nil); [router release];
+        // Exact managed Quit producer: request failures retain the helper too.
+        [controller prepareQueue:window.queue];
+        CHECK([controller applicationShouldTerminate:NSApp]==NSTerminateCancel);
+        CHECK(quitRequests==1); CHECK(quitFailures==0); CHECK(window.queue.quitCount==0);
+        quitRequestSucceeds=NO;
+        CHECK([controller applicationShouldTerminate:NSApp]==NSTerminateCancel);
+        CHECK(quitRequests==2); CHECK(quitFailures==1); CHECK(window.queue.quitCount==0);
+        quitRequestSucceeds=YES;
+        setenv("CASKRUN_NATIVE_EXEC","0",1);
+        CHECK([controller applicationShouldTerminate:NSApp]==NSTerminateLater);
+        CHECK(quitRequests==2); CHECK(window.queue.quitCount==1);
+        window.queue.quitCount=0; setenv("CASKRUN_NATIVE_EXEC","1",1);
         if (!headless)
         {
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -288,10 +306,9 @@ int main(int argc, char **argv)
             [window.header.minimizeButton performClick:nil]; CHECK(window.queue.minimizeCount==1); CHECK(session.running);
             [window fixtureMiniaturize]; settle(); CHECK(window.miniaturized);
             [controller applicationShouldHandleReopen:NSApp hasVisibleWindows:NO]; settle(); CHECK(!window.miniaturized); CHECK(window.visible);
-            [controller prepareQueue:window.queue];
             ProbeQuitDelegate *quitDelegate=[[[ProbeQuitDelegate alloc] init] autorelease];
             [NSApp setDelegate:quitDelegate]; [NSApp terminate:nil];
-            CHECK(window.queue.quitCount==1); CHECK(quitDelegate.reply==NSTerminateLater);
+            CHECK(window.queue.quitCount==0); CHECK(quitDelegate.reply==NSTerminateCancel); CHECK(quitRequests==3);
             [NSApp setDelegate:controller];
             CHECK(session.running); [session terminate]; [session waitUntilExit]; [session release]; ownedSession=nil;
             CHECK(window.queue.closeCount==closes);
