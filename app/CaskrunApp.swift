@@ -278,7 +278,8 @@ struct CatalogInstallResult: Decodable, Sendable {
 }
 
 enum CatalogStage: String, Decodable, Sendable {
-    case ready, running, failed, installerComplete = "installer_complete", installed
+    case ready, running, failed, installerComplete = "installer_complete"
+    case preparingClient = "preparing_client", installed
 }
 
 struct CatalogAttempt: Decodable, Identifiable, Sendable {
@@ -949,6 +950,9 @@ final class CaskrunModel: ObservableObject {
     @Published var wineExecutable = initialWineExecutable()
     @Published private(set) var isQuitting = false
     @Published var isLaunching = false
+    @Published private(set) var steamStartup: SteamStartup.Progress?
+    @Published private(set) var canStopWaitingForSteam = false
+    private var steamStartupMonitor = SteamStartup.Monitor()
     @Published var activeInstallerName: String?
     @Published private(set) var canCancelManualInstaller = false
     @Published private(set) var isCancellingManualInstaller = false
@@ -1746,8 +1750,11 @@ final class CaskrunModel: ObservableObject {
         }
         guard !isQuitting && !isLaunching && !isManagingBottle && !isStoppingBottle(bottle.id) else { return }
         isLaunching = true
+        let isSteam = SteamStartup.isSteamLauncher(name: launcher.name, path: launcher.path,
+            registered: savedSteamClients.contains { $0.bottle_id == bottle.id && $0.launcher_id == launcher.id })
+        if isSteam { steamStartup = .init(elapsed: .zero) }
         Task {
-            defer { isLaunching = false }
+            defer { isLaunching = false; steamStartup = nil }
             do {
                 var command = ["run-app", bottle.id, launcher.id]
                 if !arguments.isEmpty {
@@ -1755,12 +1762,50 @@ final class CaskrunModel: ObservableObject {
                     command.append(contentsOf: arguments)
                 }
                 _ = try await callAsync(command, as: LaunchResult.self)
+                if isSteam { try await waitForSteamWindow(in: bottle, launcher: launcher) }
                 CaskrunWindowBridge.shared.hideMainWindow()
+            } catch let outcome as SteamStartup.MonitorError {
+                message = outcome.message
             } catch {
                 message = error.localizedDescription
                 onFailure?()
             }
         }
+    }
+
+    private func waitForSteamWindow(in bottle: Bottle, launcher: SavedLauncher,
+                                    cancellation: CoreInvocationCancellation? = nil) async throws {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let token = steamStartupMonitor.begin()
+        canStopWaitingForSteam = true
+        defer {
+            steamStartupMonitor.finish(token)
+            canStopWaitingForSteam = false
+            steamStartup = nil
+        }
+        repeat {
+            guard !isQuitting, !Task.isCancelled, cancellation?.isCancelRequested != true else {
+                throw CancellationError()
+            }
+            guard steamStartupMonitor.isCurrent(token) else { throw SteamStartup.MonitorError.stopped }
+            steamStartup = .init(elapsed: started.duration(to: clock.now))
+            if SteamStartup.hasVisibleClientWindow(bottleID: bottle.id, displayName: launcher.name) {
+                guard steamStartupMonitor.isCurrent(token) else { throw SteamStartup.MonitorError.stopped }
+                return
+            }
+            try await Task.sleep(for: .milliseconds(500))
+        } while started.duration(to: clock.now) < SteamStartup.timeout
+        guard steamStartupMonitor.isCurrent(token) else { throw SteamStartup.MonitorError.stopped }
+        throw SteamStartup.MonitorError.timedOut
+    }
+
+    func stopWaitingForSteam() {
+        guard canStopWaitingForSteam else { return }
+        steamStartupMonitor.stop()
+        canStopWaitingForSteam = false
+        // The polling task will report the distinct stopped outcome and release
+        // launch controls. Nothing is sent to Steam, Wine or the Core invocation.
     }
 
     func runCommand(in bottle: Bottle) {
@@ -2337,6 +2382,7 @@ final class CaskrunModel: ObservableObject {
                 activeCatalogInstall = nil
                 activeCatalogStage = nil
                 activeCatalogBottleID = nil
+                steamStartup = nil
                 catalogMonitorGeneration += 1
             }
             do {
@@ -2354,6 +2400,9 @@ final class CaskrunModel: ObservableObject {
                                                 bottle: result.bottle,
                                                 launcher: result.launcher,
                                                 setupNote: result.setup_note)
+                if entry.id == "steam" {
+                    try await waitForSteamWindow(in: result.bottle, launcher: result.launcher, cancellation: cancellation)
+                }
                 if entry.id == "steam", let appID = thenInstallSteamAppID, appID > 0,
                    !isQuitting, !cancellation.isCancelRequested {
                     do {
@@ -2364,6 +2413,10 @@ final class CaskrunModel: ObservableObject {
                     }
                 }
                 CaskrunWindowBridge.shared.hideMainWindow()
+            } catch let outcome as SteamStartup.MonitorError {
+                // Core setup succeeded. A slow or dismissed window monitor is
+                // startup feedback, never an installer failure requiring Retry.
+                message = outcome.message
             } catch {
                 canCancelCatalogInstall = false
                 refresh()
@@ -2420,6 +2473,7 @@ final class CaskrunModel: ObservableObject {
                 activeCatalogInstall = nil
                 activeCatalogStage = nil
                 activeCatalogBottleID = nil
+                steamStartup = nil
                 catalogMonitorGeneration += 1
             }
             do {
@@ -2437,7 +2491,12 @@ final class CaskrunModel: ObservableObject {
                                                 bottle: result.bottle,
                                                 launcher: result.launcher,
                                                 setupNote: result.setup_note)
+                if attempt.catalog_id == "steam" {
+                    try await waitForSteamWindow(in: result.bottle, launcher: result.launcher, cancellation: cancellation)
+                }
                 CaskrunWindowBridge.shared.hideMainWindow()
+            } catch let outcome as SteamStartup.MonitorError {
+                message = outcome.message
             } catch {
                 canCancelCatalogInstall = false
                 refresh()
@@ -4599,22 +4658,25 @@ struct CaskrunApp: App {
             HStack(spacing: 12) {
                 ProgressView().controlSize(.small)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(model.activeCatalogInstall.map { "Setting up \($0)" }
+                    Text(model.steamStartup?.title ?? model.activeCatalogInstall.map { "Setting up \($0)" }
                          ?? model.activeInstallerName.map { "Running \($0)" }
                          ?? "Opening your app")
                         .font(.subheadline.weight(.semibold))
-                    Text(model.activeCatalogInstall == nil
+                    Text(model.steamStartup?.detail ?? (model.activeCatalogInstall == nil
                          ? (model.isCancellingManualInstaller
                             ? "Stopping this setup. Caskrun will update the result shortly."
                             : "Caskrun will update this view when the program responds.")
                          : (model.isCancellingCatalogInstall
                             ? "Stopping this setup. Caskrun will update the result shortly."
-                            : catalogProgressText))
+                            : catalogProgressText)))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if model.canCancelManualInstaller && model.activeCatalogInstall == nil {
+                if model.canStopWaitingForSteam {
+                    Button("Stop waiting") { model.stopWaitingForSteam() }
+                        .help("Keep Steam running and return to Caskrun.")
+                } else if model.canCancelManualInstaller && model.activeCatalogInstall == nil {
                     Button(model.isCancellingManualInstaller ? "Canceling…" : "Cancel setup") {
                         model.cancelManualInstaller()
                     }
@@ -4729,6 +4791,7 @@ struct CaskrunApp: App {
         case .ready: "Preparing the Windows environment. This may take several minutes."
         case .running: "Running the publisher's installer. Complete any setup prompts that appear."
         case .installerComplete: "Saving the launcher in your library…"
+        case .preparingClient: "Preparing the current Steam client before opening it…"
         case .installed: "Opening the launcher. Sign in there when it appears."
         case .failed: "Setup stopped. The bottle and installer are available for retry."
         }

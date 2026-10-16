@@ -1,4 +1,4 @@
-# Demo maintenance workflows
+# Maintenance workflows
 
 The development app uses Collection/Discover navigation with named Windows bottle folders.
 Select a Windows app/game, then open **Files & Maintenance** in its details.
@@ -64,7 +64,7 @@ app aliases. Ordinary artwork backup behavior is unchanged.
 ## Diagnostics and log export
 
 `diagnostics <bottle-id>` returns a closed, versioned JSON projection:
-demo/core version, initialization state, selected engine and record agreement,
+app/core version, initialization state, selected engine and record agreement,
 renderer status, saved-app counts, known setup stage, bounded log metadata and
 fixed issue codes. It never runs Wine, migrates a record or reads log contents.
 Selected-engine health is checked separately from an old bottle record.

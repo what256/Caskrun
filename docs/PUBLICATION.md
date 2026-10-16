@@ -1,7 +1,7 @@
-# Public source demo
+# Public source publication
 
-Caskrun is in the demo phase. Its reviewed source became public on
-13 October 2026. More features and improvements are coming. Its original source
+Caskrun is an open-source Windows-app launcher for Apple Silicon Macs in active
+development. Its reviewed source became public on 13 October 2026. Its original source
 is MIT-licensed; Wine and DXMT patches keep their LGPL-2.1-or-later license,
 AnyPS5 patches are GPL-2.0-only, and the reviewed Highball data snapshot is CC0.
 See [third-party notices](../THIRD_PARTY_NOTICES.md).
@@ -28,7 +28,7 @@ These checks reduce accidental disclosure; every future upload still needs revie
 The visibility-change review checks all published branch histories and closed
 pull-request heads, author/committer metadata, source and documentation, and
 GitHub-hosted releases, issue/PR discussion, Actions artifacts and deployment
-surfaces. Source licensing, dependency notices and the demo's stated validation
+surfaces. Source licensing, dependency notices and the project's stated validation
 limits are reviewed separately. This is a publication audit, not a claim that
 the entire application has passed a vulnerability audit or a binary release gate.
 

@@ -1,5 +1,6 @@
 # Build products, local experiments, and release artifacts
 /.build/
+/.claude/
 /dist/
 /core/target/
 /target/

@@ -1,6 +1,6 @@
-# Contributing to the Caskrun demo
+# Contributing to Caskrun
 
-Caskrun is an early demo for Apple Silicon Macs. More features are coming, and app/game compatibility remains experimental. Keep feature claims tied to actual tests.
+Caskrun is an open-source Windows-app launcher for Apple Silicon Macs, in active development. Compatibility varies by application, game and graphics engine. Keep feature claims tied to actual tests, including the stage reached and any recurring failures.
 
 ## Issues and pull requests
 
@@ -8,7 +8,7 @@ Use GitHub issues for bugs, reproducible compatibility results and focused featu
 
 Keep pull requests focused. Explain the problem, resulting behavior and relevant checks; preserve existing ownership and isolation safeguards. Use original or synthetic fixtures. A source test, visible window or successful installer exit is not a gameplay result. Report untested behavior explicitly. Use [SECURITY.md](SECURITY.md) for private vulnerability reports rather than a public issue.
 
-The [feature inventory](docs/FEATURES.md) and [feature gaps](docs/FEATURE_GAPS.md) serve as the demo roadmap. There is no promised release schedule or broad game-support commitment.
+The [feature inventory](docs/FEATURES.md) and [feature gaps](docs/FEATURE_GAPS.md) serve as the development roadmap. There is no promised release schedule or broad game-support commitment.
 
 ## Original work and licenses
 

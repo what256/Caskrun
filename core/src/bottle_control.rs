@@ -50,6 +50,44 @@ pub(super) struct QuitRequest {
     pub(super) message: String,
 }
 
+const MISSING_PREFIX_OWNER: &str = "This bottle's Windows files are missing, but another process still holds files in the bottle. Close it and try again.";
+const MISSING_PREFIX_TRACKED: &str = "This bottle's Windows files are missing, but a process Caskrun started for it is still running. Caskrun cannot verify that process still belongs to this bottle, so it was not stopped.";
+
+/// A bottle whose prefix was deleted has no Wine server Caskrun could ask or
+/// stop, and Caskrun must never recreate that storage just to check. Returns
+/// false when the prefix exists, so callers continue with their usual checks.
+/// Missing storage is idle only when no tracked PID is alive and the caller's
+/// bounded owner inspection proves nothing holds files in the bottle, with the
+/// prefix still absent and the bottle directory unchanged afterwards. A live
+/// tracked PID may now belong to an unrelated app, so it is never signalled or
+/// dropped merely because it holds no bottle files.
+pub(super) fn missing_prefix_is_idle(
+    dir: &Path,
+    idle: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<bool, String> {
+    let prefix_absent = || match fs::symlink_metadata(dir.join("prefix")) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(format!("Could not inspect bottle prefix: {error}")),
+    };
+    if !prefix_absent()? {
+        return Ok(false);
+    }
+    let (dir_guard, dir_snapshot) = open_stable_directory(dir)?;
+    if !live_processes(dir)?.is_empty() {
+        return Err(MISSING_PREFIX_TRACKED.into());
+    }
+    idle(dir)?;
+    assert_same_prefix(dir, &dir_guard, &dir_snapshot)?;
+    if !prefix_absent()? {
+        return Err("Bottle prefix changed while checking for Windows apps".into());
+    }
+    if !live_processes(dir)?.is_empty() {
+        return Err(MISSING_PREFIX_TRACKED.into());
+    }
+    Ok(true)
+}
+
 fn idle_request(id: &str) -> QuitRequest {
     QuitRequest {
         bottle_id: id.into(),
@@ -87,6 +125,16 @@ fn request_quit_with_wine_checked(
 ) -> Result<QuitRequest, String> {
     cancellation::check()?;
     let lock = lock_bottle(home, id)?;
+    let missing_idle = missing_prefix_is_idle(&bottle_dir(home, id)?, |dir| {
+        if owners(dir)? == 0 {
+            Ok(())
+        } else {
+            Err(MISSING_PREFIX_OWNER.into())
+        }
+    })?;
+    if missing_idle {
+        return Ok(idle_request(id));
+    }
     let (dir, prefix, _server, prefix_guard, prefix_snapshot) =
         checked_control_paths(home, id, wine)?;
     let (dir_guard, dir_snapshot) = open_stable_directory(&dir)?;
@@ -861,6 +909,55 @@ printf 'PRIVATE=%s\n' "${WINESERVERSOCKET-}${WINELOADERNOEXEC-}${WINEPRELOADRESE
             record
         );
         assert_eq!(fs::read_dir(fixture.dir.join("logs")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn polite_quit_reports_a_deleted_prefix_idle_only_when_provable() {
+        let fixture = PoliteFixture::new(b"#!/bin/sh\ntouch \"$WINEPREFIX/unexpected-spawn\"\n");
+        let record = fs::read(fixture.dir.join("prefix-record.json")).unwrap();
+        fs::remove_dir_all(fixture.dir.join("prefix")).unwrap();
+        let quit = |owners: Result<usize, String>| {
+            let mut owners = Some(owners);
+            request_quit_with_wine_checked(
+                &fixture.home,
+                &fixture.bottle.id,
+                &fixture.wine,
+                MOCK_PROCESS_TIMEOUT,
+                |_| owners.take().expect("one bounded owner inspection"),
+            )
+        };
+        let result = quit(Ok(0)).unwrap();
+        assert!(!result.request_submitted);
+        assert!(result.log_path.is_none());
+        assert!(quit(Ok(1)).unwrap_err().contains("still holds files"));
+        assert_eq!(
+            quit(Err("ownership unknown".into())).unwrap_err(),
+            "ownership unknown"
+        );
+
+        // A live saved PID may now be an unrelated app: refuse, never signal
+        // or forget it, even though nothing holds this bottle's files.
+        let mut child = OwnedTestChild(Command::new("/bin/sleep").arg("30").spawn().unwrap());
+        save_json(
+            &fixture.dir.join("active-processes.json"),
+            &vec![child.0.id()],
+        )
+        .unwrap();
+        assert_eq!(quit(Ok(0)).unwrap_err(), MISSING_PREFIX_TRACKED);
+        assert!(child.0.try_wait().unwrap().is_none());
+        assert_eq!(
+            read_active_processes(&fixture.dir).unwrap(),
+            vec![child.0.id()]
+        );
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+
+        assert!(fs::symlink_metadata(fixture.dir.join("prefix")).is_err());
+        assert_eq!(fs::read_dir(fixture.dir.join("logs")).unwrap().count(), 0);
+        assert_eq!(
+            fs::read(fixture.dir.join("prefix-record.json")).unwrap(),
+            record
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Compatibility implementation plan
 
-_Reviewed 7 October 2026. Caskrun remains a private demo in active development._
+_Status updated 16 October 2026. Caskrun is an open-source launcher in active development. Compatibility remains specific to each app and game._
 
 The user-directed static reference review covered packaged setup orchestration, graphics configuration, shortcut handling and bottle tools. It identified architectural gaps; it did not execute CrossOver, provide its native GUI source, or establish Caskrun compatibility. No reference code, recipes, assets or runtime binaries were incorporated. The implementation work below uses original Caskrun code, publisher requirements, independently sourced upstream components and our own test results.
 
@@ -44,7 +44,7 @@ An explicit backend choice should be one mutually exclusive bottle setting. Auto
 | --- | --- | --- |
 | WineD3D | Current included path; limited Direct3D probe success, no game validation. | Keep exact tested limitations visible in compatibility results. |
 | High resolution | Real 96/192 DPI and Retina controls, idle checks, verification and rollback. **Validated on Steam:** with the control off its client is drawn at 1x and upscaled; with it on the same window is genuinely drawn at 2x. | Also measured on the engine's own builtin window, which is upscaled by default and matches native Retina applications with the control on. A DPI-unaware client such as the itch.io installer stays at 1x even with the control on, so it sharpens DPI-aware clients only. High Resolution stays optional and off by default; the user will test games later. |
-| DXMT | Independently built, integrated experimental bottle control with exact package capabilities, preserved WineD3D default, idle changes and reviewed native-v2 migration/record rollback. The separate rendering experiment passes x64/x86 hardware feature levels 10_0/11_0, shaders/readback, HWND Present and resize/recreate/destruction checks. | Finish visible-output and real-game testing. See [app integration](DXMT_APP_INTEGRATION.md) and [DXMT smoke](DXMT_SMOKE.md). |
+| DXMT | Independently built, integrated experimental bottle control with exact package capabilities, preserved WineD3D default, idle changes and reviewed native-v2 migration/record rollback. The separate rendering experiment passes x64/x86 hardware feature levels 10_0/11_0, shaders/readback, HWND Present and resize/recreate/destruction checks. A user confirmed R.E.P.O. launched and worked with DXMT on 16 October after WineD3D device creation failed. | Test sustained play, visible output quality, performance, controllers and other titles/devices. See [current game results](LAUNCHER_VALIDATION.md), [app integration](DXMT_APP_INTEGRATION.md) and [DXMT smoke](DXMT_SMOKE.md). |
 | DXVK / MoltenVK | Vulkan enumeration experiment; no successful Direct3D/game gate. | Resolve required Vulkan features and the failed Direct3D test before exposing a choice. |
 | D3DMetal | No integrated backend. | Separate component terms/source/distribution review and runtime validation. Never extract it from another app bundle. |
 | MSync | Not implemented in current Wine 11. | Coordinated client/server implementation and synchronization correctness/performance tests; an environment toggle alone adds no support. |

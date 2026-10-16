@@ -21,7 +21,7 @@ struct AppUpdatesTests {
         expect(configuration.repositoryOwner == "example" && configuration.repositoryName == "ExampleApp",
                "release repository comes from the configured feed")
         expect(CaskrunUpdateConfiguration.read([:]) == .failure(.unconfigured),
-               "source demo has a distinct unconfigured result")
+               "source build has a distinct unconfigured result")
         for name in ["SUPublicEDKey", "SUFeedURL", "SURequireSignedFeed", "SUVerifyUpdateBeforeExtraction", "SUAllowsAutomaticUpdates"] {
             var metadata = info()
             metadata.removeValue(forKey: name)
@@ -170,7 +170,7 @@ struct AppUpdatesTests {
         }, reportMessage: { messages.append($0) })
         updates.checkForUpdates()
         expect(!messages.isEmpty && preparations == 0,
-               "unconfigured demo reports unavailable without claiming up-to-date or stopping apps")
+               "unconfigured build reports unavailable without claiming up-to-date or stopping apps")
         expect(!updates.requiresInstallationFileOwnerVerification,
                "ordinary Quit and a feed-only check never arm the app replacement guard")
         updates.postponeInstallation { installed += 1 }

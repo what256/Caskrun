@@ -423,6 +423,13 @@ fn quit_one_with_attester(
     let _lock = lock_bottle(home, id)?;
     let dir = bottle_dir(home, id)?;
     let (dir_guard, dir_snapshot) = open_stable_directory(&dir)?;
+    // A deleted prefix has no Wine server to stop; never recreate it to check.
+    if bottle_control::missing_prefix_is_idle(&dir, |dir| {
+        prefix_processes::wait_until_idle(dir, timeout)
+    })? {
+        bottle_control::assert_same_prefix(&dir, &dir_guard, &dir_snapshot)?;
+        return Ok(false);
+    }
     let prefix = dir.join("prefix");
     let (prefix_guard, prefix_snapshot) = open_stable_directory(&prefix)?;
     let record_snapshot = RuntimeRecordSnapshot::read(&dir)?;
@@ -544,6 +551,29 @@ mod tests {
             fs::set_permissions(path, permissions).unwrap();
         }
         wine
+    }
+
+    #[test]
+    fn shutdown_skips_an_idle_deleted_prefix_without_recreating_it() {
+        let home = test_home();
+        let wine = fake_runtime(&home);
+        let (bottle, prefix) = initialized(&home, "Deleted prefix", &wine);
+        let dir = prefix.parent().unwrap().to_path_buf();
+        let record = fs::read(dir.join("prefix-record.json")).unwrap();
+        fs::remove_dir_all(&prefix).unwrap();
+        assert!(!quit_one(&home, &bottle.id, Some(&wine), Duration::from_secs(5)).unwrap());
+        assert!(fs::symlink_metadata(&prefix).is_err());
+        assert_eq!(fs::read(dir.join("prefix-record.json")).unwrap(), record);
+
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        save_json(&dir.join("active-processes.json"), &vec![child.id()]).unwrap();
+        let error = quit_one(&home, &bottle.id, Some(&wine), Duration::from_secs(5)).unwrap_err();
+        assert!(error.contains("still running"), "{error}");
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(fs::symlink_metadata(&prefix).is_err());
+        fs::remove_dir_all(home).unwrap();
     }
 
     fn initialized(home: &Path, name: &str, wine: &Path) -> (Bottle, PathBuf) {

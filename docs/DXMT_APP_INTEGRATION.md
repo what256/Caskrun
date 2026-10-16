@@ -1,6 +1,6 @@
 # Optional DXMT in the development app
 
-_8 October 2026. Private demo, not a release or a game-compatibility claim._
+_8 October 2026 integration snapshot. Later game results are recorded in [launcher validation](LAUNCHER_VALIDATION.md)._
 
 ## Behavior
 
@@ -139,5 +139,5 @@ checks passed and their disposable storage was removed.
 
 Game play, visible screen-pixel composition, game performance, authentication,
 other launchers, D3D12, NVAPI, DLSS, DXVK, D3DMetal and MSync remain outside this
-validation. The user will perform manual game testing later. Keep source-only
-GitHub publication private, and retain the demo wording.
+validation. Later user-led game checks are recorded in [launcher validation](LAUNCHER_VALIDATION.md).
+Source publication is authorized; binary distribution still requires its separate privacy and runtime-license review.

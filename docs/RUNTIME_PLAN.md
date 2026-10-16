@@ -2,6 +2,13 @@
 
 _Research snapshot: 23 September 2026. Independent Wine 11.0 source builds were staged in relocatable **development-only** packages inside ignored `.build/`. The current local Caskrun app/DMG includes a fresh upstream Wine 11.0 build with GnuTLS and two pinned, original Steam CEF/Dock patches. It carries the matching source archive, patch files, hashes, loader template, and notices. Earlier bundled-engine ARM64 core fresh-bottle checks passed; the latest packaged Steam live UI test after this runtime migration is pending. The app/engine are ad-hoc signed, not Developer ID signed or notarized; account sign-in and game play remain unvalidated. One separate prebuilt release archive was inspected without running it._
 
+This dated research record retains its original package and test limits. For
+the current integrated DXMT runtime, the 16 October user-confirmed R.E.P.O.
+launch and unresolved Camp Forest Green Steam API failure, see
+[launcher validation](LAUNCHER_VALIDATION.md) and
+[the current implementation plan](COMPATIBILITY_PLAN.md). Historical uses of
+“current” below refer to that earlier research snapshot.
+
 ## Decision
 
 Keep Caskrun's launcher independent of CrossOver. The local development build uses **fresh, pinned upstream Wine 11.0 source** inside Caskrun.app and runs it as a separate x86_64 process under Rosetta. Its two reviewed Caskrun patches add Steam-only CEF helper flags and native Dock identity; they leave Steam's binaries untouched. Keep the engine automatic for users; the app has no Wine picker or Settings screen. Validate the full runtime before public distribution or automatic updates. Caskrun's MIT source and packaged Wine binaries and patches retain their respective licenses and notices. ([patch record](../runtime-patches/README.md))

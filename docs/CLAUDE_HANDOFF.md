@@ -2,7 +2,7 @@
 
 Copy the prompt below into Claude with access to this repository. The status is a handoff snapshot; inspect the current files and working tree before changing anything. Local experimental records under ignored `.build/` are intentionally absent from a fresh GitHub checkout.
 
-## Current continuation note — 8 October 2026
+## Current continuation note — 16 October 2026
 
 The earlier prompt below is a snapshot. Later source work has completed
 portable user-folder/profile backup handling and bounded shortcut argument
@@ -14,9 +14,13 @@ Read [DXMT smoke](DXMT_SMOKE.md) for source pins, commands, cleanup and exact
 boundaries. The optional DXMT control is now integrated into the development app with exact
 capabilities, a preserved WineD3D default and reviewed idle native-v2 migration /
 runtime-record rollback. Read [app integration](DXMT_APP_INTEGRATION.md) before
-changing those paths. Visible output and games remain unvalidated.
-High Resolution stays optional and off by default. The user will perform
-manual game testing later.
+changing those paths. A user-led R.E.P.O. launch now works with DXMT; sustained
+play and broad compatibility are not established. Camp Forest Green has recurring
+Steam missing/not-logged-in errors despite an earlier successful launch; its
+game reports Steam API initialization failure while Steam is signed in and
+connected. The cause remains unresolved. See the
+current [launcher validation](LAUNCHER_VALIDATION.md) before making compatibility claims.
+High Resolution stays optional and off by default.
 
 The subsequent maintenance pass adds checked shortcut working folders, app
 renaming, one-time argument selection, installed-program inventory, recoverable
@@ -28,7 +32,7 @@ bullets below as current. Publisher-client failures remain unresolved.
 
 ---
 
-You are continuing **Caskrun**, an original Apple Silicon macOS app that installs and runs Windows x86/x64 software through an independently built Wine runtime. It is a **private demo in active development**. More features are coming. Improve the remaining compatibility and maintenance problems through small, verified changes. Do not promise universal Windows compatibility or CrossOver parity.
+You are continuing **Caskrun**, an original Apple Silicon macOS app that installs and runs Windows x86/x64 software through an independently built Wine runtime. It is an **open-source launcher in active development**. Improve the remaining compatibility and maintenance problems through small, verified changes. Do not promise universal Windows compatibility or CrossOver parity.
 
 ## 1. Read first and preserve the product
 
@@ -37,7 +41,7 @@ Read `docs/ICON_COMPOSITION.md`, `AGENTS.md`, `README.md`, `docs/COMPATIBILITY_P
 Keep these product decisions:
 
 - Ordinary flow: Discover → Install → publisher sign-in → install a game → Play. Select the included engine and supported defaults automatically. No Wine picker or global Settings page for ordinary users.
-- Home uses compact bottle folders. A single click opens the folder and its right inspector; double-click opens an app. Closing the inspector or pressing Escape returns to the bottle grid. Keep the small floating Home/Discover navigation and + menu.
+- Collection uses compact bottle folders for Windows apps and games, alongside browser bookmarks and explicit PS5 imports. A single click opens a folder and its right inspector; double-click opens its primary app. Closing the inspector or pressing Escape returns to the bottle grid. Keep the small floating Collection/Discover navigation and + menu.
 - The inspector retains advanced app, display/graphics, Windows-tool and maintenance controls. Useful advanced features should not clutter ordinary installation.
 - Closing Caskrun's main window keeps it available in the macOS menu bar and removes its Dock item. **Quit Caskrun** stops all Caskrun-owned Windows apps before exiting, reports unverifiable shutdown, and leaves unrelated Wine apps alone.
 - Preserve the original Caskrun application and menu-bar logo. The icon work concerns Windows apps and games.
@@ -49,7 +53,7 @@ Keep these product decisions:
 - Do not launch, alter, replace or remove an installed CrossOver or reference installation. Any further static reference inspection must be explicitly authorized by the user and respect the applicable project rules. Reference behavior is not evidence that our implementation works.
 - Do not bypass trials, activation, licence checks, anti-cheat, authentication or DRM. Do not automatically accept publisher agreements or enter credentials. Ask the user to review any required agreement; continue independent work while waiting.
 - Do not touch real user bottles, accounts, installed games or another Wine product. Use owned disposable fixtures. Never kill all Wine processes, trust only a saved PID, or change the host network to make a test pass.
-- Keep the repository private and describe it as a demo. Do not make it public, publish a release, upload binaries or push changes without the user's publication authorization. Preserve the privacy hooks and neutral Git identity. Run the staged and revision privacy checks before any authorized commit/upload; use UTC for commits. No personal names, local absolute home paths, device/bottle/session identifiers, credentials, raw logs, screenshots, downloads or build artifacts may enter source or Git history. Never print the local private-term list.
+- Public source publication and pushes are authorized by the user. Describe Caskrun as an open-source launcher in active development; keep compatibility claims tied to recorded tests. Binary releases and uploads still need their separate privacy and runtime-license review. Preserve the privacy hooks and neutral Git identity. Run the staged and revision privacy checks before any authorized commit/upload; use UTC for commits. No personal names, local absolute home paths, device/bottle/session identifiers, credentials, raw logs, screenshots, downloads or build artifacts may enter source or Git history. Never print the local private-term list.
 - Caskrun's app/core are ARM64; Windows x86/x64 support remains required. Intel Mac hardware is out of scope. The independently written icon helper is MIT; Wine patches and runtime dependencies retain their own licences, notices and corresponding-source requirements. Keep packaged notices consistent with the actual source licence.
 
 ## 3. Where the implementation lives
@@ -86,7 +90,7 @@ Read `docs/LAUNCHER_VALIDATION.md` for tested installer receipts and stage-by-st
 | Ubisoft Connect | Setup completed and saved one launcher; post-install and manual launches produced no usable client. Logs included a nested exception and framebuffer messages without a proven causal link. | Attribute the client failure before applying dependency or graphics changes. Framebuffer output alone is not a GPU diagnosis. |
 | Rockstar Games Launcher | Checked official installer started under its correct setup name. Automatic approval blocked window inspection without a further stated reason; the owned test was canceled and cleaned, with no launcher saved. | A policy block is separate from compatibility. Do not bypass it. Resume the visual/install checks through permitted tools or user observation. |
 
-Steam previously reached a usable sign-in window with one correctly named/iconed Dock item and working focus, but other relaunches intermittently appeared black. Its observed 96-DPI/1× rendering plausibly explains a soft image; that is not proven by a high-resolution Steam test. Preserve its scoped CEF/Dock patches. Recheck normal/repeated launch, focus, high-resolution quality and full quit in a disposable Steam bottle before declaring the issue fixed. No store authentication or game has yet been validated.
+Earlier Steam checks reached a usable sign-in window with one correctly named/iconed Dock item and working focus, with intermittent black relaunches. Later measurements confirmed sharper DPI-aware Steam and Wine builtin output with High Resolution on; DPI-unaware installers may remain upscaled, and the control stays optional and off by default. Preserve the scoped CEF/Dock patches. The user confirmed an R.E.P.O. launch with DXMT in an imported Steam bottle on 16 October; sustained play and the full fresh catalog-install/sign-in/download/replay journey remain unvalidated. Camp Forest Green currently fails its Steam API initialization even while Steam is signed in and connected. This is unresolved and must not be described as a proven account logout.
 
 ### GOG: original experiment, not a production fix
 
@@ -98,7 +102,12 @@ Ten original isolated check groups passed, including cross-process traffic, logi
 
 Do not bundle or promote this prototype yet. Review/reproduce its independent source, regressions and network semantics first. The generalized reproduction-driver entry point was syntax-checked after the recorded run, not rerun; validate it before relying on a new result. If the ignored record is unavailable, reconstruct a fresh original reproducer from the documented behavior and upstream Wine rather than claiming access to the prior experiment.
 
-## 5. Work in manageable phases
+## 5. Historical phased roadmap
+
+_This roadmap began before later graphics and maintenance work. The current
+continuation note and [implementation plan](COMPATIBILITY_PLAN.md) take
+precedence over older missing-feature descriptions. Preserve completed work
+and use [launcher validation](LAUNCHER_VALIDATION.md) for acceptance status._
 
 Start with a short evidence-based plan identifying the first concrete defect, code to change, isolated test and acceptance gate. Then implement that phase. Keep unrelated work separate and report actual progress; do not attempt every remaining feature in one patch.
 
@@ -116,25 +125,25 @@ Build versioned profiles with architecture/Windows/runtime requirements, verifie
 
 Create a runtime capability manifest for the exact packaged engine. Use it for apps, children, installers, tools and reboot. Only offer supported choices, with mutually exclusive explicit bottle backends and tested original automatic profiles. Preserve user DLLs/overrides; require idleness, verification and rollback for changes.
 
-- WineD3D is the current path, with limited probes and no game validation.
-- High-resolution controls really write 96/192 DPI and Retina values with idle/rollback checks; validate Steam and other client output, not just the DPI fixture.
-- DXMT is a sensible next independent Direct3D experiment. Its upstream Wine `winemac` API integration is required; dropping DLLs into the bottle is insufficient. Pin sources/licences and test x86/x64 device creation, shaders/readback, visible frames, shutdown/relaunch and a selected real game.
+- WineD3D remains the default, with limited probes; R.E.P.O. failed Direct3D device creation on that path before the user-confirmed DXMT launch.
+- High-resolution controls write verified 96/192 DPI and Retina values with idle/rollback checks. Steam and Wine builtin measurements passed; games and DPI-unaware clients require separate checks.
+- DXMT is integrated as an optional backend with original x86/x64 rendering probes and the narrow R.E.P.O. launch result. Preserve its pinned sources/licences, Wine `winemac` integration and migration safeguards; sustained play, shutdown/relaunch and broader titles remain acceptance work.
 - DXVK/MoltenVK has only Vulkan enumeration evidence and failed Direct3D gates. Resolve required capabilities before exposing a working backend choice.
 - D3DMetal needs an independent source/terms/distribution review and runtime tests; never extract another app's copy.
 - MSync is not implemented by an environment toggle. It needs coordinated client/server support and correctness/performance tests.
-- DLSS/MetalFX needs supported backend/vendor-extension integration and per-game checks.
+- MetalFX spatial scaling and DXMT frame targets have original API checks, but game image quality and performance remain unverified. DLSS, temporal reconstruction and frame generation are not implemented.
 - The current Wine build lacks GStreamer. Evaluate independently sourced media support with codec/playback tests; do not assume this explains current launcher failures.
 
 Do not add cosmetic toggles for unsupported features. Keep status planned/experimental/validated accurate.
 
 ### Phase D — finish bottle and command workflows
 
-- Preserve complete shortcut commands: checked executable, correct Windows arguments and working directory. Current discovery refuses argument-bearing `.lnk` files instead of silently launching a partial command.
-- Improve portable handling of Wine-created host-folder links without following external links or copying host data. Current export rejects absolute links; do not weaken this into unrestricted copying.
+- Preserve the implemented shortcut command handling: checked executable, Windows argument parsing and validated working directory. Unsupported commands are refused instead of silently changed.
+- Preserve the implemented path-keyed standard-folder mapping and profile-resolution handling. Unrecognised absolute links remain refused; no host data is followed or copied.
 - Add explicit icon-cache rebuild/repair, installed-component inventory, bounded diagnostic channels/export, integrity-checked compressed backups and reviewed runtime/profile updates.
 - Check existing rename, duplicate, import, delete/restore, Windows tools, controllers and shutdown through the real UI. Do not reimplement an existing feature from an outdated status row.
 - Keep session reboot's warning that it closes apps; prove upstream semantics before adding a less disruptive alternative.
-- Test import into a new independent bottle; leave the source untouched. Existing CrossOver import supports idle win64 folders, excludes proprietary metadata/engine files and external mappings, and has only synthetic validation. `.cxarchive` and 32-bit-only imports are unsupported.
+- Test import into a new independent bottle; leave the source untouched. Existing CrossOver import supports idle win64 folders, excludes proprietary metadata/engine files and external mappings, and passed a real copy/source-preservation check. A later imported-bottle R.E.P.O. launch worked with DXMT; the import picker and broad compatibility remain unverified. `.cxarchive` and 32-bit-only imports are unsupported.
 
 ## 6. Verification and cleanup gates
 

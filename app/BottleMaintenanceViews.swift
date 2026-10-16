@@ -439,6 +439,8 @@ struct BottleDiagnosticsView: View {
         switch value {
         case "bottle_changed_during_report": return "The bottle changed during this check. Refresh the report."
         case "prefix_unavailable": return "Windows files could not be read. Check the bottle's files."
+        case "prefix_missing": return "This bottle's Windows files are missing. Restore its prefix folder or a backup; Caskrun will not rebuild it empty."
+        case "registry_missing": return "This bottle's Windows registry is missing. Restore its prefix folder or a backup; retrying setup will not rebuild it."
         case "initialization_incomplete": return "Windows setup is incomplete. Retry the installation."
         case "programs_unreadable", "program_limit_reached": return "The saved app list could not be read completely."
         case "runtime_missing", "runtime_unavailable": return "The included engine is unavailable. Reinstall a complete Caskrun build."

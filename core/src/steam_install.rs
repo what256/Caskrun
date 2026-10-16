@@ -4,6 +4,8 @@
 
 use super::*;
 use sha2::{Digest, Sha256};
+use std::os::fd::FromRawFd;
+use std::os::unix::ffi::OsStrExt;
 
 // This is the Windows installer URL currently linked by Valve's public
 // https://store.steampowered.com/about/ page. It is not a compatibility claim.
@@ -46,6 +48,7 @@ pub(super) enum CatalogStage {
     Running,
     Failed,
     InstallerComplete,
+    PreparingClient,
     Installed,
 }
 
@@ -826,6 +829,372 @@ pub(super) fn is_steam_client_launcher(home: &Path, bottle_id: &str, launcher: &
         && fs::symlink_metadata(path).is_ok_and(|after| same_snapshot(&before, &after))
 }
 
+/// A recipe-only client target. Retained directory handles and the exact file
+/// snapshot prevent a concurrent rename from redirecting the bootstrap copy.
+/// As with VerifiedInstaller, this is not a hostile same-user FS boundary.
+struct RecipeSteamTarget {
+    path: PathBuf,
+    name: CString,
+    file: File,
+    snapshot: fs::Metadata,
+    digest: String,
+    machine: u16,
+    directories: Vec<(PathBuf, File, fs::Metadata)>,
+}
+
+impl RecipeSteamTarget {
+    fn open(dir: &Path) -> Result<Self, String> {
+        let prefix = dir.join("prefix");
+        for candidate in [
+            "Program Files (x86)/Steam/steam.exe",
+            "Program Files (x86)/Steam/Steam.exe",
+            "Program Files/Steam/steam.exe",
+            "Program Files/Steam/Steam.exe",
+        ] {
+            let path = prefix.join("drive_c").join(candidate);
+            let before = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("Could not inspect Steam's client: {error}")),
+            };
+            if !before.file_type().is_file() {
+                return Err("Steam's client must be a regular file, not a link".into());
+            }
+            let parent = path.parent().ok_or("Steam's client has no folder")?;
+            let mut directories = Vec::new();
+            for directory in [dir, prefix.as_path(), parent] {
+                let (guard, snapshot) = open_stable_directory(directory)?;
+                directories.push((directory.to_path_buf(), guard, snapshot));
+            }
+            let mut file = OpenOptions::new()
+                .read(true)
+                .custom_flags(O_NOFOLLOW_ANY | libc::O_NONBLOCK)
+                .open(&path)
+                .map_err(|error| format!("Could not safely open Steam's client: {error}"))?;
+            if !same_snapshot(&before, &file.metadata().map_err(|e| e.to_string())?) {
+                return Err("Steam's client changed while opening it".into());
+            }
+            let (machine, digest) = inspect_client_machine_and_digest(&mut file)?;
+            let name = CString::new(
+                path.file_name()
+                    .ok_or("Steam's client has no name")?
+                    .as_bytes(),
+            )
+            .map_err(|_| "Invalid Steam client name")?;
+            let result = Self {
+                path,
+                name,
+                file,
+                snapshot: before,
+                digest,
+                machine,
+                directories,
+            };
+            result.recheck()?;
+            return Ok(result);
+        }
+        Err("Steam's installer did not leave a usable client executable".into())
+    }
+
+    fn check_directories(&self) -> Result<(), String> {
+        for (path, guard, snapshot) in &self.directories {
+            bottle_control::assert_same_prefix(path, guard, snapshot)?;
+            // The leaf inode alone does not detect an ancestor replaced by a
+            // symlink back to a moved original tree. Reopen the complete path
+            // without following any component before a file can be replaced.
+            let (reopened, _) = open_stable_directory(path)?;
+            bottle_control::assert_same_prefix(path, &reopened, snapshot)?;
+        }
+        Ok(())
+    }
+
+    fn parent(&self) -> &File {
+        &self.directories.last().expect("Steam parent is retained").1
+    }
+
+    fn recheck(&self) -> Result<(), String> {
+        self.check_directories()?;
+        let current = fs::symlink_metadata(&self.path).map_err(|e| e.to_string())?;
+        if !current.file_type().is_file()
+            || !same_snapshot(&self.snapshot, &current)
+            || !same_snapshot(
+                &self.snapshot,
+                &self.file.metadata().map_err(|e| e.to_string())?,
+            )
+        {
+            return Err(
+                "Steam's client changed during preparation; retry after it finishes updating"
+                    .into(),
+            );
+        }
+        let (_, digest) = inspect_client_machine_and_digest(
+            &mut self.file.try_clone().map_err(|e| e.to_string())?,
+        )?;
+        if digest != self.digest
+            || !same_snapshot(
+                &self.snapshot,
+                &self.file.metadata().map_err(|e| e.to_string())?,
+            )
+            || !same_snapshot(
+                &self.snapshot,
+                &fs::symlink_metadata(&self.path).map_err(|e| e.to_string())?,
+            )
+        {
+            return Err(
+                "Steam's client changed during preparation; retry after it finishes updating"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn inspect_client_machine_and_digest(file: &mut File) -> Result<(u16, String), String> {
+    let digest = inspect_pe_and_sha256(file)?;
+    file.seek(SeekFrom::Start(0x3c))
+        .map_err(|e| e.to_string())?;
+    let mut offset = [0_u8; 4];
+    file.read_exact(&mut offset).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(u64::from(u32::from_le_bytes(offset)) + 4))
+        .map_err(|e| e.to_string())?;
+    let mut machine = [0_u8; 2];
+    file.read_exact(&mut machine).map_err(|e| e.to_string())?;
+    Ok((u16::from_le_bytes(machine), digest))
+}
+
+struct StagedSteamClient<'a> {
+    parent: &'a File,
+    name: CString,
+    file: File,
+    renamed: bool,
+}
+
+impl<'a> StagedSteamClient<'a> {
+    fn create(parent: &'a File) -> Result<Self, String> {
+        let name =
+            CString::new(format!(".caskrun-steam-bootstrap-{}.tmp", Uuid::new_v4())).unwrap();
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | O_NOFOLLOW_ANY,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(format!(
+                "Could not stage Steam's current client: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Self {
+            parent,
+            name,
+            file: unsafe { File::from_raw_fd(fd) },
+            renamed: false,
+        })
+    }
+
+    fn recheck(&mut self, expected_digest: &str) -> Result<fs::Metadata, String> {
+        let before = self.file.metadata().map_err(|e| e.to_string())?;
+        let fd = unsafe {
+            libc::openat(
+                self.parent.as_raw_fd(),
+                self.name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK | O_NOFOLLOW_ANY,
+            )
+        };
+        if fd < 0 {
+            return Err("Steam's staged client changed before installation".into());
+        }
+        let mut named = unsafe { File::from_raw_fd(fd) };
+        if !same_snapshot(&before, &named.metadata().map_err(|e| e.to_string())?) {
+            return Err("Steam's staged client changed before installation".into());
+        }
+        let (machine, digest) = inspect_client_machine_and_digest(&mut named)?;
+        if machine != 0x8664
+            || digest != expected_digest
+            || !same_snapshot(&before, &named.metadata().map_err(|e| e.to_string())?)
+            || !same_snapshot(&before, &self.file.metadata().map_err(|e| e.to_string())?)
+        {
+            return Err(
+                "Steam's staged current client failed verification; the original was preserved"
+                    .into(),
+            );
+        }
+        Ok(before)
+    }
+}
+
+impl Drop for StagedSteamClient<'_> {
+    fn drop(&mut self) {
+        if !self.renamed {
+            // Remove only our unique name through the retained parent handle.
+            unsafe {
+                libc::unlinkat(self.parent.as_raw_fd(), self.name.as_ptr(), 0);
+            }
+        }
+    }
+}
+
+fn prepare_recipe_bootstrap(
+    home: &Path,
+    wine: &Path,
+    bottle: &Bottle,
+    attempt: &mut CatalogAttempt,
+) -> Result<(), String> {
+    prepare_recipe_bootstrap_with(
+        home,
+        wine,
+        bottle,
+        attempt,
+        steam_bootstrap::download_verified_bootstrap,
+        |home, id, wine| {
+            // The caller holds this bottle's lock. Stop only this recipe's
+            // installer-started session; never relock through the public API.
+            let stopped = bottle_control::quit_recorded_windows_apps_locked(
+                home,
+                id,
+                wine,
+                Duration::from_secs(8),
+            )?;
+            if !stopped.server_stopped {
+                return Err("Steam's installer session has not stopped; retry after closing its Windows apps".into());
+            }
+            Ok(())
+        },
+    )
+}
+
+fn prepare_recipe_bootstrap_with(
+    home: &Path,
+    wine: &Path,
+    bottle: &Bottle,
+    attempt: &mut CatalogAttempt,
+    download: impl FnOnce(&Path) -> Result<steam_bootstrap::DownloadedBootstrap, String>,
+    stop_locked: impl FnOnce(&Path, &str, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if attempt.bottle_id != bottle.id
+        || attempt.catalog_id != "steam"
+        || !matches!(
+            attempt.stage,
+            CatalogStage::InstallerComplete | CatalogStage::PreparingClient
+        )
+    {
+        return Err("Only an unfinished Steam recipe can prepare its initial client".into());
+    }
+    // A crash/cancel during download must resume here, without repeating setup.
+    attempt.set_stage(CatalogStage::InstallerComplete);
+    let result = (|| {
+        cancellation::check()?;
+        let dir = bottle_dir(home, &bottle.id)?;
+        let original = RecipeSteamTarget::open(&dir)?;
+        if original.machine == 0x8664 {
+            return Ok(());
+        }
+        attempt.set_stage(CatalogStage::PreparingClient);
+        save_catalog_attempt(home, attempt)?;
+        {
+            let _lock = lock_bottle(home, &bottle.id)?;
+            original.recheck()?;
+            // SteamSetup can auto-start its old updater even after the direct
+            // installer exits. Stop that initial recipe session before HTTP,
+            // so a failed download leaves a genuinely idle, retryable bottle.
+            stop_locked(home, &bottle.id, wine)?;
+            cancellation::check()?;
+            refuse_running_bottle(&dir)?;
+            refuse_live_wine_server(&dir, WINE_SERVER_CHECK_TIMEOUT, Some(wine))?;
+            prefix_processes::wait_until_idle(&dir, Duration::from_secs(8))?;
+            original.recheck()?;
+        }
+        // Network work does not hold the ordinary bottle launch lock.
+        let prepared = download(home)?;
+        cancellation::check()?;
+        let _lock = lock_bottle(home, &bottle.id)?;
+        let saved = catalog_attempt(home, &bottle.id)?
+            .ok_or("Steam's recipe receipt disappeared during preparation")?;
+        if saved.catalog_id != "steam"
+            || saved.stage != CatalogStage::PreparingClient
+            || saved.installer_sha256 != attempt.installer_sha256
+        {
+            return Err("Steam's recipe changed during preparation".into());
+        }
+        original.check_directories()?;
+        // A separately started normal updater may have completed migration.
+        // Preserve its new client; do not stop another session after HTTP.
+        let current = RecipeSteamTarget::open(&dir)?;
+        if current.machine == 0x8664 {
+            return Ok(());
+        }
+        original.recheck()?;
+        cancellation::check()?;
+        original.recheck()?;
+        refuse_running_bottle(&dir)?;
+        refuse_live_wine_server(&dir, WINE_SERVER_CHECK_TIMEOUT, Some(wine))?;
+        prefix_processes::wait_until_idle(&dir, Duration::from_secs(8))?;
+        refuse_running_bottle(&dir)?;
+        original.recheck()?;
+        let mut source = prepared.open_verified()?;
+        let mut staged = StagedSteamClient::create(original.parent())?;
+        copy_cancellable(&mut source, &mut staged.file)?;
+        std::io::Write::flush(&mut staged.file).map_err(|e| e.to_string())?;
+        staged
+            .file
+            .set_permissions(original.snapshot.permissions())
+            .map_err(|e| e.to_string())?;
+        staged.file.sync_all().map_err(|e| e.to_string())?;
+        let (machine, digest) = inspect_client_machine_and_digest(&mut staged.file)?;
+        if machine != 0x8664 || digest != prepared.sha256() {
+            return Err(
+                "Steam's staged current client failed verification; the original was preserved"
+                    .into(),
+            );
+        }
+        // Recheck both inputs and activity immediately before the atomic swap.
+        let _ = prepared.open_verified()?;
+        original.recheck()?;
+        refuse_running_bottle(&dir)?;
+        if prefix_processes::owner_count(&dir)? != 0 {
+            return Err("Windows apps started while Steam's client was prepared; the original was preserved".into());
+        }
+        cancellation::check()?;
+        let staged_snapshot = staged.recheck(prepared.sha256())?;
+        original.recheck()?;
+        let renamed = unsafe {
+            libc::renameat(
+                original.parent().as_raw_fd(),
+                staged.name.as_ptr(),
+                original.parent().as_raw_fd(),
+                original.name.as_ptr(),
+            )
+        };
+        if renamed != 0 {
+            return Err(format!(
+                "Could not install Steam's current client: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        staged.renamed = true;
+        original.check_directories()?;
+        let installed = RecipeSteamTarget::open(&dir)?;
+        if installed.machine != 0x8664
+            || installed.digest != prepared.sha256()
+            || installed.snapshot.dev() != staged_snapshot.dev()
+            || installed.snapshot.ino() != staged_snapshot.ino()
+        {
+            return Err("Steam's current client changed immediately after installation; retry before opening it".into());
+        }
+        Ok(())
+    })();
+    // A bootstrap failure is a follow-up to completed setup. Failed would run
+    // the old installer again on retry and repeat its 32-bit update crash.
+    attempt.set_stage(CatalogStage::InstallerComplete);
+    match result {
+        Ok(()) => save_catalog_attempt(home, attempt),
+        Err(error) => Err(followup_issue(home, attempt, error)),
+    }
+}
+
 fn run_steam_installer(
     home: &Path,
     wine: &Path,
@@ -836,6 +1205,10 @@ fn run_steam_installer(
 ) -> Result<CatalogInstallResult, String> {
     let dir = bottle_dir(home, &bottle.id)?;
     cancellation::check()?;
+    if attempt.stage == CatalogStage::PreparingClient {
+        attempt.set_stage(CatalogStage::InstallerComplete);
+        save_catalog_attempt(home, &attempt)?;
+    }
     let mut recovered_from_timeout = attempt.last_error.as_deref() == Some(STEAM_RECOVERY_NOTE);
     if attempt.stage != CatalogStage::InstallerComplete {
         attempt.set_stage(CatalogStage::Running);
@@ -922,6 +1295,7 @@ fn run_steam_installer(
         save_catalog_attempt(home, &attempt)?;
     }
     cancellation::check()?;
+    prepare_recipe_bootstrap(home, wine, &bottle, &mut attempt)?;
     let steam = steam_launcher_path(&dir).ok_or_else(|| {
         failed_attempt(
             home,
@@ -1003,11 +1377,16 @@ mod tests {
 
     fn fake_steam_client(path: &Path, machine: u16) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut bytes = vec![0_u8; 0x86];
+        let mut bytes = vec![0_u8; MIN_INSTALLER_BYTES as usize];
         bytes[..2].copy_from_slice(b"MZ");
         bytes[0x3c..0x40].copy_from_slice(&0x80_u32.to_le_bytes());
         bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
         bytes[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+        bytes[0x86..0x88].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[0x94..0x96].copy_from_slice(&240_u16.to_le_bytes());
+        bytes[0x96..0x98].copy_from_slice(&2_u16.to_le_bytes());
+        let magic: u16 = if machine == 0x8664 { 0x20b } else { 0x10b };
+        bytes[0x98..0x9a].copy_from_slice(&magic.to_le_bytes());
         fs::write(path, bytes).unwrap();
     }
 
@@ -1152,8 +1531,9 @@ mod tests {
     fn fake_wine_with_executable(home: &Path, installer_exit: i32, executable: &str) -> PathBuf {
         assert!(matches!(executable, "Steam.exe" | "steam.exe"));
         let wine = home.join("wine");
+        fake_steam_client(&home.join("wine.client"), 0x8664);
         let script = format!(
-            "#!/bin/sh\nprintf '%s|%s\\n' \"$1\" \"${{CASKRUN_STEAM_MODE-}}\" >> \"$WINEPREFIX/launch-mode.txt\"\nprintf '%s|%s\\n' \"$1\" \"${{2-}}\" >> \"$WINEPREFIX/launch-arguments.txt\"\ncase \"$1\" in\n  *SteamSetup.exe)\n    test \"$2\" = /S || exit 91\n    echo installing >> \"$WINEPREFIX/installer-invocations.txt\"\n    if test {installer_exit} -eq 0; then\n      mkdir -p \"$WINEPREFIX/drive_c/Program Files (x86)/Steam\"\n      touch \"$WINEPREFIX/drive_c/Program Files (x86)/Steam/{executable}\"\n    fi\n    exit {installer_exit};;\n  *Steam.exe|*steam.exe) echo launched-Steam; exit 0;;\n  *) exit 92;;\nesac\n"
+            "#!/bin/sh\nprintf '%s|%s\\n' \"$1\" \"${{CASKRUN_STEAM_MODE-}}\" >> \"$WINEPREFIX/launch-mode.txt\"\nprintf '%s|%s\\n' \"$1\" \"${{2-}}\" >> \"$WINEPREFIX/launch-arguments.txt\"\ncase \"$1\" in\n  *SteamSetup.exe)\n    test \"$2\" = /S || exit 91\n    echo installing >> \"$WINEPREFIX/installer-invocations.txt\"\n    if test {installer_exit} -eq 0; then\n      mkdir -p \"$WINEPREFIX/drive_c/Program Files (x86)/Steam\"\n      cp \"$0.client\" \"$WINEPREFIX/drive_c/Program Files (x86)/Steam/{executable}\"\n    fi\n    exit {installer_exit};;\n  *Steam.exe|*steam.exe) echo launched-Steam; exit 0;;\n  *) exit 92;;\nesac\n"
         );
         fs::write(&wine, script).unwrap();
         let boot = home.join("wineboot");
@@ -1166,6 +1546,381 @@ mod tests {
             fs::set_permissions(path, permissions).unwrap();
         }
         wine
+    }
+
+    fn bootstrap_fixture() -> (PathBuf, PathBuf, Bottle, CatalogAttempt, PathBuf) {
+        let home = test_home();
+        fs::create_dir_all(&home).unwrap();
+        let wine = fake_wine(&home, 0);
+        let bottle = create(&home, "Steam").unwrap();
+        ensure_prefix_with_wine(&home, &bottle.id, &wine).unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let digest = fake_installer(&dir.join("installers/SteamSetup.exe"));
+        let client = dir.join("prefix/drive_c/Program Files (x86)/Steam/Steam.exe");
+        fake_steam_client(&client, 0x014c);
+        let mut attempt =
+            CatalogAttempt::new(&bottle.id, "steam", digest, STEAM_INSTALLER_URL.into()).unwrap();
+        attempt.set_stage(CatalogStage::InstallerComplete);
+        save_catalog_attempt(&home, &attempt).unwrap();
+        (home, wine, bottle, attempt, client)
+    }
+
+    fn current_test_client(home: &Path) -> Vec<u8> {
+        let path = home.join("current-test-client.exe");
+        fake_steam_client(&path, 0x8664);
+        let mut bytes = fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() = 42;
+        fs::remove_file(path).unwrap();
+        steam_bootstrap::inspect_x64_pe(&bytes).unwrap();
+        bytes
+    }
+
+    fn assert_no_staged_client(client: &Path) {
+        assert!(
+            fs::read_dir(client.parent().unwrap())
+                .unwrap()
+                .all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".caskrun-steam-bootstrap-")
+                })
+        );
+    }
+
+    #[test]
+    fn recipe_updates_only_its_32_bit_bootstrap_then_retry_skips_setup() {
+        let (home, wine, bottle, mut attempt, client) = bootstrap_fixture();
+        let old = fs::read(&client).unwrap();
+        let payload = current_test_client(&home);
+        let mut stopped = false;
+        prepare_recipe_bootstrap_with(
+            &home,
+            &wine,
+            &bottle,
+            &mut attempt,
+            |home| steam_bootstrap::from_test_payload(home, &payload),
+            |_, _, _| {
+                assert_eq!(fs::read(&client).unwrap(), old);
+                stopped = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(stopped);
+        assert_eq!(fs::read(&client).unwrap(), payload);
+        assert_eq!(attempt.stage, CatalogStage::InstallerComplete);
+        assert_no_staged_client(&client);
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let result = retry_catalog_with_wine(&home, &bottle.id, &wine).unwrap();
+        assert_eq!(result.bottle.id, bottle.id);
+        assert!(!dir.join("prefix/installer-invocations.txt").exists());
+        assert_eq!(
+            catalog_attempt(&home, &bottle.id).unwrap().unwrap().stage,
+            CatalogStage::Installed
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn recipe_preserves_existing_64_bit_client_without_network_or_stop() {
+        let (home, wine, bottle, mut attempt, client) = bootstrap_fixture();
+        fake_steam_client(&client, 0x8664);
+        let before = fs::read(&client).unwrap();
+        let snapshot = fs::metadata(&client).unwrap();
+        prepare_recipe_bootstrap_with(
+            &home,
+            &wine,
+            &bottle,
+            &mut attempt,
+            |_| panic!("a current client must not trigger a download"),
+            |_, _, _| panic!("a current client must not be stopped"),
+        )
+        .unwrap();
+        assert!(same_snapshot(&snapshot, &fs::metadata(&client).unwrap()));
+        assert_eq!(fs::read(&client).unwrap(), before);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_download_failure_and_cancellation_preserve_completed_setup_for_retry() {
+        let (home, wine, bottle, mut attempt, client) = bootstrap_fixture();
+        let before = fs::read(&client).unwrap();
+        for message in ["download unavailable", cancellation::ERROR] {
+            let error = prepare_recipe_bootstrap_with(
+                &home,
+                &wine,
+                &bottle,
+                &mut attempt,
+                |_| Err(message.into()),
+                |_, _, _| Ok(()),
+            )
+            .unwrap_err();
+            assert_eq!(error, message);
+            let saved = catalog_attempt(&home, &bottle.id).unwrap().unwrap();
+            assert_eq!(saved.stage, CatalogStage::InstallerComplete);
+            assert_eq!(saved.last_error.as_deref(), Some(message));
+            assert_eq!(fs::read(&client).unwrap(), before);
+            assert_no_staged_client(&client);
+        }
+        // A previous app exit during PreparingClient resumes the same phase.
+        attempt.set_stage(CatalogStage::PreparingClient);
+        save_catalog_attempt(&home, &attempt).unwrap();
+        fake_steam_client(&client, 0x8664);
+        retry_catalog_with_wine(&home, &bottle.id, &wine).unwrap();
+        assert!(
+            !bottle_dir(&home, &bottle.id)
+                .unwrap()
+                .join("prefix/installer-invocations.txt")
+                .exists()
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn installed_or_unrelated_receipts_cannot_authorize_bootstrap_replacement() {
+        let (home, wine, bottle, mut attempt, client) = bootstrap_fixture();
+        let before = fs::read(&client).unwrap();
+        attempt.set_stage(CatalogStage::Installed);
+        assert!(
+            prepare_recipe_bootstrap_with(
+                &home,
+                &wine,
+                &bottle,
+                &mut attempt,
+                |_| panic!("installed clients must not download"),
+                |_, _, _| panic!("installed clients must not stop")
+            )
+            .unwrap_err()
+            .contains("unfinished Steam recipe")
+        );
+        attempt.set_stage(CatalogStage::InstallerComplete);
+        attempt.catalog_id = "gog-galaxy".into();
+        assert!(
+            prepare_recipe_bootstrap_with(
+                &home,
+                &wine,
+                &bottle,
+                &mut attempt,
+                |_| panic!("unrelated clients must not download"),
+                |_, _, _| panic!("unrelated clients must not stop")
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&client).unwrap(), before);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_replacement_refuses_changed_target_or_parent_link() {
+        for swap_parent in [false, true] {
+            let (home, wine, bottle, mut attempt, client) = bootstrap_fixture();
+            let payload = current_test_client(&home);
+            let parent = client.parent().unwrap();
+            let saved_parent = parent.with_file_name("Steam-retained");
+            let error = prepare_recipe_bootstrap_with(
+                &home,
+                &wine,
+                &bottle,
+                &mut attempt,
+                |home| {
+                    if swap_parent {
+                        fs::rename(parent, &saved_parent).unwrap();
+                        symlink(&saved_parent, parent).unwrap();
+                    } else {
+                        let mut changed = fs::read(&client).unwrap();
+                        *changed.last_mut().unwrap() = 7;
+                        fs::write(&client, changed).unwrap();
+                    }
+                    steam_bootstrap::from_test_payload(home, &payload)
+                },
+                |_, _, _| Ok(()),
+            )
+            .unwrap_err();
+            assert!(error.contains("changed"), "{error}");
+            assert_ne!(fs::read(&client).unwrap(), payload);
+            assert_eq!(attempt.stage, CatalogStage::InstallerComplete);
+            fs::remove_dir_all(home).unwrap();
+        }
+    }
+
+    #[test]
+    fn bootstrap_replacement_refuses_a_live_tracked_pid_after_stop() {
+        let (home, wine, bottle, mut attempt, client) = bootstrap_fixture();
+        let before = fs::read(&client).unwrap();
+        let payload = current_test_client(&home);
+        let error = prepare_recipe_bootstrap_with(
+            &home,
+            &wine,
+            &bottle,
+            &mut attempt,
+            |home| steam_bootstrap::from_test_payload(home, &payload),
+            |home, id, _| {
+                save_json(
+                    &bottle_dir(home, id)?.join("active-processes.json"),
+                    &vec![std::process::id()],
+                )
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("Close Windows apps"), "{error}");
+        assert_eq!(fs::read(&client).unwrap(), before);
+        assert_no_staged_client(&client);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_new_launch_during_bootstrap_download_is_never_stopped_or_replaced() {
+        let (home, wine, bottle, mut attempt, client) = bootstrap_fixture();
+        let before = fs::read(&client).unwrap();
+        let payload = current_test_client(&home);
+        let stops = std::cell::Cell::new(0);
+        let error = prepare_recipe_bootstrap_with(
+            &home,
+            &wine,
+            &bottle,
+            &mut attempt,
+            |home| {
+                assert_eq!(
+                    stops.get(),
+                    1,
+                    "initial installer session is stopped before HTTP"
+                );
+                save_json(
+                    &bottle_dir(home, &bottle.id)?.join("active-processes.json"),
+                    &vec![std::process::id()],
+                )?;
+                steam_bootstrap::from_test_payload(home, &payload)
+            },
+            |_, _, _| {
+                stops.set(stops.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("Close Windows apps"), "{error}");
+        assert_eq!(
+            stops.get(),
+            1,
+            "a new session must not receive another stop"
+        );
+        assert_eq!(fs::read(&client).unwrap(), before);
+        assert_no_staged_client(&client);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn recipe_refuses_a_linked_client_before_network_or_stop() {
+        let (home, wine, bottle, mut attempt, client) = bootstrap_fixture();
+        let outside = home.join("outside-client.exe");
+        fake_steam_client(&outside, 0x014c);
+        let before = fs::read(&outside).unwrap();
+        fs::remove_file(&client).unwrap();
+        symlink(&outside, &client).unwrap();
+        assert!(
+            prepare_recipe_bootstrap_with(
+                &home,
+                &wine,
+                &bottle,
+                &mut attempt,
+                |_| panic!("linked clients must not download"),
+                |_, _, _| panic!("linked clients must not stop"),
+            )
+            .unwrap_err()
+            .contains("regular file")
+        );
+        assert_eq!(fs::read(&outside).unwrap(), before);
+        assert!(
+            fs::symlink_metadata(&client)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_directory_guard_refuses_a_linked_intermediate_ancestor() {
+        let (home, _, bottle, _, client) = bootstrap_fixture();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let target = RecipeSteamTarget::open(&dir).unwrap();
+        let before = fs::read(&client).unwrap();
+        let programs = dir.join("prefix/drive_c/Program Files (x86)");
+        let moved = home.join("moved-programs");
+        fs::rename(&programs, &moved).unwrap();
+        symlink(&moved, &programs).unwrap();
+        // Every retained leaf still names the original inode through the new
+        // link, including Steam's folder. The full-path check must refuse it.
+        for (path, guard, snapshot) in &target.directories {
+            bottle_control::assert_same_prefix(path, guard, snapshot).unwrap();
+        }
+        assert!(target.check_directories().is_err());
+        assert_eq!(fs::read(moved.join("Steam/Steam.exe")).unwrap(), before);
+        assert_no_staged_client(&moved.join("Steam/Steam.exe"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_replacement_refuses_modified_prepared_payload_and_failed_stop() {
+        for invalid_payload in [false, true] {
+            let (home, wine, bottle, mut attempt, client) = bootstrap_fixture();
+            let before = fs::read(&client).unwrap();
+            let payload = current_test_client(&home);
+            let error = prepare_recipe_bootstrap_with(
+                &home,
+                &wine,
+                &bottle,
+                &mut attempt,
+                |home| {
+                    let prepared = steam_bootstrap::from_test_payload(home, &payload)?;
+                    if invalid_payload {
+                        let mut changed = payload.clone();
+                        *changed.last_mut().unwrap() = 9;
+                        fs::write(prepared.path(), changed).unwrap();
+                    }
+                    Ok(prepared)
+                },
+                |_, _, _| {
+                    if invalid_payload {
+                        Ok(())
+                    } else {
+                        Err("installer session still running".into())
+                    }
+                },
+            )
+            .unwrap_err();
+            assert!(
+                error.contains(if invalid_payload {
+                    "changed"
+                } else {
+                    "still running"
+                }),
+                "{error}"
+            );
+            assert_eq!(fs::read(&client).unwrap(), before);
+            assert_no_staged_client(&client);
+            assert_eq!(attempt.stage, CatalogStage::InstallerComplete);
+            fs::remove_dir_all(home).unwrap();
+        }
+    }
+
+    #[test]
+    fn staged_bootstrap_name_cannot_be_exchanged_for_a_link() {
+        let (home, _, _, _, client) = bootstrap_fixture();
+        let parent = open_stable_directory(client.parent().unwrap()).unwrap().0;
+        let mut staged = StagedSteamClient::create(&parent).unwrap();
+        let path = client
+            .parent()
+            .unwrap()
+            .join(OsStr::from_bytes(staged.name.to_bytes()));
+        fs::remove_file(&path).unwrap();
+        symlink(&client, &path).unwrap();
+        assert!(staged.recheck(&"0".repeat(64)).is_err());
+        drop(staged);
+        assert!(!path.exists());
+        assert!(client.is_file());
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
@@ -1635,7 +2390,7 @@ mod tests {
         let sha256 = fake_installer(&installer);
         let steam = dir.join("prefix/drive_c/Program Files (x86)/Steam/Steam.exe");
         fs::create_dir_all(steam.parent().unwrap()).unwrap();
-        fs::write(&steam, b"fake Steam").unwrap();
+        fake_steam_client(&steam, 0x8664);
         let mut attempt =
             CatalogAttempt::new(&bottle.id, "steam", sha256, STEAM_INSTALLER_URL.into()).unwrap();
         attempt.set_stage(CatalogStage::InstallerComplete);
@@ -1730,7 +2485,7 @@ mod tests {
         let dir = bottle_dir(&home, &bottle.id).unwrap();
         let steam = dir.join("prefix/drive_c/Program Files (x86)/Steam/Steam.exe");
         fs::create_dir_all(steam.parent().unwrap()).unwrap();
-        fake_installer(&steam);
+        fake_steam_client(&steam, 0x8664);
         let mut attempt = catalog_attempt(&home, &bottle.id).unwrap().unwrap();
         attempt.set_failure("Steam installer timeout true");
         save_catalog_attempt(&home, &attempt).unwrap();

@@ -53,6 +53,7 @@ enum Initialization {
     Uninitialized,
     Initialized,
     Incomplete,
+    Missing,
     Unavailable,
 }
 
@@ -113,6 +114,7 @@ enum InstallerStage {
     Running,
     Failed,
     InstallerComplete,
+    PreparingClient,
     Installed,
 }
 
@@ -161,6 +163,8 @@ enum LogAge {
 enum Issue {
     BottleChangedDuringReport,
     PrefixUnavailable,
+    PrefixMissing,
+    RegistryMissing,
     InitializationIncomplete,
     ProgramsUnreadable,
     ProgramLimitReached,
@@ -245,45 +249,84 @@ fn known_identity(value: Option<&str>) -> Option<&'static str> {
     })
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RecordState {
+    Absent,
+    Valid,
+    Unreadable,
+}
+
+fn record_state(dir: &Path) -> RecordState {
+    match json_file(&dir.join("prefix-record.json"), SMALL_RECORD_BYTES) {
+        Ok(None) => RecordState::Absent,
+        // Match the runtime summary: serde would also accept an array form.
+        Ok(Some(value)) if value.is_object() && PrefixRecord::deserialize(&value).is_ok() => {
+            RecordState::Valid
+        }
+        Ok(Some(_)) | Err(_) => RecordState::Unreadable,
+    }
+}
+
 fn initialization(dir: &Path, issues: &mut Vec<Issue>) -> Initialization {
+    // The runtime record is written after Wine creates the registry, so a
+    // valid record without Windows files means they were lost, not that the
+    // bottle is new. A record that cannot be trusted proves neither.
+    let record = record_state(dir);
+    if record == RecordState::Unreadable {
+        issue(issues, Issue::RuntimeRecordUnreadable);
+    }
+    let unavailable = |issues: &mut Vec<Issue>| {
+        issue(issues, Issue::PrefixUnavailable);
+        Initialization::Unavailable
+    };
     let prefix = dir.join("prefix");
     match fs::symlink_metadata(&prefix) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Initialization::Uninitialized,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match record {
+            RecordState::Absent => Initialization::Uninitialized,
+            RecordState::Valid => {
+                issue(issues, Issue::PrefixMissing);
+                Initialization::Missing
+            }
+            RecordState::Unreadable => Initialization::Unavailable,
+        },
         Ok(metadata) if metadata.file_type().is_dir() => {
             let Ok((_guard, snapshot)) = open_stable_directory(&prefix) else {
-                issue(issues, Issue::PrefixUnavailable);
-                return Initialization::Unavailable;
+                return unavailable(issues);
             };
-            let mut regular = 0;
-            for name in ["system.reg", "user.reg", "userdef.reg"] {
+            let mut present = [false; 3];
+            for (index, name) in ["system.reg", "user.reg", "userdef.reg"].iter().enumerate() {
                 match fs::symlink_metadata(prefix.join(name)) {
-                    Ok(metadata) if metadata.file_type().is_file() => regular += 1,
+                    Ok(metadata) if metadata.file_type().is_file() => present[index] = true,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    _ => {
-                        issue(issues, Issue::PrefixUnavailable);
-                        return Initialization::Unavailable;
-                    }
+                    _ => return unavailable(issues),
                 }
             }
             if !fs::symlink_metadata(&prefix)
                 .is_ok_and(|current| same_snapshot(&snapshot, &current))
             {
-                issue(issues, Issue::PrefixUnavailable);
-                return Initialization::Unavailable;
+                return unavailable(issues);
             }
-            match regular {
-                0 => Initialization::Uninitialized,
-                3 => Initialization::Initialized,
-                _ => {
+            let [system, user, defaults] = present;
+            match (system, user || defaults, record) {
+                (true, _, _) if user && defaults => Initialization::Initialized,
+                (true, _, _) | (false, true, RecordState::Absent) => {
                     issue(issues, Issue::InitializationIncomplete);
                     Initialization::Incomplete
                 }
+                (false, false, RecordState::Absent) => Initialization::Uninitialized,
+                // Launch refuses to rebuild these; retrying setup cannot help.
+                (false, false, RecordState::Valid) => {
+                    issue(issues, Issue::PrefixMissing);
+                    Initialization::Missing
+                }
+                (false, true, RecordState::Valid) => {
+                    issue(issues, Issue::RegistryMissing);
+                    Initialization::Missing
+                }
+                (false, _, RecordState::Unreadable) => Initialization::Unavailable,
             }
         }
-        _ => {
-            issue(issues, Issue::PrefixUnavailable);
-            Initialization::Unavailable
-        }
+        _ => unavailable(issues),
     }
 }
 
@@ -654,7 +697,7 @@ fn report_with_wine(
         format: REPORT_FORMAT,
         version: 1,
         core_version: env!("CARGO_PKG_VERSION"),
-        phase: "demo",
+        phase: "development",
         bottle: BottleSummary {
             initialization,
             saved_program_count,
@@ -752,13 +795,98 @@ mod tests {
     }
 
     #[test]
+    fn recorded_bottle_without_windows_files_is_missing_not_uninitialized() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.dir.join("prefix-record.json"),
+            br#"{"wine_path":"/fixture/wine"}"#,
+        )
+        .unwrap();
+        let report = fixture.report();
+        assert_eq!(report["bottle"]["initialization"], "missing");
+        assert!(has_issue(&report, "prefix_missing"));
+        assert_eq!(fs::read_dir(fixture.dir.join("prefix")).unwrap().count(), 0);
+
+        fs::remove_dir(fixture.dir.join("prefix")).unwrap();
+        let report = fixture.report();
+        assert_eq!(report["bottle"]["initialization"], "missing");
+        assert!(has_issue(&report, "prefix_missing"));
+        assert!(!fixture.dir.join("prefix").exists());
+
+        // A record that cannot be trusted is not reported as a valid,
+        // initialized bottle whose files went missing.
+        for record in [&b"not json"[..], br#"["wine_path"]"#] {
+            fs::write(fixture.dir.join("prefix-record.json"), record).unwrap();
+            let report = fixture.report();
+            assert_eq!(report["bottle"]["initialization"], "unavailable");
+            assert!(has_issue(&report, "runtime_record_unreadable"));
+            assert!(!has_issue(&report, "prefix_missing"));
+        }
+        fs::remove_file(fixture.dir.join("prefix-record.json")).unwrap();
+        fs::create_dir(fixture.dir.join("prefix-record.json")).unwrap();
+        let report = fixture.report();
+        assert_eq!(report["bottle"]["initialization"], "unavailable");
+        assert!(has_issue(&report, "runtime_record_unreadable"));
+        assert!(!has_issue(&report, "prefix_missing"));
+        fs::remove_dir(fixture.dir.join("prefix-record.json")).unwrap();
+
+        let report = fixture.report();
+        assert_eq!(report["bottle"]["initialization"], "uninitialized");
+        assert!(!has_issue(&report, "prefix_missing"));
+        assert!(!fixture.dir.join("prefix").exists());
+    }
+
+    #[test]
+    fn recorded_bottle_with_partial_registry_reports_missing_registry_not_retry() {
+        let fixture = Fixture::new();
+        let prefix = fixture.dir.join("prefix");
+        fs::write(prefix.join("user.reg"), b"user").unwrap();
+        fs::write(prefix.join("userdef.reg"), b"defaults").unwrap();
+        let report = fixture.report();
+        assert_eq!(report["bottle"]["initialization"], "incomplete");
+        assert!(has_issue(&report, "initialization_incomplete"));
+
+        fs::write(
+            fixture.dir.join("prefix-record.json"),
+            br#"{"wine_path":"/fixture/wine"}"#,
+        )
+        .unwrap();
+        for remaining in [&["user.reg", "userdef.reg"][..], &["user.reg"][..]] {
+            for name in ["user.reg", "userdef.reg"] {
+                let path = prefix.join(name);
+                if remaining.contains(&name) {
+                    fs::write(&path, name).unwrap();
+                } else if path.exists() {
+                    fs::remove_file(&path).unwrap();
+                }
+            }
+            let report = fixture.report();
+            assert_eq!(report["bottle"]["initialization"], "missing");
+            assert!(has_issue(&report, "registry_missing"));
+            assert!(!has_issue(&report, "initialization_incomplete"));
+            assert!(!prefix.join("system.reg").exists());
+        }
+
+        fs::write(prefix.join("system.reg"), b"system").unwrap();
+        let report = fixture.report();
+        assert_eq!(report["bottle"]["initialization"], "incomplete");
+        assert!(!has_issue(&report, "registry_missing"));
+        fs::write(prefix.join("userdef.reg"), b"defaults").unwrap();
+        let report = fixture.report();
+        assert_eq!(report["bottle"]["initialization"], "initialized");
+        assert!(report["issues"].as_array().unwrap().iter().all(|value| {
+            !value.as_str().unwrap().contains("missing") || value == "runtime_missing"
+        }));
+    }
+
+    #[test]
     fn uninitialized_missing_runtime_report_is_small_and_does_not_create_storage() {
         let fixture = Fixture::new();
         let before = fs::read_dir(&fixture.dir).unwrap().count();
         let report = fixture.report();
         assert_eq!(report["format"], REPORT_FORMAT);
         assert_eq!(report["version"], 1);
-        assert_eq!(report["phase"], "demo");
+        assert_eq!(report["phase"], "development");
         assert_eq!(report["bottle"]["initialization"], "uninitialized");
         assert_eq!(report["bottle"]["saved_program_count"], 0);
         assert_eq!(report["runtime"]["availability"], "missing");
@@ -771,6 +899,24 @@ mod tests {
         assert!(fixture.dir.join("prefix").is_dir());
         assert_eq!(fs::read_dir(fixture.dir.join("prefix")).unwrap().count(), 0);
         assert!(!fixture.dir.join("logs").exists());
+    }
+
+    #[test]
+    fn preparing_steam_client_is_a_known_installer_stage() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.dir.join("catalog-attempt.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1, "bottle_id": fixture.bottle.id,
+                "catalog_id": "steam", "stage": "preparing_client"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let report = fixture.report();
+        assert_eq!(report["installer"]["stage"], "preparing_client");
+        assert_eq!(report["installer"]["has_issue"], false);
+        assert!(!has_issue(&report, "installer_record_unreadable"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Workflow gaps against CrossOver Mac
 
-Audited **2026-09-23** against Caskrun's SwiftUI app, Rust core, catalog, and [feature inventory](FEATURES.md). This is a requirements and acceptance checklist, not a claim of CrossOver compatibility. **Implemented** means the Caskrun source has the behavior; **experimental** means only a development or narrow smoke path exists; **missing** means there is no working path. All eight catalog entries now have experimental automatic installers. The current local development app/DMG contains fresh upstream Wine 11.0 with pinned Caskrun Steam CEF and Dock patches and source receipts. Neither that package nor any catalog entry has a verified account sign-in or game-play result.
+Audited **2026-09-23** against Caskrun's SwiftUI app, Rust core, catalog, and [feature inventory](FEATURES.md). This is a requirements and acceptance checklist, not a claim of CrossOver compatibility. **Implemented** means the Caskrun source has the behavior; **experimental** means only a development or narrow smoke path exists; **missing** means there is no working path. At that audit, the eight catalog entries had experimental automatic installers and the local package used independently built Wine 11.0 with original Steam CEF/Dock patches and source receipts. Those isolated installer tests did not verify account sign-in or gameplay. Current results are recorded below and in the linked validation record.
 
 CodeWeavers' public guide describes the intended user journey: find an app, click **Install**, accept any required component prompts, then launch its icon from Home or its bottle. The [Steam walkthrough](https://support.codeweavers.com/en_US/installing-steam-in-crossover) says its install profile selects the bottle type, dependencies, and download locations; the user signs in **inside Steam**, then selects games in Steam. The [Mac user guide](https://support.codeweavers.com/en_US/crossover-mac-user-guide) makes bottle and install-detail changes optional for listed apps. Caskrun should match that simplicity with original code, assets, and recipes from independently licensed sources. The user should not need to locate Wine or configure a bottle to install a supported app.
 
@@ -8,9 +8,10 @@ Current source and validation status are maintained in [the feature inventory](F
 
 ## Current validation
 
-The October Collection update replaces Home with a flat game/app grid, one
-platform/type filter menu and platform-specific details. Local Steam/Epic/GOG
-readers are exposed again, without a separate Library or Game reports page.
+Collection replaces Home and groups Windows apps and locally discovered
+Steam/Epic/GOG games into bottle folders, alongside browser bookmarks and
+explicit PS5 imports. One platform/type filter menu and platform-specific
+details remain, without a separate Library or Game reports page.
 The optional PS5 adapter has original fixture checks only; engine/gameplay,
 controller/save and native window identity checks remain for the user.
 
@@ -19,13 +20,27 @@ The October maintenance pass adds installed-program inventory, icon-cache
 rebuilding, local diagnostic/log export, app renaming and one-time arguments,
 checked shortcut working folders, bottle notes, Windows-version control and
 compressed integrity-checked backups. See [maintenance workflows](DEMO_MAINTENANCE.md)
-and the [manual demo checklist](MANUAL_TEST_CHECKLIST.md). Historical audit
+and the [manual validation checklist](MANUAL_TEST_CHECKLIST.md). Historical audit
 details below retain their original evidence scope; these features do not
 resolve the recorded publisher-client failures.
 
 The [launcher validation workflow and results](LAUNCHER_VALIDATION.md) tracks the October test round, independently of this older requirements audit. Native names/icons, installer completion, a usable sign-in window, authentication, and gameplay are separate acceptance stages. Source tests and successful downloads do not upgrade a launcher’s compatibility status.
 
-## Ship-order checklist
+On 16 October 2026, the user confirmed that R.E.P.O. launched and worked
+with DXMT in an imported Steam bottle. Fresh catalog setup, sustained play,
+replay, controllers and broad game compatibility are separate gates. Camp
+Forest Green's recurring Steam missing/not-logged-in error remains unresolved:
+its game reports Steam API initialization failure while Steam is signed in
+and connected. See [current results](LAUNCHER_VALIDATION.md).
+
+## Historical audit and acceptance backlog
+
+The sections below retain earlier audit wording and unfinished acceptance
+gates, including superseded “Status now” cells. Use the current validation
+above, [feature inventory](FEATURES.md) and
+[implementation plan](COMPATIBILITY_PLAN.md) when deciding what is still missing.
+
+### Ship-order checklist
 
 - [ ] **P0:** Validate the included independent Wine engine from a clean-install ARM64 app and DMG on a separate Apple Silicon Mac.
 - [ ] **P0:** Validate the new one-action Steam setup end to end, including trusted installer provenance, required components, progress, cancellation, and restart behavior.

@@ -6,7 +6,7 @@ import Sparkle
 #endif
 
 /// The feed and key come from reviewed release packaging, never user input or
-/// an authenticated GitHub session. A source-only demo has neither configured.
+/// an authenticated GitHub session. A source-only build has neither configured.
 struct CaskrunUpdateConfiguration: Equatable {
     let feedURL: URL
     let publicKey: String
@@ -258,7 +258,7 @@ final class CaskrunAppUpdates: NSObject, ObservableObject {
             unavailableMessage = "This build does not include the updater framework. Signed GitHub updates will be available in a release build."
         case .failure(.unconfigured):
             configuration = nil
-            unavailableMessage = "Signed GitHub updates are not published for this demo yet. Your installed apps and bottles are unchanged."
+            unavailableMessage = "Signed GitHub updates are not published for this build yet. Your installed apps and bottles are unchanged."
         case .failure(.invalid):
             configuration = nil
             unavailableMessage = "This build's update configuration could not be verified. No update was downloaded or installed."

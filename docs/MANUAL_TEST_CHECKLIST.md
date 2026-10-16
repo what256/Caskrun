@@ -1,4 +1,4 @@
-# Final manual demo checks
+# Manual validation checklist
 
 Use a disposable bottle first. Keep credentials inside publisher apps. Do not
 publish raw logs or bottle backups; the structured diagnostic report excludes
@@ -66,9 +66,12 @@ setup exit code or saved EXE alone is not a passing client result.
 
 ## Remaining implementation and external gates
 
-This build is a private demo. It has no validated game profiles or broad
-publisher compatibility. DXVK, D3DMetal, Direct3D 12, MSync, DLSS/MetalFX and
-media support need separate runtime work and evidence. Dependency recipes and
+Caskrun is in active development. User-led R.E.P.O. launch checks passed with
+DXMT; sustained play and broad publisher compatibility remain separate checks.
+Camp Forest Green has a recurring Steam API initialization error under investigation.
+DXVK, D3DMetal, Direct3D 12, MSync, DLSS, temporal reconstruction and media
+support need separate runtime work and evidence. The existing MetalFX spatial
+control still needs game image-quality and performance checks. Dependency recipes and
 repair, persistent Finder shortcuts,
 file associations, storage migration and update delivery remain unfinished.
 Developer ID signing/notarization, a separate-Mac clean-install check and the

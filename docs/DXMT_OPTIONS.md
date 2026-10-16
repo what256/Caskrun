@@ -1,6 +1,6 @@
 # Optional DXMT controls
 
-_Private demo. These controls do not establish game compatibility or a performance advantage over another application._
+_Optional graphics controls. Compatibility and performance must be checked per game._
 
 ## Behavior
 

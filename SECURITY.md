@@ -1,6 +1,6 @@
 # Security reporting
 
-Caskrun is a source demo in active development. There is no stable binary release or guaranteed security-support window. Reports against the current default branch are welcome; fixes and response times are best effort.
+Caskrun is an open-source Windows-app launcher in active development. There is no stable binary release or guaranteed security-support window. Reports against the current default branch are welcome; fixes and response times are best effort.
 
 ## Report privately
 

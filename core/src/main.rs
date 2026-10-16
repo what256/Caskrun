@@ -25,6 +25,7 @@ mod runtime_identity;
 mod runtime_migration;
 mod runtime_probe;
 mod shutdown;
+mod steam_bootstrap;
 mod steam_install;
 mod steam_library;
 mod wine_tools;
@@ -2336,6 +2337,47 @@ fn wait_for_registry(prefix: &Path, log_path: &Path, timeout: Duration) -> Resul
     }
 }
 
+const MISSING_PREFIX_ERROR: &str = "This bottle's Windows files are missing from its prefix folder. Caskrun did not create an empty replacement. Restore the original prefix folder or a bottle backup, or delete this bottle.";
+const MISSING_REGISTRY_ERROR: &str = "This bottle's Windows registry is missing. Caskrun did not reinitialize it because that would discard installed-app settings. Restore the original prefix folder or a bottle backup.";
+
+// The runtime record is written only after Wine created this prefix's
+// registry. A recorded bottle without its prefix or registry lost Windows
+// files; rebuilding it would hide that loss behind an empty prefix and replace
+// the record that identifies the engine its apps were installed with.
+fn recorded_prefix(dir: &Path) -> Result<PathBuf, String> {
+    let prefix = dir.join("prefix");
+    match fs::symlink_metadata(&prefix) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Err("Bottle prefix must be a real directory".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(MISSING_PREFIX_ERROR.into());
+        }
+        Err(error) => return Err(format!("Could not inspect bottle prefix: {error}")),
+    }
+    let _ = open_stable_directory(&prefix)?;
+    match fs::symlink_metadata(prefix.join("system.reg")) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(prefix),
+        Ok(_) => Err("Bottle registry must be a regular file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(MISSING_REGISTRY_ERROR.into())
+        }
+        Err(error) => Err(format!("Could not inspect bottle registry: {error}")),
+    }
+}
+
+// Read-only and storage-free, so callers can run it before migration, XDG
+// setup, working-directory checks or wineboot touch anything in the bottle.
+fn refuse_lost_recorded_prefix(dir: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(dir.join("prefix-record.json")) {
+        Ok(metadata) if metadata.file_type().is_file() => recorded_prefix(dir).map(|_| ()),
+        Ok(_) => Err("Bottle initialization record must be a regular file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Could not inspect bottle initialization record: {error}"
+        )),
+    }
+}
+
 fn ensure_prefix_with_wine(home: &Path, id: &str, wine: &Path) -> Result<PrefixResult, String> {
     ensure_prefix_with_wine_timeout(home, id, wine, Duration::from_secs(120))
 }
@@ -2346,6 +2388,7 @@ fn ensure_prefix_with_wine_timeout(
     wine: &Path,
     timeout: Duration,
 ) -> Result<PrefixResult, String> {
+    refuse_lost_recorded_prefix(&bottle_dir(home, id)?)?;
     let migration = runtime_migration::maybe_migrate_bundled_runtime(home, id, wine)?;
     let result = ensure_prefix_without_migration(home, id, wine, timeout);
     if result.is_err()
@@ -2368,22 +2411,29 @@ fn ensure_prefix_without_migration(
 ) -> Result<PrefixResult, String> {
     cancellation::check()?;
     let dir = bottle_dir(home, id)?;
-    let prefix = real_subdirectory(&dir, "prefix")?;
-    let xdg = bottle_xdg::for_bottle(&dir)?;
     let record_path = dir.join("prefix-record.json");
+    let recorded = match fs::symlink_metadata(&record_path) {
+        Ok(metadata) if metadata.file_type().is_file() => true,
+        Ok(_) => return Err("Bottle initialization record must be a regular file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(format!(
+                "Could not inspect bottle initialization record: {error}"
+            ));
+        }
+    };
+    let prefix = if recorded {
+        recorded_prefix(&dir)?
+    } else {
+        real_subdirectory(&dir, "prefix")?
+    };
+    let xdg = bottle_xdg::for_bottle(&dir)?;
     let resolved_wine = wine
         .canonicalize()
         .map_err(|e| e.to_string())?
         .display()
         .to_string();
-    let record_metadata = fs::symlink_metadata(&record_path);
-    if record_metadata
-        .as_ref()
-        .is_ok_and(|metadata| !metadata.file_type().is_file())
-    {
-        return Err("Bottle initialization record must be a regular file".into());
-    }
-    if record_metadata.is_ok() && path_is_real_file(&prefix.join("system.reg")) {
+    if recorded {
         let mut record: PrefixRecord =
             serde_json::from_slice(&fs::read(&record_path).map_err(|e| e.to_string())?)
                 .map_err(|e| format!("Invalid bottle initialization record: {e}"))?;
@@ -3006,6 +3056,9 @@ fn start_launch_with_wine_checked(
     pre_spawn: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(Child, PathBuf), String> {
     cancellation::check()?;
+    // A recorded bottle whose Windows files are gone must fail before any
+    // launch check, migration or initialization can recreate its storage.
+    refuse_lost_recorded_prefix(&bottle_dir(home, id)?)?;
     // Validate a saved shortcut's directory before taking a write lock or
     // initializing/migrating Wine. A rejected directory leaves no launch state.
     let working_directory = flags
@@ -4359,6 +4412,154 @@ mod tests {
         let other_wine = home.join("other-wine");
         fs::copy(&wine, &other_wine).unwrap();
         assert!(ensure_prefix_with_wine(&home, &bottle.id, &other_wine).is_err());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn recorded_bottle_with_missing_windows_files_is_never_rebuilt() {
+        let home = test_home();
+        let bottle = create(&home, "Test").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let wine = home.join("fake-wine");
+        let wineboot = home.join("wineboot");
+        let boots = home.join("wineboot-runs");
+        fs::write(&wine, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(
+            &wineboot,
+            format!(
+                "#!/bin/sh\necho run >> '{}'\nprintf saved > \"$WINEPREFIX/system.reg\"\n",
+                boots.display()
+            ),
+        )
+        .unwrap();
+        for path in [&wine, &wineboot] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            ensure_prefix_with_wine(&home, &bottle.id, &wine)
+                .unwrap()
+                .initialized
+        );
+        fs::write(dir.join("prefix/saved-game.dat"), b"user data").unwrap();
+        let record = fs::read(dir.join("prefix-record.json")).unwrap();
+        let exe = home.join("sample.exe");
+        fs::write(&exe, b"placeholder").unwrap();
+
+        // The prefix was deleted or moved away by the user or another tool.
+        // Without its XDG and log folders, any attempt to rebuild is visible.
+        let moved = home.join("moved-prefix");
+        fs::rename(dir.join("prefix"), &moved).unwrap();
+        fs::remove_dir_all(dir.join("xdg")).unwrap();
+        fs::remove_dir_all(dir.join("logs")).unwrap();
+        let error = ensure_prefix_with_wine(&home, &bottle.id, &wine)
+            .err()
+            .unwrap();
+        assert_eq!(error, MISSING_PREFIX_ERROR);
+        // Missing Windows files are reported before the app path is checked.
+        for app in [&exe, &home.join("missing.exe")] {
+            assert_eq!(
+                launch_with_wine(&home, &bottle.id, app, &wine)
+                    .err()
+                    .unwrap(),
+                MISSING_PREFIX_ERROR
+            );
+        }
+        for steam_mode in [false, true] {
+            assert_eq!(
+                launch_with_wine_args_in_directory(
+                    &home,
+                    &bottle.id,
+                    &exe,
+                    &wine,
+                    &[],
+                    steam_mode,
+                    Some("drive_c/Games"),
+                )
+                .err()
+                .unwrap(),
+                MISSING_PREFIX_ERROR
+            );
+        }
+        for absent in ["prefix", "xdg", "logs", "active-processes.json"] {
+            assert!(fs::symlink_metadata(dir.join(absent)).is_err(), "{absent}");
+        }
+        assert_eq!(fs::read(dir.join("prefix-record.json")).unwrap(), record);
+
+        // Restored files are adopted unchanged, without another wineboot.
+        fs::rename(&moved, dir.join("prefix")).unwrap();
+        fs::remove_file(dir.join("prefix/system.reg")).unwrap();
+        fs::write(dir.join("prefix/user.reg"), b"saved").unwrap();
+        assert_eq!(
+            ensure_prefix_with_wine(&home, &bottle.id, &wine)
+                .err()
+                .unwrap(),
+            MISSING_REGISTRY_ERROR
+        );
+        for app in [&exe, &home.join("missing.exe")] {
+            assert_eq!(
+                launch_with_wine(&home, &bottle.id, app, &wine)
+                    .err()
+                    .unwrap(),
+                MISSING_REGISTRY_ERROR
+            );
+            assert_eq!(
+                launch_with_wine_args_in_directory(
+                    &home,
+                    &bottle.id,
+                    app,
+                    &wine,
+                    &[],
+                    true,
+                    Some("drive_c/Games"),
+                )
+                .err()
+                .unwrap(),
+                MISSING_REGISTRY_ERROR
+            );
+        }
+        assert!(!dir.join("prefix/system.reg").exists());
+        assert!(fs::symlink_metadata(dir.join("logs")).is_err());
+        fs::write(dir.join("prefix/system.reg"), b"saved").unwrap();
+        assert!(
+            !ensure_prefix_with_wine(&home, &bottle.id, &wine)
+                .unwrap()
+                .initialized
+        );
+        assert_eq!(fs::read(dir.join("prefix-record.json")).unwrap(), record);
+        assert_eq!(
+            fs::read(dir.join("prefix/saved-game.dat")).unwrap(),
+            b"user data"
+        );
+        assert_eq!(fs::read_to_string(&boots).unwrap(), "run\n");
+        assert!(read_active_processes(&dir).unwrap().is_empty());
+
+        // A bottle that was never initialized still gets its first prefix.
+        let fresh = create(&home, "Fresh").unwrap();
+        let fresh_dir = bottle_dir(&home, &fresh.id).unwrap();
+        fs::remove_dir(fresh_dir.join("prefix")).unwrap();
+        assert!(
+            ensure_prefix_with_wine(&home, &fresh.id, &wine)
+                .unwrap()
+                .initialized
+        );
+        assert!(fresh_dir.join("prefix/system.reg").is_file());
+
+        // An imported prefix without a Caskrun record remains adoptable.
+        let imported = create(&home, "Imported").unwrap();
+        let imported_dir = bottle_dir(&home, &imported.id).unwrap();
+        fs::write(imported_dir.join("prefix/system.reg"), b"imported").unwrap();
+        fs::write(imported_dir.join("prefix/saved-game.dat"), b"imported data").unwrap();
+        assert!(
+            ensure_prefix_with_wine(&home, &imported.id, &wine)
+                .unwrap()
+                .initialized
+        );
+        assert_eq!(
+            fs::read(imported_dir.join("prefix/saved-game.dat")).unwrap(),
+            b"imported data"
+        );
+        assert!(imported_dir.join("prefix-record.json").is_file());
+        assert_eq!(fs::read_to_string(&boots).unwrap(), "run\nrun\nrun\n");
         fs::remove_dir_all(home).unwrap();
     }
 

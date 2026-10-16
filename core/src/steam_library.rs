@@ -28,6 +28,9 @@ const MAX_SHORTCUT_BYTES: u64 = 32 * 1024;
 const MAX_SHORTCUT_ENTRIES: usize = 4_096;
 const MAX_SHORTCUT_DEPTH: usize = 5;
 const FULLY_INSTALLED: u32 = 4;
+// Steam keeps the installed bit and the game folder while it removes files.
+// An uninstalling game is not launchable and must not stay in the library.
+const UNINSTALLING: u32 = 2048;
 // Darwin O_NONBLOCK prevents a regular-file-to-FIFO race from waiting in open.
 const O_NONBLOCK: i32 = 0x0000_0004;
 
@@ -382,7 +385,7 @@ fn scan_library(
         else {
             continue;
         };
-        if flags & FULLY_INSTALLED == 0 {
+        if flags & FULLY_INSTALLED == 0 || flags & UNINSTALLING != 0 {
             continue;
         }
         let Some(name) = unique_text(state, "name").map(str::trim) else {
@@ -1063,6 +1066,8 @@ mod tests {
         fixture.manifest(&fixture.steam, 5, 5, "Traversal", "../Spacewar", 4);
         fixture.manifest(&fixture.steam, 6, 6, "Windows traversal", r"..\Spacewar", 4);
         fixture.manifest(&fixture.steam, 7, 7, "", "Spacewar", 4);
+        fs::create_dir_all(common.join("Leaving")).unwrap();
+        fixture.manifest(&fixture.steam, 11, 11, "Uninstalling", "Leaving", 4 | 2048);
         fs::write(
             fixture.steam.join("steamapps/appmanifest_8.acf"),
             "\"AppState\" { \"appid\" \"8\"",

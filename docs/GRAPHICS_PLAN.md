@@ -1,8 +1,8 @@
 # Graphics compatibility path
 
-_Research began 23 September 2026; later gates and app integration are recorded below. This is an implementation/evidence record, not a claim that a Windows game renders in Caskrun._
+_Research began 23 September 2026; later gates and app integration are recorded below. Current user-led game results are scoped to the title and setup tested; they do not establish general compatibility._
 
-Caskrun's default remains WineD3D in its independently built Wine 11.0 engine. The current demo additionally exposes verified, optional DXMT and its frame target and MetalFX spatial scaling controls. Original x64/x86 API matrices passed; no real game, displayed frame rate, controller or image-quality result has been established. See [app integration](DXMT_APP_INTEGRATION.md) and [optional-control evidence](DXMT_OPTIONS.md). The older Vulkan experiments below remain separate from the bundled path.
+Caskrun's default remains WineD3D in its independently built Wine 11.0 engine. Caskrun additionally exposes verified, optional DXMT and its frame target and MetalFX spatial scaling controls. Original x64/x86 API matrices passed, and a later user-led R.E.P.O. launch worked with DXMT after WineD3D device creation failed. Sustained gameplay, displayed frame rate, controllers and image quality remain separate validation steps. See [app integration](DXMT_APP_INTEGRATION.md) and [optional-control evidence](DXMT_OPTIONS.md). The older Vulkan experiments below remain separate from the bundled path.
 
 An [isolated full Wine/Vulkan candidate](VULKAN_CANDIDATE.md) has since passed fresh-bottle x64 and x86 Vulkan device enumeration after relocation and removal of its build tree. It remains outside the app and DMG. Direct3D translation and game rendering remain unverified, so the current bundled WineD3D path is unchanged.
 

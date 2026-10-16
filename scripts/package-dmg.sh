@@ -9,7 +9,7 @@ APP="$BUILD_ROOT/Caskrun.app"
 case "${CASKRUN_PACKAGE_RUNTIME_VARIANT:-native-apps}" in
   steam) RUNTIME="$PROJECT_ROOT/.build/steam-wine-runtime-dev" ;;
   native-apps)
-    NATIVE_RUNTIME_NAME="${CASKRUN_PACKAGE_NATIVE_RUNTIME_NAME:-dxmt-wine-runtime-dev-v4}"
+    NATIVE_RUNTIME_NAME="${CASKRUN_PACKAGE_NATIVE_RUNTIME_NAME:-native-text-wine-runtime-dev-v12}"
     case "$NATIVE_RUNTIME_NAME" in
       ''|.*|*/*) print -u2 "Invalid native runtime package name."; exit 64 ;;
     esac
@@ -46,6 +46,10 @@ if [[ "${CASKRUN_PACKAGE_RUNTIME_VARIANT:-native-apps}" == native-apps ]]; then
     print -u2 "Missing complete per-EXE native app identity package."; exit 66
   fi
 fi
+# Equality with a copied tree is insufficient if Finder or another tool has
+# already changed the retained source. Core's exact reviewed identities are
+# the approval policy, checked before compilation or artifact replacement.
+python3 -B "$PROJECT_ROOT/scripts/check-runtime-package.py" "$RUNTIME"
 if [[ -e "$APP" || -L "$APP" ]] && ! is_generated_app "$APP"; then
   print -u2 "Refusing to replace an unrecognized app: $APP"
   exit 1
@@ -136,17 +140,8 @@ ditto "$RUNTIME" "$STAGED_APP/Contents/Resources/wine-runtime"
 # image here would invalidate its exact content identity and bottle records.
 codesign --force --sign - "$STAGED_APP"
 codesign --verify --deep --strict "$STAGED_APP"
-python3 -B - "$PROJECT_ROOT" "$RUNTIME" "$STAGED_APP/Contents/Resources/wine-runtime" <<'PY'
-import importlib.util
-from pathlib import Path
-import sys
-repo, original, packaged = map(Path, sys.argv[1:])
-spec = importlib.util.spec_from_file_location('dxmt_package', repo / 'scripts/package-wine-runtime-dxmt-dev.py')
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-if module.tree_identity(original) != module.tree_identity(packaged):
-    raise SystemExit('Signing changed the exact bundled engine; preserving the old app')
-PY
+python3 -B "$PROJECT_ROOT/scripts/check-runtime-package.py" \
+  "$RUNTIME" "$STAGED_APP/Contents/Resources/wine-runtime"
 if [[ "$(lipo -archs "$STAGED_APP/Contents/MacOS/Caskrun")" != arm64 ||
       "$(lipo -archs "$STAGED_APP/Contents/MacOS/caskrun-core")" != arm64 ||
       "$(lipo -archs "$STAGED_APP/Contents/Resources/wine-runtime/runtime/bin/wine")" != x86_64 ]]; then
@@ -170,6 +165,8 @@ fi
 mkdir -p "$STAGE"
 touch "$STAGE/.caskrun-dmg-stage"
 ditto "$STAGED_APP" "$STAGE/Caskrun.app"
+python3 -B "$PROJECT_ROOT/scripts/check-runtime-package.py" \
+  "$RUNTIME" "$STAGE/Caskrun.app/Contents/Resources/wine-runtime"
 ln -s /Applications "$STAGE/Applications"
 cp "$PROJECT_ROOT/LICENSE" "$STAGE/LICENSE.txt"
 cat > "$STAGE/READ ME.txt" <<'NOTE'
@@ -196,6 +193,8 @@ printf '%s  %s\n' "$DIGEST" "$DMG" > "$TEMP_SHA"
 
 # Replace the app, image, and checksum as one guarded transaction. A failed
 # move or post-move checksum restores the previous verified artifacts.
+python3 -B "$PROJECT_ROOT/scripts/check-runtime-package.py" \
+  "$RUNTIME" "$STAGED_APP/Contents/Resources/wine-runtime"
 "$PROJECT_ROOT/scripts/assert-app-idle.sh" "$APP"
 if [[ -e "$APP" || -L "$APP" ]]; then mv "$APP" "$PREVIOUS_APP"; fi
 if [[ -e "$DMG" || -L "$DMG" ]]; then mv "$DMG" "$PREVIOUS_DMG"; fi

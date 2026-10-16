@@ -1,6 +1,40 @@
 # Launcher validation workflow
 
-Caskrun is a demo in active development. More features are coming, and the repository remains private. An installer download, a saved executable, or a returned process ID does not prove launcher or game compatibility.
+Caskrun is an open-source launcher in active development. Compatibility is recorded per app, game and tested stage. An installer download, a saved executable, or a returned process ID does not prove launcher or game compatibility.
+
+## User-led game checks — 16 October 2026
+
+- **Installed app:** the existing ad-hoc signed build was moved into Applications,
+  retaining the same verified runtime identity. Remembering its new location did
+  not run Wine initialization or copy the user's games.
+- **R.E.P.O.:** its earlier WineD3D path failed to create a Direct3D 11 device.
+  Selecting the included DXMT backend in the imported Steam bottle allowed the
+  game to launch, and the user confirmed it worked. This is a launch result for
+  that title and setup; sustained play, multiplayer, performance, controllers and
+  other devices remain separate tests.
+- **Camp Forest Green:** the launcher's own offline option opened its interface
+  after its server was unreachable. The user reported an initial success, then
+  a recurring Steam missing/not-logged-in message. A subsequent Play attempt
+  reproduced the game's Steam API initialization failure while the bottle's
+  Steam client was signed in and connected. The executable's working directory,
+  supplied AppID file and Steam client paths were present. The cause remains
+  unresolved; opening the launcher does not establish working gameplay. Its
+  existing registered Steam shortcut reproduced the same failure. An original
+  diagnostic using the supplied API library confirmed client detection and
+  successful client-library loading, followed by failed API initialization.
+  A [firsthand Steam Deck report](https://www.reddit.com/r/FridayThe13thGame/comments/1vkx522/camp_forest_green_on_steam_deck/)
+  describes installing Crab Game as a fix for this message; that dependency
+  check remains untested here and is not a verified Mac fix.
+
+A separate original diagnostic exposed a Wine startup fault for an executable
+outside every mapped DOS drive in a C:-only prefix. The same owned probe ran
+from C:. This does not explain Camp's mapped executable; repairing the external
+Unix-path fallback remains outstanding. Temporary probe files inside the
+bottle were removed after verifying that no process held them open.
+
+These checks used the user's existing bottle. No test cleanup, forced shutdown,
+account change or game-file repair was performed as part of the inspection.
+Earlier isolated installer results below retain their original dated scope.
 
 ## Library and graphics phase
 
@@ -196,7 +230,7 @@ Caskrun states that imported programs keep their settings and data only when the
 
 The earlier profile-restoration round passed 267 Rust unit tests and 2 integration tests, with 2 existing tests ignored. Parallel runs exposed timing-sensitive failures, so that serial result was not a clean parallel-suite result. Its Python harness, publication-privacy and catalog checks passed 47 tests; the native UI typechecked and a signed candidate app verified its signature. The subsequent maintenance phase passed 375 Rust unit tests and 6 integration tests, with 2 existing tests ignored, plus 97 Python checks and 10 Swift argument checks. The library phase adds focused browser, compatibility-data, publisher-manifest and Steam-request checks; its graphics matrix is recorded separately above. Earlier adaptive-renderer image cases and packaged-core artwork checks retain their original scope. These tests cover source behavior, API probes and fixtures, not real store authentication or games.
 
-See the separate [feature inventory](FEATURES.md) for the demo's limitations.
+See the separate [feature inventory](FEATURES.md) for the current compatibility limits.
 
 
 ## Library phase packaged checks — 8 October 2026
@@ -297,3 +331,69 @@ Normal Command-Q exited the installed app successfully against that same
 library, preserving the recorded predecessor and existing backups; the app
 then reopened. The bundled Wine package is unchanged from build 49. No Windows
 client or game was launched for this host-only regression check.
+
+## Fresh Steam setup and startup feedback
+
+**Observed failure:** a fresh setup completed its initial Windows 32-bit client
+download, then hung during restart. Retrying the older 32-bit bootstrap crashed
+before the visible browser helper appeared, early in its 64-bit update. These
+observations do not establish the underlying Wine crash's root cause.
+
+**Manual repair verified:** after stopping only the new bottle and proving it
+had no owners, Valve's current Windows x64 bootstrap was obtained from its
+HTTPS client-update manifest. The package's recorded size/hash and the extracted
+executable's x64 PE format were checked. The original executable was backed up
+and only that file was replaced atomically. Opening Steam from Caskrun then
+completed Valve's normal current-client update. Computer-use inspection showed
+the username, password and QR sign-in interface under one bottle-bound Steam
+native app identity. Temporary download and rollback files were removed, and
+the working Steam session was left open. No client code, update policy or
+macOS permission was changed. Account sign-in and games were not tested.
+
+**Source follow-up implemented:** automatic Steam setup prepares that current
+bootstrap before first launch and reports its preparation separately from
+installer completion. Saved Steam opens, setup and retries retain Caskrun's
+window while waiting for the same bottle's onscreen, main-sized Steam window.
+Starting/updating feedback blocks duplicate Open requests. The bounded wait
+offers **Stop waiting**, which stops observation alone, preserves Steam's
+processes and restores Caskrun's controls. It does not report setup failure or
+claim Steam quit. No window titles, clipboard contents, Accessibility access or
+Screen Recording permission are needed.
+
+**Automated checks:** the serial Steam-related Core suite passed 104 tests
+(one network test normally ignored). After review, the final bootstrap module
+passed 12 tests and the installer module passed 33, including cancellation,
+interrupted retries, changed files/directories and a new launch during download.
+The separately enabled live Valve-download test passed, verifying the current
+manifest, package size/SHA-256, executable CRC and x64 PE format, then removing
+its temporary files without executing Steam. Valve's package has a 20-byte
+prefix before its ZIP local header; the decoder handles this authenticated
+format as well as an ordinary ZIP. Formatting and source privacy checks passed.
+
+**Validation boundary:** 45 focused Swift checks and full app typechecking
+passed. Build 51 is installed with a verified app signature. Reopening the
+existing repaired Steam client showed startup feedback with Open disabled,
+then a rendered sign-in window under one Steam native app identity. The fresh
+automatic recipe is covered by the fixture and live-download checks above;
+that is not a second complete fresh-install, account or gameplay test.
+
+**Packaging correction:** the first build-51 launch refused its engine because
+nine Finder `.DS_Store` files had been added to the retained runtime source and
+copied into the app. All original engine files still matched the working
+package. Removing only that metadata restored its exact reviewed identity;
+source, candidate and installed trees were rechecked, with app signatures still
+valid. No bottle record was edited to approve the contaminated package. A new
+packaging gate now uses Core's `REVIEWED_RUNTIME_IDENTITIES` as its approval
+policy before compilation, after copying/signing, in the disk-image staging
+tree and before publishing local artifacts. Ten fixture checks cover hidden
+metadata, changed contents and malformed policy. The rejected installer is
+replaced by a freshly verified package rather than retained as a deliverable.
+
+A visible window does not prove authentication, game downloads, compatibility
+or sustained play. The underlying older 32-bit Wine crash is not diagnosed by
+using Valve's current x64 bootstrap.
+
+**Build retention:** retain one current reviewed runtime package and one
+current installer with its checksum. Remove superseded builds, test bottles and
+generated fixtures only after owner checks; preserve original fixes and test
+source in the project.

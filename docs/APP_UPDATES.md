@@ -6,7 +6,7 @@ Updates…** is in the native Caskrun menu; Collection's floating header stays
 unchanged. Automatic checking uses Sparkle's consent flow. Automatic download
 and installation are disabled.
 
-## Current demo boundary
+## Current update availability
 
 The updater integration and its configuration, URL, shutdown and file-owner
 policies passed source and inert-fixture checks. There is no public signed

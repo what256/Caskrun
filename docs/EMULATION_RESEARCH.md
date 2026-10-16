@@ -1,6 +1,6 @@
 # Retro gaming and console ports
 
-Research snapshot: **9 October 2026**. The demo has an optional external KytyPS5 adapter and local imports; actual console emulation remains the selected engine’s responsibility, and game conversion is not integrated into the app. No extension, emulator, game or BIOS was installed or executed for this initial research.
+Research snapshot: **9 October 2026**. Caskrun has an optional external KytyPS5 adapter and local imports; actual console emulation remains the selected engine’s responsibility, and game conversion is not integrated into the app. No extension, emulator, game or BIOS was installed or executed for this initial research.
 
 **Follow-up:** a separate pinned AnyPS5/Wine experiment ran public PS5 DOOM homebrew on Apple Silicon, verifying rendering, keyboard/mouse input, save/load, close and relaunch. Audible output, physical controllers, retail games and Caskrun integration remain unvalidated. See [the measured AnyPS5 results](ANYPS5_WINE.md). Upstream facts and counters below retain their dated review scope.
 
@@ -51,7 +51,7 @@ Start with native Mac ports or optional external engine adapters, a pinned engin
 
 ## Current adapter and remaining work
 
-The demo implements an optional KytyPS5 Mac adapter. Import and process ownership are checked with original fixtures; no real engine or game was launched. The current upstream
+Caskrun implements an optional KytyPS5 Mac adapter. Import and process ownership are checked with original fixtures; no real engine or game was launched. The current upstream
 [Mac build and launch instructions](https://github.com/KytyPS5/KytyPS5#building-on-macos)
 document an x86-64 executable running under Rosetta 2, with MoltenVK alongside
 it. This avoids introducing AnyPS5's additional conversion and Wine path in the
