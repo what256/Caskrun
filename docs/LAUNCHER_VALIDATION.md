@@ -403,6 +403,20 @@ reopening the inspector retained DXMT and the idle-only runtime upgrade complete
 An independent fresh-start audio stall prevented final Steam-window acceptance
 in that build.
 
+**Build 53 live follow-up:** after the user completed the foreground microphone
+permission request, normal Steam startup rendered its existing logged-in Store
+with DXMT selected and effective. Caskrun showed its starting state and completed
+the main-window handoff. Closing Steam's Windows window preserved its client
+and native helper. Reopening the existing native application through Finder
+restored the rendered window; a bounded observation captured the native helper
+calling Core's Show control and its fixed `steam://open/main` child. Both
+process generations were unchanged, DXMT stayed selected and effective, one
+managed Steam application identity remained, and no Quit control was observed
+in that cycle. This verifies the installed native reopen callback and client
+protocol together, without claiming a physical Dock click. Fresh authentication,
+gameplay, audio output/capture and other-store startup/window behavior remain
+separate tests. No game was launched, and Steam was left running.
+
 **Packaging correction:** the first build-51 launch refused its engine because
 nine Finder `.DS_Store` files had been added to the retained runtime source and
 copied into the app. All original engine files still matched the working

@@ -590,4 +590,20 @@ the old enabled entry in System Settings did not prove authorization for the
 new code. The microphone entry was reset through System Settings and returned to its
 enabled state for the replacement build, without changing other apps' grants,
 recording audio or disabling the Wine audio driver. Foreground permission
-completion and final Steam startup/Dock acceptance remain live checks.
+completion was then performed by the user for installed build 53. Normal Steam
+startup completed with DXMT selected and effective, rendering the existing
+logged-in Store session under one managed native Steam application identity.
+Caskrun displayed its starting state and completed the main-window handoff.
+
+After Windows Close, reopening the existing native Steam application through
+Finder restored the rendered Store window. A bounded process observation
+captured the native helper invoking Core's `request-steam-show` and its child
+using the fixed `steam://open/main` command. The original client and native
+helper generations survived, DXMT remained selected and effective, and no Quit
+control was observed during this cycle. An earlier close/observation cycle
+also returned the window, but did not capture the control chain and is not
+additional callback evidence. A physical Dock mouse click was not observed;
+the verified path is macOS reopening the same running native application.
+These checks do not establish fresh authentication, gameplay, actual audio
+output or recording, native Quit, or other publishers'
+tray behavior. Steam was left open after acceptance.
