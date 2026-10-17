@@ -213,7 +213,7 @@ struct PublisherLibrary: Decodable, Sendable {
     let truncated: Bool
 }
 
-struct PrefixPathResult: Decodable {
+struct PrefixPathResult: Decodable, Sendable {
     let path: String
 }
 
@@ -944,9 +944,11 @@ final class CaskrunModel: ObservableObject {
     @Published private(set) var bottleResolutions: [String: BottleResolutionStatus] = [:]
     @Published private(set) var loadingBottleResolutions: Set<String> = []
     @Published private(set) var bottleResolutionErrors: [String: String] = [:]
+    private var resolutionRequests: [String: BottlePreferenceRequests] = [:]
     @Published private(set) var bottleGraphics: [String: BottleGraphicsStatus] = [:]
     @Published private(set) var loadingBottleGraphics: Set<String> = []
     @Published private(set) var bottleGraphicsErrors: [String: String] = [:]
+    private var graphicsRequests: [String: BottlePreferenceRequests] = [:]
     @Published var wineExecutable = initialWineExecutable()
     @Published private(set) var isQuitting = false
     @Published var isLaunching = false
@@ -1750,19 +1752,24 @@ final class CaskrunModel: ObservableObject {
         }
         guard !isQuitting && !isLaunching && !isManagingBottle && !isStoppingBottle(bottle.id) else { return }
         isLaunching = true
-        let isSteam = SteamStartup.isSteamLauncher(name: launcher.name, path: launcher.path,
-            registered: savedSteamClients.contains { $0.bottle_id == bottle.id && $0.launcher_id == launcher.id })
-        if isSteam { steamStartup = .init(elapsed: .zero) }
+        let client = SteamStartup.clientForLauncher(name: launcher.name, path: launcher.path,
+            registeredSteam: savedSteamClients.contains { $0.bottle_id == bottle.id && $0.launcher_id == launcher.id })
+        if let client { steamStartup = .init(elapsed: .zero, client: client) }
         Task {
             defer { isLaunching = false; steamStartup = nil }
             do {
+                // Capture before Open so existing updater logs never masquerade
+                // as current download progress. Other stores use neutral text.
+                let updateLog = client == .steam ? await captureSteamUpdateLog(in: bottle, launcher: launcher) : nil
                 var command = ["run-app", bottle.id, launcher.id]
                 if !arguments.isEmpty {
                     command.append("--")
                     command.append(contentsOf: arguments)
                 }
                 _ = try await callAsync(command, as: LaunchResult.self)
-                if isSteam { try await waitForSteamWindow(in: bottle, launcher: launcher) }
+                if let client {
+                    try await waitForClientWindow(in: bottle, launcher: launcher, client: client, updateLog: updateLog)
+                }
                 CaskrunWindowBridge.shared.hideMainWindow()
             } catch let outcome as SteamStartup.MonitorError {
                 message = outcome.message
@@ -1773,31 +1780,64 @@ final class CaskrunModel: ObservableObject {
         }
     }
 
-    private func waitForSteamWindow(in bottle: Bottle, launcher: SavedLauncher,
-                                    cancellation: CoreInvocationCancellation? = nil) async throws {
+    private func captureSteamUpdateLog(in bottle: Bottle, launcher: SavedLauncher) async -> SteamStartup.UpdateLog? {
+        guard let prefix = try? await callAsync(["prefix-path", bottle.id], as: PrefixPathResult.self) else { return nil }
+        return await Task.detached(priority: .utility) {
+            SteamStartup.UpdateLog.capture(prefixPath: prefix.path, launcherPath: launcher.path)
+        }.value
+    }
+
+    private func waitForClientWindow(in bottle: Bottle, launcher: SavedLauncher, client: SteamStartup.Client,
+                                     updateLog initialLog: SteamStartup.UpdateLog? = nil,
+                                     cancellation: CoreInvocationCancellation? = nil) async throws {
         let clock = ContinuousClock()
         let started = clock.now
         let token = steamStartupMonitor.begin()
         canStopWaitingForSteam = true
+        steamStartup = .init(elapsed: .zero, client: client)
         defer {
             steamStartupMonitor.finish(token)
             canStopWaitingForSteam = false
             steamStartup = nil
         }
+        // A new catalog install has no saved path before Core returns. Begin at
+        // the current log's end and observe only subsequent publisher events.
+        var updateLog = initialLog
+        if client == .steam, updateLog == nil {
+            updateLog = await captureSteamUpdateLog(in: bottle, launcher: launcher)
+        }
+        var update: SteamStartup.Update?
         repeat {
             guard !isQuitting, !Task.isCancelled, cancellation?.isCancelRequested != true else {
                 throw CancellationError()
             }
-            guard steamStartupMonitor.isCurrent(token) else { throw SteamStartup.MonitorError.stopped }
-            steamStartup = .init(elapsed: started.duration(to: clock.now))
+            guard steamStartupMonitor.isCurrent(token) else {
+                throw SteamStartup.MonitorError(outcome: .stopped, client: client)
+            }
+            if let current = updateLog {
+                let observed = await Task.detached(priority: .utility) {
+                    var next = current
+                    let phase = next.poll()
+                    return (next, phase)
+                }.value
+                updateLog = observed.0
+                update = observed.1
+            }
+            guard steamStartupMonitor.isCurrent(token) else {
+                throw SteamStartup.MonitorError(outcome: .stopped, client: client)
+            }
+            guard !isQuitting, !Task.isCancelled, cancellation?.isCancelRequested != true else { throw CancellationError() }
+            steamStartup = .init(elapsed: started.duration(to: clock.now), client: client, update: update)
             if SteamStartup.hasVisibleClientWindow(bottleID: bottle.id, displayName: launcher.name) {
-                guard steamStartupMonitor.isCurrent(token) else { throw SteamStartup.MonitorError.stopped }
+                guard steamStartupMonitor.isCurrent(token) else {
+                    throw SteamStartup.MonitorError(outcome: .stopped, client: client)
+                }
                 return
             }
             try await Task.sleep(for: .milliseconds(500))
         } while started.duration(to: clock.now) < SteamStartup.timeout
-        guard steamStartupMonitor.isCurrent(token) else { throw SteamStartup.MonitorError.stopped }
-        throw SteamStartup.MonitorError.timedOut
+        guard steamStartupMonitor.isCurrent(token) else { throw SteamStartup.MonitorError(outcome: .stopped, client: client) }
+        throw SteamStartup.MonitorError(outcome: .timedOut, client: client)
     }
 
     func stopWaitingForSteam() {
@@ -1805,7 +1845,7 @@ final class CaskrunModel: ObservableObject {
         steamStartupMonitor.stop()
         canStopWaitingForSteam = false
         // The polling task will report the distinct stopped outcome and release
-        // launch controls. Nothing is sent to Steam, Wine or the Core invocation.
+        // launch controls. Nothing is sent to the store, Wine or the Core invocation.
     }
 
     func runCommand(in bottle: Bottle) {
@@ -1927,46 +1967,66 @@ final class CaskrunModel: ObservableObject {
     }
 
     func refreshBottleResolution(in bottle: Bottle) {
-        guard !loadingBottleResolutions.contains(bottle.id) else { return }
+        guard !isQuitting, !loadingBottleResolutions.contains(bottle.id),
+              let token = resolutionRequests[bottle.id, default: BottlePreferenceRequests()].beginRead() else { return }
+        let requestedWine = wineExecutable
         loadingBottleResolutions.insert(bottle.id)
         bottleResolutionErrors.removeValue(forKey: bottle.id)
         Task {
             defer { loadingBottleResolutions.remove(bottle.id) }
             do {
                 let result = try await callAsync(["bottle-resolution", bottle.id], as: BottleResolutionStatus.self)
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }),
+                      resolutionRequests[bottle.id]?.acceptsRead(token) == true else { return }
                 guard result.bottle_id == bottle.id else {
                     throw NSError(domain: "Caskrun", code: 1,
                                   userInfo: [NSLocalizedDescriptionKey: "Display status belongs to another bottle."])
                 }
                 bottleResolutions[bottle.id] = result
             } catch {
-                bottleResolutions.removeValue(forKey: bottle.id)
-                bottleResolutionErrors[bottle.id] = error.localizedDescription
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }),
+                      resolutionRequests[bottle.id]?.acceptsRead(token) == true else { return }
+                bottleResolutionErrors[bottle.id] = BottlePreferenceRequests.refreshFailure(
+                    hasConfirmedValue: bottleResolutions[bottle.id] != nil, detail: error.localizedDescription)
             }
         }
     }
 
     func setBottleResolution(in bottle: Bottle, enabled: Bool) {
         guard !isQuitting && !isManagingBottle && !isLaunching else { return }
+        guard sessionState(for: bottle).activity != .running, !isStoppingBottle(bottle.id) else {
+            message = "Quit this bottle’s apps before changing display settings. Closing their windows can leave them running."
+            return
+        }
+        guard let token = resolutionRequests[bottle.id, default: BottlePreferenceRequests()].beginWrite() else { return }
+        let requestedWine = wineExecutable
         isManagingBottle = true
         Task {
-            defer { isManagingBottle = false }
+            defer { resolutionRequests[bottle.id]?.finishWrite(token); isManagingBottle = false }
             do {
                 let result = try await callAsync(
                     ["set-bottle-resolution", bottle.id, enabled ? "on" : "off"],
                     as: BottleResolutionStatus.self)
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }),
+                      resolutionRequests[bottle.id]?.acceptsWrite(token) == true else { return }
                 guard result.bottle_id == bottle.id else {
                     throw NSError(domain: "Caskrun", code: 1,
                                   userInfo: [NSLocalizedDescriptionKey: "Display result belongs to another bottle."])
                 }
                 bottleResolutions[bottle.id] = result
                 bottleResolutionErrors.removeValue(forKey: bottle.id)
-            } catch { message = error.localizedDescription }
+            } catch {
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }),
+                      resolutionRequests[bottle.id]?.acceptsWrite(token) == true else { return }
+                bottleResolutionErrors[bottle.id] = "The display change could not be confirmed. \(error.localizedDescription)"
+                message = error.localizedDescription
+            }
         }
     }
 
     func refreshBottleGraphics(in bottle: Bottle) {
-        guard !loadingBottleGraphics.contains(bottle.id) else { return }
+        guard !isQuitting, !loadingBottleGraphics.contains(bottle.id),
+              let token = graphicsRequests[bottle.id, default: BottlePreferenceRequests()].beginRead() else { return }
         let requestedWine = wineExecutable
         loadingBottleGraphics.insert(bottle.id)
         bottleGraphicsErrors.removeValue(forKey: bottle.id)
@@ -1974,13 +2034,15 @@ final class CaskrunModel: ObservableObject {
             defer { loadingBottleGraphics.remove(bottle.id) }
             do {
                 let result = try await callAsync(["bottle-graphics", bottle.id], as: BottleGraphicsStatus.self)
-                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }) else { return }
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }),
+                      graphicsRequests[bottle.id]?.acceptsRead(token) == true else { return }
                 try validateGraphicsResult(result, for: bottle)
                 bottleGraphics[bottle.id] = result
             } catch {
-                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }) else { return }
-                bottleGraphics.removeValue(forKey: bottle.id)
-                bottleGraphicsErrors[bottle.id] = error.localizedDescription
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }),
+                      graphicsRequests[bottle.id]?.acceptsRead(token) == true else { return }
+                bottleGraphicsErrors[bottle.id] = BottlePreferenceRequests.refreshFailure(
+                    hasConfirmedValue: bottleGraphics[bottle.id] != nil, detail: error.localizedDescription)
             }
         }
     }
@@ -1991,32 +2053,41 @@ final class CaskrunModel: ObservableObject {
         guard ["auto", "wined3d", "dxmt"].contains(backend),
               let current = bottleGraphics[bottle.id], current.selected_backend != backend,
               backend != "dxmt" || current.dxmt_available else { return }
+        guard sessionState(for: bottle).activity != .running, !isStoppingBottle(bottle.id) else {
+            message = "Quit this bottle’s apps before changing graphics. Closing their windows can leave them running."
+            return
+        }
+        guard let token = graphicsRequests[bottle.id, default: BottlePreferenceRequests()].beginWrite() else { return }
         let requestedWine = wineExecutable
         isManagingBottle = true
         bottleOperationLabel = "Updating graphics…"
         bottleGraphicsErrors.removeValue(forKey: bottle.id)
         Task {
             defer {
+                graphicsRequests[bottle.id]?.finishWrite(token)
                 isManagingBottle = false
                 bottleOperationLabel = "Updating bottle…"
             }
             do {
                 let result = try await callAsync(["set-bottle-graphics", bottle.id, backend], as: BottleGraphicsStatus.self)
-                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }) else { return }
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }),
+                      graphicsRequests[bottle.id]?.acceptsWrite(token) == true else { return }
                 try validateGraphicsResult(result, for: bottle)
                 bottleGraphics[bottle.id] = result
             } catch {
-                guard wineExecutable == requestedWine else { return }
+                guard wineExecutable == requestedWine,
+                      graphicsRequests[bottle.id]?.acceptsWrite(token) == true else { return }
                 let detail = error.localizedDescription
                 // Keep the old selection visible unless the core confirms a change.
                 // Reading again also reports a successful rollback after a refusal.
                 let restored = try? await callAsync(["bottle-graphics", bottle.id], as: BottleGraphicsStatus.self)
-                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }) else { return }
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }),
+                      graphicsRequests[bottle.id]?.acceptsWrite(token) == true else { return }
                 if let restored,
                    (try? validateGraphicsResult(restored, for: bottle)) != nil {
                     bottleGraphics[bottle.id] = restored
                 }
-                bottleGraphicsErrors[bottle.id] = detail
+                bottleGraphicsErrors[bottle.id] = "The graphics change could not be confirmed. \(detail)"
                 message = detail
             }
         }
@@ -2034,26 +2105,44 @@ final class CaskrunModel: ObservableObject {
 
     func setDXMTOptions(in bottle: Bottle, frameRate: UInt16, spatialScale: UInt16) {
         guard !isQuitting, !isLaunching, !isManagingBottle,
+              !loadingBottleGraphics.contains(bottle.id),
               let current = bottleGraphics[bottle.id], current.selected_backend == "dxmt",
               current.dxmt_available, frameRate <= 240,
               [100, 125, 150, 200].contains(spatialScale),
               spatialScale == 100 || current.dxmt_spatial_available else { return }
+        guard sessionState(for: bottle).activity != .running, !isStoppingBottle(bottle.id) else {
+            message = "Quit this bottle’s apps before changing DXMT options. Closing their windows can leave them running."
+            return
+        }
+        guard let token = graphicsRequests[bottle.id, default: BottlePreferenceRequests()].beginWrite() else { return }
         isManagingBottle = true
         bottleOperationLabel = "Updating DXMT options…"
         let requestedWine = wineExecutable
         Task {
-            defer { isManagingBottle = false; bottleOperationLabel = "Updating bottle…" }
+            defer {
+                graphicsRequests[bottle.id]?.finishWrite(token)
+                isManagingBottle = false
+                bottleOperationLabel = "Updating bottle…"
+            }
             do {
                 let result = try await callAsync(["set-bottle-dxmt-options", bottle.id, String(frameRate), String(spatialScale)], as: BottleGraphicsStatus.self)
-                guard requestedWine == wineExecutable, bottles.contains(where: { $0.id == bottle.id }) else { return }
+                guard requestedWine == wineExecutable, bottles.contains(where: { $0.id == bottle.id }),
+                      graphicsRequests[bottle.id]?.acceptsWrite(token) == true else { return }
                 try validateGraphicsResult(result, for: bottle)
                 bottleGraphics[bottle.id] = result
                 bottleGraphicsErrors[bottle.id] = nil
             } catch {
-                guard requestedWine == wineExecutable else { return }
-                bottleGraphicsErrors[bottle.id] = error.localizedDescription
-                message = error.localizedDescription
-                refreshBottleGraphics(in: bottle)
+                guard requestedWine == wineExecutable,
+                      graphicsRequests[bottle.id]?.acceptsWrite(token) == true else { return }
+                let detail = error.localizedDescription
+                let restored = try? await callAsync(["bottle-graphics", bottle.id], as: BottleGraphicsStatus.self)
+                guard requestedWine == wineExecutable, bottles.contains(where: { $0.id == bottle.id }),
+                      graphicsRequests[bottle.id]?.acceptsWrite(token) == true else { return }
+                if let restored, (try? validateGraphicsResult(restored, for: bottle)) != nil {
+                    bottleGraphics[bottle.id] = restored
+                }
+                bottleGraphicsErrors[bottle.id] = "The DXMT change could not be confirmed. \(detail)"
+                message = detail
             }
         }
     }
@@ -2400,8 +2489,9 @@ final class CaskrunModel: ObservableObject {
                                                 bottle: result.bottle,
                                                 launcher: result.launcher,
                                                 setupNote: result.setup_note)
-                if entry.id == "steam" {
-                    try await waitForSteamWindow(in: result.bottle, launcher: result.launcher, cancellation: cancellation)
+                if let client = SteamStartup.Client.catalog(entry.id) {
+                    try await waitForClientWindow(in: result.bottle, launcher: result.launcher, client: client,
+                                                  cancellation: cancellation)
                 }
                 if entry.id == "steam", let appID = thenInstallSteamAppID, appID > 0,
                    !isQuitting, !cancellation.isCancelRequested {
@@ -2477,6 +2567,16 @@ final class CaskrunModel: ObservableObject {
                 catalogMonitorGeneration += 1
             }
             do {
+                var updateLog: SteamStartup.UpdateLog?
+                if attempt.catalog_id == "steam", let bottle = bottles.first(where: { $0.id == attempt.bottle_id }),
+                   let launcher = launchers[bottle.id]?.first(where: { candidate in
+                       SteamStartup.isSteamLauncher(name: candidate.name, path: candidate.path,
+                           registered: savedSteamClients.contains { saved in
+                               saved.bottle_id == bottle.id && saved.launcher_id == candidate.id
+                           })
+                   }) {
+                    updateLog = await captureSteamUpdateLog(in: bottle, launcher: launcher)
+                }
                 let result = try await callAsync(["retry-catalog", attempt.catalog_id, attempt.bottle_id],
                                                  as: CatalogInstallResult.self, cancellation: cancellation)
                 canCancelCatalogInstall = false
@@ -2491,8 +2591,9 @@ final class CaskrunModel: ObservableObject {
                                                 bottle: result.bottle,
                                                 launcher: result.launcher,
                                                 setupNote: result.setup_note)
-                if attempt.catalog_id == "steam" {
-                    try await waitForSteamWindow(in: result.bottle, launcher: result.launcher, cancellation: cancellation)
+                if let client = SteamStartup.Client.catalog(attempt.catalog_id) {
+                    try await waitForClientWindow(in: result.bottle, launcher: result.launcher, client: client,
+                                                  updateLog: updateLog, cancellation: cancellation)
                 }
                 CaskrunWindowBridge.shared.hideMainWindow()
             } catch let outcome as SteamStartup.MonitorError {
@@ -4480,8 +4581,9 @@ struct CaskrunApp: App {
             ))
             .font(.subheadline.weight(.medium))
             .disabled(model.isLaunching || model.isManagingBottle ||
-                      model.loadingBottleResolutions.contains(bottle.id) || model.status.wine_path == nil)
-            Text("\(status.high_resolution ? "Retina · 192 DPI" : "Standard · 96 DPI"). Close apps before changing this.")
+                      model.loadingBottleResolutions.contains(bottle.id) || model.status.wine_path == nil ||
+                      model.sessionState(for: bottle).activity == .running || model.isStoppingBottle(bottle.id))
+            Text("\(status.high_resolution ? "Retina · 192 DPI" : "Standard · 96 DPI"). Saved for this bottle. Quit its apps before changing this; closing a window can leave them running.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else if model.loadingBottleResolutions.contains(bottle.id) {
@@ -4494,12 +4596,12 @@ struct CaskrunApp: App {
         } else {
             Text("Display mode unavailable")
                 .font(.subheadline.weight(.medium))
-            if let error = model.bottleResolutionErrors[bottle.id] {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-            }
+        }
+        if let error = model.bottleResolutionErrors[bottle.id] {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
         }
         HStack(spacing: 6) {
             Button("Refresh display status") { model.refreshBottleResolution(in: bottle) }
@@ -4532,14 +4634,19 @@ struct CaskrunApp: App {
                 .pickerStyle(.menu)
                 .font(.subheadline)
                 .disabled(model.isQuitting || model.isLaunching || model.isManagingBottle ||
-                          model.loadingBottleGraphics.contains(bottle.id) || model.status.wine_path == nil)
+                          model.loadingBottleGraphics.contains(bottle.id) || model.status.wine_path == nil ||
+                          model.sessionState(for: bottle).activity == .running || model.isStoppingBottle(bottle.id))
                 Text(status.effective_backend == "dxmt"
                      ? "DXMT translates DirectX 10/11 to Metal. Game compatibility still needs testing."
-                     : "WineD3D is the default. Close this bottle’s apps before changing its renderer.")
+                     : "WineD3D is the default renderer.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Saved for this bottle. Quit its apps before changing graphics; closing a window can leave them running.")
                     .font(.caption).foregroundStyle(.secondary)
                 if status.selected_backend == "dxmt" {
                     DXMTOptionsView(status: status,
-                        isBusy: model.isQuitting || model.isLaunching || model.isManagingBottle || model.loadingBottleGraphics.contains(bottle.id)) { rate, scale in
+                        isBusy: model.isQuitting || model.isLaunching || model.isManagingBottle ||
+                            model.loadingBottleGraphics.contains(bottle.id) ||
+                            model.sessionState(for: bottle).activity == .running || model.isStoppingBottle(bottle.id)) { rate, scale in
                             model.setDXMTOptions(in: bottle, frameRate: rate, spatialScale: scale)
                         }
                 }
@@ -4559,7 +4666,7 @@ struct CaskrunApp: App {
                 Text("Graphics options unavailable").font(.subheadline.weight(.medium))
             }
             if let error = model.bottleGraphicsErrors[bottle.id] {
-                Text(error).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(error).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 6) {
                 Button("Refresh graphics status") { model.refreshBottleGraphics(in: bottle) }
@@ -4675,7 +4782,7 @@ struct CaskrunApp: App {
                 Spacer()
                 if model.canStopWaitingForSteam {
                     Button("Stop waiting") { model.stopWaitingForSteam() }
-                        .help("Keep Steam running and return to Caskrun.")
+                        .help("Keep \(model.steamStartup?.client.name ?? "the app") running and return to Caskrun.")
                 } else if model.canCancelManualInstaller && model.activeCatalogInstall == nil {
                     Button(model.isCancellingManualInstaller ? "Canceling…" : "Cancel setup") {
                         model.cancelManualInstaller()

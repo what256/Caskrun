@@ -377,6 +377,32 @@ then a rendered sign-in window under one Steam native app identity. The fresh
 automatic recipe is covered by the fixture and live-download checks above;
 that is not a second complete fresh-install, account or gameplay test.
 
+**Startup progress follow-up, source checks:** the existing operation strip now
+uses only complete, newly appended Steam bootstrap events for checking,
+downloading, extraction, installation and opening phases. Download percentages
+require valid publisher counters. Reads are capped at 32 KiB, reject symlinks
+and nonregular files, and start after historical content; a new catalog install
+stays neutral until its saved path and subsequent log events are available.
+Elapsed time does not imply an update. Other catalog clients share neutral
+startup feedback and Stop waiting, with no new compatibility claim. The exact
+bottle identity and main-window size checks remain in place; the already
+onscreen-filtered query tolerates an omitted redundant onscreen key. Local
+diagnostics record only window-observation counts, never names, IDs, paths,
+window titles or log text. One hundred focused Swift checks and full app
+typechecking passed. Packaged follow-up and other-store window matching remain
+separate live checks.
+
+**Settings consistency follow-up, source checks:** per-bottle request ordering
+ignores stale graphics/display responses. Failed refreshes retain the last
+confirmed preferences with a warning. Graphics, DXMT and Retina controls are
+disabled for a known-running or stopping bottle; closing a store window does
+not establish that its apps quit. Seventeen focused helper checks and full app
+typechecking passed. No existing saved graphics setting or global default was
+changed. Build 52 verified WineD3D → DXMT through the actual stopped-bottle inspector;
+reopening the inspector retained DXMT and the idle-only runtime upgrade completed.
+An independent fresh-start audio stall prevented final Steam-window acceptance
+in that build.
+
 **Packaging correction:** the first build-51 launch refused its engine because
 nine Finder `.DS_Store` files had been added to the retained runtime source and
 copied into the app. All original engine files still matched the working

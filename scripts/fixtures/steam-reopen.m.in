@@ -1,0 +1,483 @@
+/* Original inert fixture for the native Steam Dock-reopen request. Only exact
+ * production functions and methods are substituted. No Wine, publisher
+ * executable, user prefix or account is used; native windows appear only with
+ * --interactive, and then only this fixture's own window. No timer or request
+ * path cancels or signals a process. */
+#import <AppKit/AppKit.h>
+#include <crt_externs.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <spawn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static unsigned int checks;
+#define CHECK(x) do { if (!(x)) { fprintf(stderr, "check failed at %d: %s\n", __LINE__, #x); exit(1); } checks++; } while (0)
+static char dataPath[PATH_MAX], corePath[PATH_MAX], prefixPath[PATH_MAX];
+static const char *bottle = "11111111-1111-4111-8111-111111111111";
+static NSMutableArray *backgroundBlocks, *mainBlocks, *timers;
+static int spawnCalls, showSpawns, quitSpawns, waitMode, failSpawn, beeps, quitFailures;
+static BOOL realSpawn;
+@@PRESENTATION_STATE@@
+
+static void fixture_dispatch(dispatch_queue_t queue, dispatch_block_t block)
+{ [(queue == dispatch_get_main_queue() ? mainBlocks : backgroundBlocks) addObject:[[block copy] autorelease]]; }
+static dispatch_time_t fixture_time(dispatch_time_t base, int64_t delta)
+{ CHECK(base == DISPATCH_TIME_NOW); return (dispatch_time_t)delta; }
+/* The post-submit Quit hold is exactly five seconds on the main queue. */
+static void fixture_after(dispatch_time_t when, dispatch_queue_t queue, dispatch_block_t block)
+{
+    CHECK(queue == dispatch_get_main_queue()); CHECK(when == 5 * NSEC_PER_SEC);
+    [timers addObject:[[block copy] autorelease]];
+}
+static void step(NSMutableArray *blocks)
+{ dispatch_block_t block = [[blocks objectAtIndex:0] retain]; [blocks removeObjectAtIndex:0]; block(); [block release]; }
+static void drain(void)
+{ while (backgroundBlocks.count || mainBlocks.count) step(backgroundBlocks.count ? backgroundBlocks : mainBlocks); }
+static void fireTimer(void) { CHECK(timers.count > 0); step(timers); }
+static void CaskrunSteamQuitFailed(void) { quitFailures++; }
+static void fixture_beep(void) { beeps++; }
+static int fixture_spawn(pid_t *child, const char *path, const posix_spawn_file_actions_t *actions,
+                         const posix_spawnattr_t *attributes, char *const argv[], char *const environment[])
+{
+    unsigned int homes = 0;
+    spawnCalls++;
+    CHECK(!strcmp(path, corePath)); CHECK(!strcmp(argv[0], corePath));
+    CHECK(!strcmp(argv[1], "request-steam-show") || !strcmp(argv[1], "request-steam-quit"));
+    CHECK(!strcmp(argv[2], bottle)); CHECK(argv[3] == NULL);
+    if (!strcmp(argv[1], "request-steam-show")) showSpawns++; else quitSpawns++;
+    for (size_t i = 0; environment[i]; i++)
+    {
+        const char *entry = environment[i];
+        CHECK(strncmp(entry, "CASKRUN_NATIVE_", 15)); CHECK(strncmp(entry, "WINESERVERSOCKET=", 17));
+        CHECK(strncmp(entry, "WINELOADERNOEXEC=", 17)); CHECK(strncmp(entry, "WINEPRELOADRESERVE=", 19));
+        CHECK(strncmp(entry, "CASKRUN_STEAM_MODE=", 19)); CHECK(strncmp(entry, "CASKRUN_STEAM_NATIVE_APP=", 25));
+        CHECK(strncmp(entry, "CASKRUN_STEAM_ICON=", 19));
+        if (!strncmp(entry, "CASKRUN_HOME=", 13)) { homes++; CHECK(!strcmp(entry + 13, dataPath)); }
+    }
+    CHECK(homes == 1);
+    if (failSpawn) return EIO;
+    if (realSpawn) return posix_spawn(child, path, actions, attributes, argv, environment);
+    *child = 20000 + spawnCalls;
+    return 0;
+}
+static pid_t fixture_waitpid(pid_t child, int *status, int options)
+{
+    CHECK(options == 0);
+    if (realSpawn) return waitpid(child, status, options);
+    if (waitMode == 4) { errno = ECHILD; return -1; }
+    *status = waitMode == 1 ? 256 : waitMode == 2 ? SIGTERM : 0;
+    return waitMode == 3 ? child + 1 : child;
+}
+#define posix_spawn fixture_spawn
+#define waitpid fixture_waitpid
+#define dispatch_async(queue, block) fixture_dispatch(queue, block)
+#define dispatch_after(when, queue, block) fixture_after(when, queue, block)
+#define dispatch_time(base, delta) fixture_time(base, delta)
+#define NSBeep fixture_beep
+@@HELPERS@@
+#undef posix_spawn
+#undef waitpid
+#undef dispatch_async
+#undef dispatch_after
+#undef dispatch_time
+#undef NSBeep
+
+static NSArray *probeArguments;
+@interface ProbeProcessInfo : NSObject
++ (id)processInfo;
+- (NSArray *)arguments;
+@end
+@implementation ProbeProcessInfo
++ (id)processInfo { static id info; if (!info) info = [[self alloc] init]; return info; }
+- (NSArray *)arguments { return probeArguments; }
+@end
+#define NSProcessInfo ProbeProcessInfo
+@@PROCESS@@
+#undef NSProcessInfo
+
+/* The application's hidden state is modelled headlessly; --interactive uses
+ * AppKit's real hide/unhide. */
+@interface ProbeApplication : NSApplication
+@property(assign) BOOL useProbeHidden, probeHidden;
+@end
+@implementation ProbeApplication
+@synthesize useProbeHidden, probeHidden;
+- (BOOL)isHidden { return useProbeHidden ? probeHidden : [super isHidden]; }
+@end
+
+/* Headless runs model AppKit's visible/minimized state on this fixture's own
+ * panel. wouldBeVisible is Wine's exact expression; savedVisibleState models
+ * Wine's applicationWillHide capture and its reset when Windows orders a
+ * window out. Any Cocoa ordering-in is counted: reopen must never order a
+ * window Windows hid back in. */
+static BOOL modelWindows = YES;
+@interface WineWindow : NSPanel
+@property(assign) BOOL modelVisible, modelMiniaturized, hasContent, closing, savedVisibleState, drawnSinceShown;
+@property(assign) int deminiaturizeCount, orderCount;
+@property(readonly) BOOL presentsVisibleContent;
+- (BOOL)wouldBeVisible;
+@end
+@implementation WineWindow
+@synthesize modelVisible, modelMiniaturized, hasContent, closing, savedVisibleState, drawnSinceShown, deminiaturizeCount, orderCount;
+- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; [super dealloc]; }
+- (BOOL)presentsVisibleContent { return hasContent; }
+- (BOOL)isVisible { return modelWindows ? modelVisible && !modelMiniaturized : [super isVisible]; }
+- (BOOL)isMiniaturized { return modelWindows ? modelMiniaturized : [super isMiniaturized]; }
+- (BOOL)wouldBeVisible { return [NSApp isHidden] ? savedVisibleState : [self isVisible]; }
+- (void)fixtureWillHide { if (!modelWindows) savedVisibleState = [self isVisible]; }
+- (void)deminiaturize:(id)sender
+{
+    deminiaturizeCount++;
+    if (modelWindows) { modelMiniaturized = NO; modelVisible = YES; }
+    else [super deminiaturize:sender];
+}
+- (void)orderWindow:(NSWindowOrderingMode)place relativeTo:(NSInteger)other
+{
+    if (place != NSWindowOut) orderCount++;
+    [super orderWindow:place relativeTo:other];
+}
+@end
+
+@interface WineApplicationController : NSObject <NSApplicationDelegate>
+@end
+@implementation WineApplicationController
+@@CONTROLLER@@
+@end
+
+static void env(void)
+{
+    setenv("CASKRUN_NATIVE_CORE", corePath, 1); setenv("CASKRUN_NATIVE_DATA", dataPath, 1);
+    setenv("CASKRUN_NATIVE_BOTTLE", bottle, 1); setenv("WINEPREFIX", prefixPath, 1);
+    setenv("CASKRUN_HOME", "/invalid-inherited-data", 1);
+    setenv("WINESERVERSOCKET", "fixture-only", 1); setenv("WINELOADERNOEXEC", "1", 1); setenv("WINEPRELOADRESERVE", "fixture-only", 1);
+    setenv("CASKRUN_NATIVE_EXEC", "1", 1); setenv("CASKRUN_STEAM_MODE", "1", 1);
+    setenv("CASKRUN_STEAM_NATIVE_APP", "fixture-only", 1); setenv("CASKRUN_STEAM_ICON", "fixture-only", 1);
+    setenv("CASKRUN_NATIVE_IMAGE", "/original-fixture/steamwebhelper.exe", 1);
+    setenv("CASKRUN_QUIT_FIXTURE_KEEP", "present", 1);
+    probeArguments = @[@"WindowsApp", @"C:\\Steam\\steamwebhelper.exe"];
+}
+/* Isolated cases: nothing may be in flight or queued; a previous case's
+ * completed hold and its timers are discarded by the fixture only. */
+static void reset(void)
+{
+    CHECK(!caskrunSteamShowPending && !caskrunSteamShutdownPending && !caskrunSteamQuitQueued);
+    CHECK(!backgroundBlocks.count && !mainBlocks.count);
+    caskrunSteamQuitHeld = NO; [timers removeAllObjects];
+    spawnCalls = showSpawns = quitSpawns = waitMode = failSpawn = beeps = quitFailures = 0;
+    realSpawn = NO;
+    env();
+}
+static BOOL reopen(WineApplicationController *controller)
+{ return [controller applicationShouldHandleReopen:NSApp hasVisibleWindows:NO]; }
+static WineWindow *newWindow(void)
+{
+    WineWindow *window = [[WineWindow alloc] initWithContentRect:NSMakeRect(160, 200, 706, 438)
+                                                       styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskMiniaturizable
+                                                         backing:NSBackingStoreBuffered defer:NO];
+    [window setReleasedWhenClosed:NO]; [window setHidesOnDeactivate:NO];
+    window.hasContent = YES;
+    [[NSNotificationCenter defaultCenter] addObserver:window selector:@selector(fixtureWillHide)
+                                                 name:NSApplicationWillHideNotification object:NSApp];
+    return window;
+}
+static void settleUntil(NSTimeInterval limit, BOOL (^done)(void))
+{
+    NSDate *end = [NSDate dateWithTimeIntervalSinceNow:limit];
+    do
+    {
+        NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]
+                                               inMode:NSDefaultRunLoopMode dequeue:YES];
+        if (event) [NSApp sendEvent:event];
+    } while (!done() && [end timeIntervalSinceNow] > 0);
+}
+
+int main(int argc, char **argv)
+{
+    @autoreleasepool
+    {
+        CHECK(argc >= 3);
+        BOOL interactive = argc > 3 && !strcmp(argv[3], "--interactive");
+        backgroundBlocks = [NSMutableArray new]; mainBlocks = [NSMutableArray new]; timers = [NSMutableArray new];
+        CHECK(snprintf(corePath, sizeof(corePath), "%s", argv[2]) < (int)sizeof(corePath));
+        CHECK(snprintf(dataPath, sizeof(dataPath), "%s/data", argv[1]) < (int)sizeof(dataPath)); CHECK(!mkdir(dataPath, 0700));
+        char path[PATH_MAX];
+        CHECK(snprintf(path, sizeof(path), "%s/bottles", dataPath) < (int)sizeof(path)); CHECK(!mkdir(path, 0700));
+        CHECK(snprintf(path, sizeof(path), "%s/bottles/%s", dataPath, bottle) < (int)sizeof(path)); CHECK(!mkdir(path, 0700));
+        CHECK(snprintf(prefixPath, sizeof(prefixPath), "%s/prefix", path) < (int)sizeof(prefixPath)); CHECK(!mkdir(prefixPath, 0700));
+        env();
+
+        /* Show submits one exact Core request; duplicates wait for it. */
+        reset();
+        CHECK(CaskrunRequestSteamShow()); CHECK(caskrunSteamShowPending && showSpawns == 1 && !quitSpawns && !beeps);
+        CHECK(!CaskrunRequestSteamShow()); CHECK(showSpawns == 1 && !beeps);
+        drain(); CHECK(!caskrunSteamShowPending && !beeps && !quitFailures && !caskrunSteamQuitHeld && !timers.count);
+        /* A refused show only beeps: no Quit notice, hold or retry. */
+        for (int mode = 1; mode <= 4; mode++)
+        {
+            reset(); waitMode = mode;
+            CHECK(CaskrunRequestSteamShow()); drain();
+            CHECK(beeps == 1 && !quitFailures && !caskrunSteamQuitHeld && showSpawns == 1 && !timers.count);
+        }
+        reset(); setenv("WINEPREFIX", dataPath, 1);
+        CHECK(!CaskrunRequestSteamShow()); CHECK(!spawnCalls && beeps == 1 && !caskrunSteamShowPending);
+        reset(); setenv("CASKRUN_NATIVE_BOTTLE", "invalid", 1);
+        CHECK(!CaskrunRequestSteamShow()); CHECK(!spawnCalls && beeps == 1 && !caskrunSteamShowPending);
+        reset(); failSpawn = 1;
+        CHECK(!CaskrunRequestSteamShow()); CHECK(spawnCalls == 1 && beeps == 1 && !caskrunSteamShowPending && !backgroundBlocks.count);
+
+        /* An in-flight Quit blocks shows until its child is reaped. */
+        reset();
+        CHECK(CaskrunRequestSteamShutdown()); CHECK(caskrunSteamShutdownPending && quitSpawns == 1 && !caskrunSteamQuitHeld);
+        CHECK(CaskrunRequestSteamShutdown()); CHECK(quitSpawns == 1);
+        CHECK(!CaskrunRequestSteamShow()); CHECK(!showSpawns && !beeps && !timers.count);
+        step(backgroundBlocks); CHECK(caskrunSteamShutdownPending);
+        CHECK(!CaskrunRequestSteamShow()); CHECK(!showSpawns);
+        /* Success proves submission only: a bounded hold, then Dock may ask again. */
+        step(mainBlocks);
+        CHECK(!caskrunSteamShutdownPending && caskrunSteamQuitHeld && timers.count == 1 && !quitFailures);
+        CHECK(!CaskrunRequestSteamShow()); CHECK(!showSpawns && !beeps);
+        fireTimer(); CHECK(!caskrunSteamQuitHeld && !timers.count);
+        CHECK(CaskrunRequestSteamShow()); CHECK(showSpawns == 1); drain();
+        /* A failed Quit request clears the hold at once and keeps its notice. */
+        reset(); waitMode = 1;
+        CHECK(CaskrunRequestSteamShutdown()); drain(); CHECK(quitFailures == 1 && !caskrunSteamQuitHeld && !timers.count);
+        waitMode = 0; CHECK(CaskrunRequestSteamShow()); CHECK(showSpawns == 1); drain();
+        /* A stale timer never unblocks a newer in-flight or completed Quit. */
+        reset();
+        CHECK(CaskrunRequestSteamShutdown()); drain(); CHECK(caskrunSteamQuitHeld && timers.count == 1);
+        CHECK(CaskrunRequestSteamShutdown()); CHECK(quitSpawns == 2 && caskrunSteamShutdownPending);
+        fireTimer(); CHECK(caskrunSteamQuitHeld && caskrunSteamShutdownPending);
+        CHECK(!CaskrunRequestSteamShow()); CHECK(!showSpawns);
+        drain(); CHECK(caskrunSteamQuitHeld && timers.count == 1);
+        CHECK(!CaskrunRequestSteamShow()); CHECK(!showSpawns);
+        fireTimer(); CHECK(!caskrunSteamQuitHeld);
+        reset();
+        CHECK(CaskrunRequestSteamShutdown()); drain(); CHECK(CaskrunRequestSteamShutdown()); drain();
+        CHECK(timers.count == 2 && caskrunSteamQuitHeld);
+        fireTimer(); CHECK(caskrunSteamQuitHeld); fireTimer(); CHECK(!caskrunSteamQuitHeld);
+        reset();
+        CHECK(CaskrunRequestSteamShutdown()); drain(); waitMode = 1; CHECK(CaskrunRequestSteamShutdown()); drain();
+        CHECK(!caskrunSteamQuitHeld && quitFailures == 1 && timers.count == 1);
+        fireTimer(); CHECK(!caskrunSteamQuitHeld && !caskrunSteamShutdownPending);
+
+        /* Quit during an in-flight show waits for it and is submitted exactly once. */
+        reset();
+        CHECK(CaskrunRequestSteamShow()); CHECK(CaskrunRequestSteamShutdown());
+        CHECK(caskrunSteamQuitQueued && !caskrunSteamShutdownPending && !quitSpawns);
+        CHECK(CaskrunRequestSteamShutdown()); CHECK(!quitSpawns);
+        CHECK(!CaskrunRequestSteamShow()); CHECK(showSpawns == 1);
+        step(backgroundBlocks); CHECK(!quitSpawns && caskrunSteamQuitQueued);
+        step(mainBlocks);
+        CHECK(!caskrunSteamShowPending && !caskrunSteamQuitQueued && caskrunSteamShutdownPending && quitSpawns == 1 && !beeps);
+        CHECK(!CaskrunRequestSteamShow()); CHECK(showSpawns == 1);
+        drain(); CHECK(caskrunSteamQuitHeld && !quitFailures && quitSpawns == 1 && spawnCalls == 2);
+        /* A refused show still releases the queued Quit, without the show's beep. */
+        reset();
+        CHECK(CaskrunRequestSteamShow()); CHECK(CaskrunRequestSteamShutdown());
+        waitMode = 1; step(backgroundBlocks); waitMode = 0; step(mainBlocks);
+        CHECK(quitSpawns == 1 && !beeps && caskrunSteamShutdownPending && !caskrunSteamQuitQueued);
+        drain(); CHECK(caskrunSteamQuitHeld && !quitFailures);
+        /* The queued Quit's own spawn refusal keeps the existing notice once. */
+        reset();
+        CHECK(CaskrunRequestSteamShow()); CHECK(CaskrunRequestSteamShutdown());
+        step(backgroundBlocks); failSpawn = 1; step(mainBlocks);
+        CHECK(quitFailures == 1 && quitSpawns == 1 && !beeps && !caskrunSteamQuitQueued && !caskrunSteamShutdownPending);
+        CHECK(!backgroundBlocks.count && !caskrunSteamQuitHeld);
+        failSpawn = 0; CHECK(CaskrunRequestSteamShow()); drain();
+        /* A queued Quit whose child fails shows the notice and holds nothing. */
+        reset();
+        CHECK(CaskrunRequestSteamShow()); CHECK(CaskrunRequestSteamShutdown());
+        step(backgroundBlocks); step(mainBlocks); waitMode = 1; drain();
+        CHECK(quitFailures == 1 && !caskrunSteamQuitHeld && !timers.count);
+        /* Quit after the show completed is submitted directly, never queued. */
+        reset();
+        CHECK(CaskrunRequestSteamShow()); drain();
+        CHECK(CaskrunRequestSteamShutdown()); CHECK(!caskrunSteamQuitQueued && quitSpawns == 1 && caskrunSteamShutdownPending);
+        drain();
+
+        /* A real original child proves argv, replacement home, filtered native
+         * variables, null standard descriptors, closed extras and cwd '/'. */
+        reset();
+        char report[PATH_MAX], fdText[32];
+        CHECK(snprintf(report, sizeof(report), "%s/show-child-result", argv[1]) < (int)sizeof(report));
+        int leaked = open(corePath, O_RDONLY); CHECK(leaked > 2); snprintf(fdText, sizeof(fdText), "%d", leaked);
+        setenv("CASKRUN_QUIT_FIXTURE_REPORT", report, 1); setenv("CASKRUN_QUIT_FIXTURE_FD", fdText, 1);
+        setenv("CASKRUN_QUIT_FIXTURE_DATA", dataPath, 1); setenv("CASKRUN_QUIT_FIXTURE_PREFIX", prefixPath, 1);
+        setenv("CASKRUN_FIXTURE_VERB", "request-steam-show", 1);
+        realSpawn = YES;
+        CHECK(CaskrunRequestSteamShow()); drain(); CHECK(!beeps); CHECK(!close(leaked)); CHECK(!access(report, F_OK));
+        unsetenv("CASKRUN_FIXTURE_VERB");
+
+        /* Exact production reopen delegate. */
+        [ProbeApplication sharedApplication];
+        CHECK([NSApp isKindOfClass:[ProbeApplication class]]);
+        [NSApp setActivationPolicy:interactive ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyProhibited];
+        if (interactive) [NSApp finishLaunching];
+        ProbeApplication *app = (ProbeApplication *)NSApp;
+        app.useProbeHidden = YES;
+        WineApplicationController *controller = [[WineApplicationController alloc] init];
+        reset(); CHECK(CaskrunPreparedSteamUI());
+        /* First-launch AppKit reopen events cannot inject a second client
+         * request before this helper has ever presented a real client. */
+        CHECK(!caskrunSteamPresentedClient);
+        for (int initial = 0; initial < 3; initial++) CHECK(reopen(controller));
+        CHECK(!spawnCalls && !beeps && !backgroundBlocks.count);
+        reset(); app.probeHidden = YES;
+        CHECK(reopen(controller)); CHECK(!spawnCalls && !beeps);
+        app.probeHidden = NO;
+
+        WineWindow *window = newWindow();
+        CHECK([[NSApp windows] containsObject:window]);
+        /* Remembering a window requires prior visibility, a drawn frame and
+         * real client-sized content. A helper or not-yet-drawn startup panel
+         * cannot arm recovery merely by being ordered out. */
+        window.drawnSinceShown = YES;
+        [controller caskrunRememberPresentedSteamWindow:window]; CHECK(!caskrunSteamPresentedClient);
+        window.modelVisible = YES; window.drawnSinceShown = NO;
+        [controller caskrunRememberPresentedSteamWindow:window]; CHECK(!caskrunSteamPresentedClient);
+        window.drawnSinceShown = YES; window.hasContent = NO;
+        [controller caskrunRememberPresentedSteamWindow:window]; CHECK(!caskrunSteamPresentedClient);
+        window.hasContent = YES;
+        [window setFrame:NSMakeRect(160, 200, 320, 200) display:NO];
+        [controller caskrunRememberPresentedSteamWindow:window]; CHECK(!caskrunSteamPresentedClient);
+        [window setFrame:NSMakeRect(160, 200, 706, 438) display:NO];
+        unsetenv("CASKRUN_STEAM_MODE");
+        [controller caskrunRememberPresentedSteamWindow:window]; CHECK(!caskrunSteamPresentedClient);
+        env();
+        window.modelVisible = NO; window.drawnSinceShown = NO;
+        CHECK(reopen(controller)); CHECK(!spawnCalls && !caskrunSteamPresentedClient);
+        /* The production callback runs before Wine clears its shown/drawn
+         * states, including a real client that is now being destroyed. */
+        window.modelVisible = YES; window.drawnSinceShown = YES; window.closing = YES;
+        [controller caskrunRememberPresentedSteamWindow:window]; CHECK(caskrunSteamPresentedClient);
+        window.modelVisible = NO; window.drawnSinceShown = NO;
+        [window close]; [window release];
+        /* Once a real client was presented, its destroyed last window can be
+         * recovered through Steam's own fixed protocol request. */
+        reset(); CHECK(reopen(controller)); CHECK(showSpawns == 1 && !beeps); drain();
+        reset(); app.probeHidden = YES;
+        CHECK(reopen(controller)); CHECK(showSpawns == 1); drain();
+        app.probeHidden = NO;
+        window = newWindow();
+        CHECK([[NSApp windows] containsObject:window]);
+        /* Steam hid its window in Windows: neither visible nor minimized. */
+        reset();
+        CHECK(reopen(controller)); CHECK(showSpawns == 1 && !beeps);
+        CHECK(!window.isVisible && !window.deminiaturizeCount && !window.orderCount);
+        CHECK(reopen(controller)); CHECK(showSpawns == 1); /* pending suppresses repeats */
+        drain();
+        /* Hidden app retaining real content: AppKit's unhide restores it natively. */
+        reset(); app.probeHidden = YES; window.savedVisibleState = YES;
+        CHECK([window wouldBeVisible] && !window.isVisible);
+        CHECK(reopen(controller)); CHECK(!spawnCalls && !window.deminiaturizeCount);
+        /* Hidden app whose window Windows ordered out (Wine cleared its saved state). */
+        reset(); window.savedVisibleState = NO;
+        CHECK(reopen(controller)); CHECK(showSpawns == 1); drain();
+        /* Hidden app whose retained window is empty, or is being destroyed. */
+        reset(); window.savedVisibleState = YES; window.hasContent = NO;
+        CHECK(reopen(controller)); CHECK(showSpawns == 1); drain();
+        reset(); window.hasContent = YES; window.closing = YES;
+        CHECK(reopen(controller)); CHECK(showSpawns == 1); drain();
+        window.closing = NO; window.savedVisibleState = NO; app.probeHidden = NO;
+        /* A visible window without content does not block Steam's own recovery. */
+        reset(); window.modelVisible = YES; window.hasContent = NO;
+        CHECK(reopen(controller)); CHECK(showSpawns == 1); drain();
+        window.hasContent = YES;
+        /* Visible content: nothing to recover. */
+        reset(); CHECK(reopen(controller)); CHECK(!spawnCalls && !window.deminiaturizeCount);
+        /* Minimized real client: Wine's original deminiaturize restores it. */
+        reset(); window.modelVisible = NO; window.modelMiniaturized = YES;
+        CHECK(reopen(controller)); CHECK(window.deminiaturizeCount == 1 && !window.modelMiniaturized && !spawnCalls);
+        /* Only an empty minimized helper: Wine still deminiaturizes it as before,
+         * and it does not suppress Steam's own show. */
+        reset(); window.modelVisible = NO; window.modelMiniaturized = YES; window.hasContent = NO;
+        CHECK(reopen(controller)); CHECK(showSpawns == 1 && window.deminiaturizeCount == 2); drain();
+        window.hasContent = YES; window.modelVisible = NO; window.modelMiniaturized = NO;
+        /* Explicit Quit: in flight, then the bounded hold; then Dock may ask. */
+        reset(); CHECK(CaskrunRequestSteamShutdown());
+        CHECK(reopen(controller)); CHECK(!showSpawns);
+        drain(); CHECK(reopen(controller)); CHECK(!showSpawns && !beeps);
+        fireTimer(); CHECK(reopen(controller)); CHECK(showSpawns == 1); drain();
+        /* Quit queued behind a Dock show: later Dock clicks stay blocked. */
+        reset(); CHECK(reopen(controller)); CHECK(CaskrunRequestSteamShutdown());
+        CHECK(reopen(controller)); CHECK(showSpawns == 1 && !quitSpawns);
+        drain(); CHECK(quitSpawns == 1 && caskrunSteamQuitHeld && showSpawns == 1);
+        CHECK(!window.orderCount);
+
+        /* Every other process keeps Wine's original reopen behavior, hidden or not. */
+        for (int gate = 0; gate < 9; gate++)
+        {
+            reset();
+            switch (gate)
+            {
+            case 0: setenv("CASKRUN_NATIVE_EXEC", "0", 1); probeArguments = @[@"Steam", @"C:\\Steam\\steamwebhelper.exe"]; break;
+            case 1: unsetenv("CASKRUN_STEAM_MODE"); break;
+            case 2: setenv("CASKRUN_STEAM_MODE", "0", 1); break;
+            case 3: probeArguments = @[@"WindowsApp", @"C:\\Steam\\steamwebhelper.exe", @"--type=renderer"]; break;
+            case 4: probeArguments = @[@"WindowsApp", @"C:\\Steam\\steamwebhelper.exe", @"--type", @"crashpad-handler"]; break;
+            case 5: probeArguments = @[@"WindowsApp", @"C:\\Steam\\steam.exe"]; break;
+            case 6: probeArguments = @[@"WindowsApp", @"C:\\Games\\game.exe"]; setenv("CASKRUN_NATIVE_IMAGE", "/original-fixture/game.exe", 1); break;
+            case 7: probeArguments = @[@"WindowsApp", @"C:\\Launcher\\OtherLauncher.exe"]; setenv("CASKRUN_NATIVE_IMAGE", "/original-fixture/OtherLauncher.exe", 1); break;
+            case 8: unsetenv("CASKRUN_NATIVE_EXEC"); probeArguments = @[@"wine", @"C:\\Steam\\steamwebhelper.exe"]; break;
+            }
+            CHECK(!CaskrunPreparedSteamUI());
+            window.modelVisible = NO; window.modelMiniaturized = NO;
+            int restored = window.deminiaturizeCount;
+            CHECK(reopen(controller)); CHECK(!spawnCalls && !beeps && window.deminiaturizeCount == restored);
+            app.probeHidden = YES; window.savedVisibleState = NO;
+            CHECK(reopen(controller)); CHECK(!spawnCalls && !beeps);
+            app.probeHidden = NO;
+            window.modelMiniaturized = YES;
+            CHECK(reopen(controller)); CHECK(!spawnCalls && window.deminiaturizeCount == restored + 1 && !window.modelMiniaturized);
+        }
+        reset(); CHECK(CaskrunPreparedSteamUI());
+
+        if (interactive)
+        {
+            /* The same decisions against AppKit's real window and hide state. */
+            modelWindows = NO; app.useProbeHidden = NO;
+            WineWindow *real = newWindow();
+            [NSApp activateIgnoringOtherApps:YES];
+            [real orderFront:nil];
+            settleUntil(5, ^{ return real.isVisible; }); CHECK(real.isVisible);
+            reset(); CHECK(reopen(controller)); CHECK(!spawnCalls);
+            [real orderOut:nil];
+            settleUntil(5, ^{ return (BOOL)!real.isVisible; }); CHECK(!real.isVisible);
+            real.orderCount = 0;
+            reset(); CHECK(reopen(controller));
+            settleUntil(0.5, ^{ return real.isVisible; });
+            CHECK(showSpawns == 1 && !real.isVisible && !real.orderCount); drain();
+            [real orderFront:nil]; [real miniaturize:nil];
+            settleUntil(5, ^{ return real.isMiniaturized; }); CHECK(real.isMiniaturized);
+            reset(); CHECK(reopen(controller));
+            settleUntil(5, ^{ return (BOOL)!real.isMiniaturized; }); CHECK(!real.isMiniaturized && !spawnCalls);
+            settleUntil(5, ^{ return real.isVisible; }); CHECK(real.isVisible);
+            /* Hidden while visible: retained content, AppKit restores it. */
+            [NSApp hide:nil];
+            settleUntil(5, ^{ return NSApp.isHidden; }); CHECK(NSApp.isHidden && [real wouldBeVisible]);
+            reset(); CHECK(reopen(controller)); CHECK(!spawnCalls);
+            [NSApp unhide:nil];
+            settleUntil(5, ^{ return real.isVisible; }); CHECK(real.isVisible && !spawnCalls);
+            /* Ordered out, then hidden: nothing retained, so Steam is asked once. */
+            [real orderOut:nil];
+            settleUntil(5, ^{ return (BOOL)!real.isVisible; }); CHECK(!real.isVisible);
+            [NSApp hide:nil];
+            settleUntil(5, ^{ return NSApp.isHidden; }); CHECK(NSApp.isHidden && ![real wouldBeVisible]);
+            real.orderCount = 0;
+            reset(); CHECK(reopen(controller)); CHECK(showSpawns == 1 && !real.orderCount); drain();
+            [NSApp unhide:nil];
+            settleUntil(0.5, ^{ return real.isVisible; }); CHECK(!real.isVisible && !real.orderCount);
+            [real close]; [real release];
+        }
+        [window close]; [window release]; [controller release];
+        printf("%u native Steam Dock-reopen request, delegate and scope checks passed (%s)\n",
+               checks, interactive ? "interactive" : "headless");
+    }
+    return 0;
+}

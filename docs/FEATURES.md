@@ -40,13 +40,20 @@ original executable; replacement is not an automatic rollback protocol.
 Steam retains its normal updater, sign-in and ownership checks. The app waits
 for a main-sized, onscreen Steam window owned by that bottle's generated native
 identity before hiding Caskrun; a spawned process alone does not finish the
-handoff. Starting/updating feedback prevents repeated Open requests, and
+handoff. Startup feedback prevents repeated Open requests, and
 **Stop waiting** ends only that observation so Caskrun's controls return while
 Steam stays running. A timeout keeps successful setup intact and reports
 startup feedback instead of offering to repeat a completed installer. The
 wait has a finite deadline and needs neither
-Accessibility nor Screen Recording permission. These changes are implemented
-in source; 45 focused Swift checks and full app typechecking passed. Packaged
+Accessibility nor Screen Recording permission. Steam update phases and download
+percentages come only from complete new events in its bottle-local bootstrap
+log, with bounded reads and symlink refusal; old sessions and elapsed time alone
+never become update progress. Other catalog stores use the same bounded window
+handoff and Stop waiting controls with neutral startup text, without assuming
+Steam's updater behavior. Count-only local diagnostics help investigate window
+matching without recording names, identifiers, paths or window titles. These
+changes are implemented in source; 100 focused Swift checks and full app
+typechecking passed. Packaged
 installation, account sign-in and gameplay acceptance remain separate checks.
 Temporary files are cleaned on normal success, handled failure and cancellation;
 cleanup after an abrupt process or system crash is not guaranteed.
@@ -129,10 +136,18 @@ References: [CrossOver Mac User Guide — running apps][guide], [creating a laun
 
 ## Runtime, graphics, and input
 
-The reviewed v12 development package has exact identity
-`sha256:cae84f3978b2e0820bbdfc95c1e9dd5fa6c79c8d1f1aca825ac86bd2afb77c29`.
+The reviewed v14 development package has exact identity
+`sha256:398d08ea874ad53c8c8f6519e291a990f9d598dde0dfebc88fb149fe6d6c1c54`.
 Its source and lifecycle validation limits are recorded in
 [native editing and close behavior](NATIVE_TEXT_EDITING.md).
+
+Display and graphics reads/writes are ordered per bottle so stale asynchronous
+results cannot overwrite newer confirmed preferences. A refresh failure keeps
+the last confirmed values visible with a warning. Graphics, DXMT and Retina
+controls are disabled for a bottle known to be running or stopping; closing a
+store's window can leave its apps running. Seventeen focused ordering/helper
+checks and full app typechecking passed. These UI fixes do not change existing
+saved settings or defaults, and do not establish additional game compatibility.
 
 | Public workflow to cover | Status | Current Caskrun state |
 | --- | --- | --- |

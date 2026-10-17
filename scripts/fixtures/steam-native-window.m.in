@@ -27,6 +27,13 @@ static BOOL quitRequestSucceeds=YES;
 static int quitRequests, quitFailures;
 static BOOL CaskrunRequestSteamShutdown(void) { quitRequests++; return quitRequestSucceeds; }
 static void CaskrunSteamQuitFailed(void) { quitFailures++; }
+/* Set to 0 by the runner for trees without the Dock-reopen patch. */
+#define CASKRUN_REOPEN_PATCH 1
+static int showRequests;
+#if CASKRUN_REOPEN_PATCH
+static BOOL caskrunSteamPresentedClient;
+static BOOL CaskrunRequestSteamShow(void) { showRequests++; return YES; }
+#endif
 
 @class WineWindow;
 enum { WINDOW_CLOSE_REQUESTED, WINDOW_MINIMIZE_REQUESTED, APP_QUIT_REQUESTED };
@@ -79,10 +86,13 @@ static BOOL stage_manager_enabled(void) { return NO; }
 @interface WineWindow : NSPanel <NSWindowDelegate>
 {
     BOOL resizable, maximized, fullscreen, disabled, noForeground, preventsAppActivation, floating, closing;
+    BOOL savedVisibleState;
     NSWindow *latentParentWindow;
     CaskrunSteamLoginHeader *caskrunSteamHeader;
     WineEventQueue *queue;
 }
+@property(readonly) BOOL closing;
+- (BOOL)wouldBeVisible;
 @property(readonly) CaskrunSteamLoginHeader *header;
 @property(readonly) WineEventQueue *queue;
 @property(assign) NSInteger nativeEvents;
@@ -126,10 +136,15 @@ static BOOL stage_manager_enabled(void) { return NO; }
         [self setReleasedWhenClosed:NO]; [self setHidesOnDeactivate:NO];
         self.contentView=[[[WineContentView alloc] initWithFrame:NSMakeRect(0,0,700,440)] autorelease];
         queue=[[WineEventQueue alloc] init]; self.delegate=self;
+        // Wine records visibility when the app hides (cocoa_window.m applicationWillHide).
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(fixtureWillHide) name:NSApplicationWillHideNotification object:NSApp];
     }
     return self;
 }
-- (void)dealloc { [queue release]; [caskrunSteamHeader release]; [super dealloc]; }
+- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; [queue release]; [caskrunSteamHeader release]; [super dealloc]; }
+- (void)fixtureWillHide { savedVisibleState=[self isVisible]; }
+- (BOOL)wouldBeVisible { return [NSApp isHidden] ? savedVisibleState : [self isVisible]; }
+- (BOOL)closing { return closing; }
 - (CaskrunSteamLoginHeader *)header { return caskrunSteamHeader; }
 - (WineEventQueue *)queue { return queue; }
 - (BOOL)presentsVisibleContent { return !NSIsEmptyRect(self.contentView.bounds); }
@@ -300,12 +315,15 @@ int main(int argc, char **argv)
             CHECK([controller caskrunHandleSteamHeaderEvent:mouse(NSEventTypeLeftMouseDown,window,closePoint)]); settle();
             CHECK(NSApp.hidden); CHECK(window.queue.closeCount==closes); CHECK(window.queue.quitCount==0); CHECK(session.running);
             CHECK(NSEqualRects(window.frame,originalFrame)); CHECK(NSEqualRects(window.contentView.bounds,originalBounds));
+            // A Dock reopen while still hidden sees retained content and leaves restoration to AppKit.
+            CHECK([window wouldBeVisible]); [controller applicationShouldHandleReopen:NSApp hasVisibleWindows:NO]; CHECK(showRequests==0);
             // NSApplication unhiding and the production Dock-reopen delegate retain the same window.
             [NSApp unhide:nil]; [controller applicationShouldHandleReopen:NSApp hasVisibleWindows:NO]; settle();
-            CHECK(!NSApp.hidden); CHECK(window.visible); CHECK(window.header!=nil); CHECK(session.running);
+            CHECK(!NSApp.hidden); CHECK(window.visible); CHECK(window.header!=nil); CHECK(session.running); CHECK(showRequests==0);
             [window.header.minimizeButton performClick:nil]; CHECK(window.queue.minimizeCount==1); CHECK(session.running);
             [window fixtureMiniaturize]; settle(); CHECK(window.miniaturized);
             [controller applicationShouldHandleReopen:NSApp hasVisibleWindows:NO]; settle(); CHECK(!window.miniaturized); CHECK(window.visible);
+            CHECK(showRequests==0);
             ProbeQuitDelegate *quitDelegate=[[[ProbeQuitDelegate alloc] init] autorelease];
             [NSApp setDelegate:quitDelegate]; [NSApp terminate:nil];
             CHECK(window.queue.quitCount==0); CHECK(quitDelegate.reply==NSTerminateCancel); CHECK(quitRequests==3);

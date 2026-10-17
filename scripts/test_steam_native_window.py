@@ -54,18 +54,26 @@ def main() -> None:
     assert "[self caskrunUpdateSteamHeader];" in extract(window, "- (void) setFrameAndWineFrame:")
     assert "[self caskrunUpdateSteamHeader];" in extract(window, "- (void) adjustFeaturesForState")
     template = (REPO / "scripts/fixtures/steam-native-window.m.in").read_text()
-    functions = "\n".join(extract(app, name) for name in (
-        "static BOOL CaskrunSteamDockEnabled", "static NSString* CaskrunArgumentBasename", "static BOOL CaskrunIsWindowsProcess",
-        "static BOOL CaskrunNativeDockEnabled", "static NSString* CaskrunNativeImageName", "static BOOL CaskrunNativeBackgroundProcess"))
-    controller_methods = "\n".join(extract(app, name) for name in (
-        "- (BOOL) caskrunSteamNativeWindowEnabled", "- (BOOL) caskrunHandleSteamHeaderEvent:",
-        "- (void) unminimizeWindowIfNoneVisible", "- (BOOL) applicationShouldHandleReopen:",
-        "- (NSApplicationTerminateReply) applicationShouldTerminate:"))
+    # The Dock-reopen patch adds a prepared-Steam gate and restorable-window
+    # predicate to the extracted reopen delegate; older trees lack both.
+    reopen_patch = "- (BOOL) caskrunHasRestorableSteamWindow" in app
+    function_names = ["static BOOL CaskrunSteamDockEnabled", "static NSString* CaskrunArgumentBasename", "static BOOL CaskrunIsWindowsProcess",
+                      "static BOOL CaskrunNativeDockEnabled", "static NSString* CaskrunNativeImageName", "static BOOL CaskrunNativeBackgroundProcess"]
+    method_names = ["- (BOOL) caskrunSteamNativeWindowEnabled", "- (BOOL) caskrunHandleSteamHeaderEvent:",
+                    "- (void) unminimizeWindowIfNoneVisible", "- (BOOL) applicationShouldHandleReopen:",
+                    "- (NSApplicationTerminateReply) applicationShouldTerminate:"]
+    if reopen_patch:
+        function_names.append("static BOOL CaskrunPreparedSteamUI")
+        method_names.append("- (BOOL) caskrunHasRestorableSteamWindow")
+    functions = "\n".join(extract(app, name) for name in function_names)
+    controller_methods = "\n".join(extract(app, name) for name in method_names)
     window_methods = "\n".join(extract(window, name) for name in (
         "- (BOOL) caskrunSteamHeaderEligible", "- (void) caskrunUpdateSteamHeader", "- (void) setTitle:",
         "- (BOOL) caskrunSteamHeaderAcceptsEvents", "- (BOOL) caskrunSteamHeaderContainsEvent:",
         "- (void) caskrunCloseSteamLogin:", "- (void) caskrunMinimizeSteamLogin:",
         "- (BOOL)windowShouldClose:", "- (void) miniaturize:"))
+    if not reopen_patch:
+        template = template.replace("#define CASKRUN_REOPEN_PATCH 1", "#define CASKRUN_REOPEN_PATCH 0")
     code = template.replace("/* PROCESS_FUNCTIONS */", functions).replace("/* CONTROLLER_METHODS */", controller_methods).replace("/* WINDOW_METHODS */", window_methods).replace("/* CONTENT_VIEW_METHODS */", extract(window, "- (void) didAddSubview:"))
     with tempfile.TemporaryDirectory(prefix=".steam-header-test-", dir=REPO / ".build") as temp:
         work = Path(temp)

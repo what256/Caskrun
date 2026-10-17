@@ -497,3 +497,97 @@ client, account or real game was used, and no existing user bottle was run.
 The Steam text-menu patch remains unchanged. Explicit native Steam Quit,
 logged-in Steam windows, games and full-Quit cancellation during an active
 real app remain separate user-led checks.
+
+### V13: Steam Dock recovery in both graphics views
+
+The independently built package is
+`sha256:17504e50264389aa7986828fa6e4ff3578ce97d4fc096b6dabdf12c60c4de1fb`.
+The additional original LGPL patch is
+`runtime-patches/wine-11.0-steam-reopen.patch`, SHA-256
+`0fb1e8c4a481bcf6a5c635e34f54ac85a878e7d07dbeb65cd0149cda9ff0734d`.
+The previous native editing, header, identity, and Quit patches retain their
+exact bytes. Only both Unix Mac drivers, their component receipt, source
+notice and new corresponding patch change. Windows drivers, translators, TLS,
+fonts, native text protocol and all other package files remain unchanged.
+The Python packager and an independent probe using Core's Rust attestation
+agreed on the complete new tree identity.
+
+Wine's upstream Dock delegate only restores a minimized window. A logged-in
+Steam client can instead hide or destroy its own main window while continuing
+to run. The prepared visible Steam browser now checks actual Wine windows,
+content and Wine's saved hidden-app state. If nothing can be restored, it asks
+Core to send exactly `steam://open/main` to the same freshly verified running
+Steam client. Core reuses the checked Quit control path, runtime and client
+identity proofs, filtered environment, scoped tracking and final revalidation.
+It does not adopt saved shortcut arguments, alter Steam files or signal apps.
+No Cocoa call forces a Windows-hidden window into view. Other publishers and
+background processes keep Wine's ordinary restore behavior.
+
+There is one pending Show. An explicit Quit waits behind an existing Show,
+then runs once; it suppresses new Shows while its own child remains in flight.
+After successful submission, a generation-checked five-second hold prevents
+immediate reopen and then permits recovery if Steam did not exit. A failed Quit
+child clears the hold and shows the existing failure notice. No timer cancels a child. If Show
+stalls, its queued native Quit also waits; Caskrun's separate bottle Force Quit
+remains the escape. Submission is not proof that Steam actually exited, and
+the five-second hold is not a guarantee for an indefinitely slow shutdown.
+
+Validation before packaged acceptance: exact extracted production helpers
+passed 16,140 headless and 16,997 interactive reopen checks. Existing Quit
+fixtures passed 3,815 checks; the native header and composition fixtures passed
+83 and 16 respectively. This includes hidden retained versus ordered-out,
+empty or closing windows, minimized clients, duplicate requests, stale timers,
+queued Quit and generic-process negatives. A live Core Show restored a rendered
+logged-in Steam Store window twice after Windows Close, with DXMT selected and
+effective and one managed Steam application identity. That verifies the client
+protocol in DXMT, separately from final Dock-event delivery. It does not verify
+gameplay, quitting with a running game, or other publishers' tray protocols.
+
+`python3 -B scripts/build-wine-steam-reopen-dev.py` requires the exact reviewed
+V12 package as its base. It verifies the corresponding Wine archive and all
+patch pins, configures a small independent Mac-driver build and replaces only
+the two Unix drivers. It does not need the deleted full Wine/TLS compiler
+trees. The validated local run reused a separately checked minimal configure
+and cached build dependencies with `--resume`; a complete fresh-script run
+remains distinct from that evidence. Twelve exact predecessor edges preserve
+the 66 historical policies and their backup suffixes, for 78 total; upgrades
+still require the existing idle, ownership and rollback checks.
+
+### V14: require prior client presentation before Dock recovery
+
+The current package is
+`sha256:398d08ea874ad53c8c8f6519e291a990f9d598dde0dfebc88fb149fe6d6c1c54`,
+with revised reopen patch SHA-256
+`83e4f375644906163239d37581d1f64409cd4d88a21ec3aec82ef63c56fcacbe`.
+It retains the earlier control serialization and adds a per-helper history
+guard: recovery is armed only when Wine orders out previously drawn, visible
+client-sized content. A first-start AppKit reopen with no client window sends
+no protocol request. This is a correctness guard, not an established repair for
+the independently observed audio-device stall.
+
+A complete clean builder run verified the pinned upstream source, Bison,
+configure, both drivers, corresponding patch and complete package identity.
+Only the same five package paths change from V12; all Windows drivers, TLS,
+fonts and other engine binaries remain unchanged. Exact extracted helpers
+passed 16,160 headless and 17,017 interactive reopen checks, with the existing
+3,815 Quit, 83 header and 16 composition checks intact. Initial zero-window
+reopen, undrawn content and background-process negatives are included.
+
+Build 52's live first starts stalled with both DXMT and WineD3D. One normal
+launch log and no extra Show control were observed per attempt. A native sample
+placed Steam's engine thread in Wine CoreAudio format checking while assigning
+an audio unit's device, matching the earlier intermittent stall. Microphone
+access was already enabled and was left unchanged. An idle-only browser-cache
+comparison did not repair this attempt, and the original cache was restored.
+These observations do not establish that the new Dock delegate caused the
+stall. Final packaged Dock and normal-audio startup acceptance remain distinct
+from the native fixture and direct client-protocol checks above.
+
+The later macOS permission-service logs tied each attempted startup to a
+rejected former Caskrun code requirement and a pending microphone permission
+request. The local app is ad-hoc signed, so a rebuild changes its code hash;
+the old enabled entry in System Settings did not prove authorization for the
+new code. The microphone entry was reset through System Settings and returned to its
+enabled state for the replacement build, without changing other apps' grants,
+recording audio or disabling the Wine audio driver. Foreground permission
+completion and final Steam startup/Dock acceptance remain live checks.

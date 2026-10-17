@@ -61,9 +61,20 @@ class SteamQuitTests(unittest.TestCase):
 
     def test_exact_helpers_spawn_and_delegate_without_wine_or_ui(self):
         names = ("static BOOL CaskrunOwnedProgram", "static BOOL CaskrunSteamQuitDirectory",
-                 "static BOOL CaskrunSteamQuitBindings", "static BOOL CaskrunSteamQuitKeepEnvironment",
-                 "static BOOL CaskrunRequestSteamShutdown")
-        helpers = "static BOOL caskrunSteamShutdownPending;\n" + "\n".join(extract(self.app, name) for name in names)
+                 "static BOOL CaskrunSteamQuitBindings", "static BOOL CaskrunSteamQuitKeepEnvironment")
+        state = ["static BOOL caskrunSteamShutdownPending;"]
+        if "static BOOL CaskrunSpawnSteamControl(" in self.app:
+            # The Dock-reopen patch shares the Quit spawner and its state.
+            state += ["static BOOL caskrunSteamShowPending, caskrunSteamQuitQueued, caskrunSteamQuitHeld;",
+                      "static unsigned long caskrunSteamQuitGeneration;",
+                      "enum caskrun_steam_control { CASKRUN_STEAM_CONTROL_QUIT, CASKRUN_STEAM_CONTROL_SHOW };",
+                      "static void CaskrunSteamControlFinished(enum caskrun_steam_control, BOOL);"]
+            names += ("static BOOL CaskrunSpawnSteamControl(", "static BOOL CaskrunSubmitSteamQuit(",
+                      "static void CaskrunSteamControlFinished(enum caskrun_steam_control control, BOOL failed)")
+        names += ("static BOOL CaskrunRequestSteamShutdown",)
+        for line in state:
+            self.assertEqual(self.app.count("\n" + line + "\n"), 1, line)
+        helpers = "\n".join(state) + "\n" + "\n".join(extract(self.app, name) for name in names)
         template = (REPO / "scripts/fixtures/steam-quit.m.in").read_text()
         code = template.replace("@@HELPERS@@", helpers).replace("@@DELEGATE@@", extract(self.app, "- (NSApplicationTerminateReply) applicationShouldTerminate:"))
         with tempfile.TemporaryDirectory(prefix=".steam-quit-test-", dir=REPO / ".build") as temporary:

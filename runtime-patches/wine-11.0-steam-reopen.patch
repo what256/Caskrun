@@ -1,0 +1,298 @@
+From: Caskrun contributors
+Subject: Ask the verified Steam client to show its UI on Dock reopen
+
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+Blank source lines inside hunks are spelled as removed/added pairs so that
+every context line is non-empty and survives whitespace normalization.
+
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -184,16 +184,28 @@
+ }
+-
++
+-
++
+-
++
+ /* Explicit Quit controls the verified Steam client through Core. Closing the
+  * sign-in window still hides it. One exact child may be pending; waiting never
+  * blocks AppKit, and no process is signalled by this path. */
+ static BOOL caskrunSteamShutdownPending;
++/* A Dock reopen may ask the same Core to have Steam show its own UI; one show
++ * may be pending. Explicit Quit always wins: it waits behind an in-flight
++ * show, blocks shows while its own child runs, then holds them briefly after
++ * Core reports submission, which does not prove that Steam has exited. */
++static BOOL caskrunSteamShowPending, caskrunSteamQuitQueued, caskrunSteamQuitHeld;
++/* Reopen recovery is armed only after this helper presented a client and
++ * Windows ordered it out. Initial AppKit reopen events must not inject
++ * a second client request while Steam is still starting. */
++static BOOL caskrunSteamPresentedClient;
++static unsigned long caskrunSteamQuitGeneration;
++enum caskrun_steam_control { CASKRUN_STEAM_CONTROL_QUIT, CASKRUN_STEAM_CONTROL_SHOW };
++static void CaskrunSteamControlFinished(enum caskrun_steam_control, BOOL);
+-
++
+ static BOOL CaskrunOwnedProgram(const char *path)
+ {
+     struct stat info;
+     char resolved[PATH_MAX];
+     return path && *path == '/' && !lstat(path, &info) && S_ISREG(info.st_mode) &&
+            (info.st_uid == geteuid() || info.st_uid == 0) && !(info.st_mode & 0022) &&
+            realpath(path, resolved) && !strcmp(path, resolved) && !access(path, X_OK);
+@@ -262,32 +274,32 @@
+         "CASKRUN_NATIVE_", "CASKRUN_STEAM_MODE=", "CASKRUN_STEAM_NATIVE_APP=", "CASKRUN_STEAM_ICON="
+     };
+     unsigned int i;
+     for (i = 0; i < sizeof(removed) / sizeof(removed[0]); i++)
+         if (!strncmp(entry, removed[i], strlen(removed[i]))) return NO;
+     return YES;
+ }
+-
++
+-static BOOL CaskrunRequestSteamShutdown(void)
++static BOOL CaskrunSpawnSteamControl(enum caskrun_steam_control control)
+ {
+     const char *core = getenv("CASKRUN_NATIVE_CORE");
+     const char *data = getenv("CASKRUN_NATIVE_DATA");
+     const char *bottle = getenv("CASKRUN_NATIVE_BOTTLE");
+     const char *prefix = getenv("WINEPREFIX");
+-    char *arguments[] = {(char *)core, (char *)"request-steam-quit", (char *)bottle, NULL};
++    const char *verb = control == CASKRUN_STEAM_CONTROL_SHOW ? "request-steam-show" : "request-steam-quit";
++    char *arguments[] = {(char *)core, (char *)verb, (char *)bottle, NULL};
+     char **environment, **inherited = *_NSGetEnviron();
+     char *home;
+     size_t count, used, i;
+     posix_spawn_file_actions_t actions;
+     posix_spawnattr_t attributes;
+     pid_t child;
+     int error;
+-
++
+-    if (caskrunSteamShutdownPending) return YES;
+     if (!CaskrunSteamQuitBindings(core, data, bottle, prefix)) return NO;
+     for (count = 0; inherited[count]; count++) ;
+     environment = calloc(count + 2, sizeof(*environment));
+     if (!environment) return NO;
+     if (asprintf(&home, "CASKRUN_HOME=%s", data) < 0) { free(environment); return NO; }
+     for (i = used = 0; i < count; i++)
+         if (CaskrunSteamQuitKeepEnvironment(inherited[i])) environment[used++] = inherited[i];
+     environment[used] = home;
+@@ -301,27 +313,96 @@
+         error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+         if (!error) error = posix_spawn(&child, core, &actions, &attributes, arguments, environment);
+         posix_spawnattr_destroy(&attributes);
+     }
+     posix_spawn_file_actions_destroy(&actions);
+     free(home);
+     free(environment);
+     if (error) return NO;
+-    caskrunSteamShutdownPending = YES;
+     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+         int status = 0;
+         pid_t waited;
+         do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+         BOOL failed = waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
+         dispatch_async(dispatch_get_main_queue(), ^{
+-            caskrunSteamShutdownPending = NO;
+-            if (failed) CaskrunSteamQuitFailed();
++            CaskrunSteamControlFinished(control, failed);
+         });
+     });
++    return YES;
++}
++
++/* Submits one explicit Quit. It stays in flight until Core's child is reaped. */
++static BOOL CaskrunSubmitSteamQuit(void)
++{
++    if (!CaskrunSpawnSteamControl(CASKRUN_STEAM_CONTROL_QUIT)) return NO;
++    caskrunSteamShutdownPending = YES;
++    caskrunSteamQuitGeneration++;
++    return YES;
++}
++
++static void CaskrunSteamControlFinished(enum caskrun_steam_control control, BOOL failed)
++{
++    unsigned long generation;
++
++    if (control == CASKRUN_STEAM_CONTROL_SHOW)
++    {
++        caskrunSteamShowPending = NO;
++        if (caskrunSteamQuitQueued)
++        {
++            /* The earlier show has completed and can no longer overtake the
++             * explicit Quit queued behind it. Submit that Quit exactly once. */
++            caskrunSteamQuitQueued = NO;
++            if (!CaskrunSubmitSteamQuit()) CaskrunSteamQuitFailed();
++        }
++        else if (failed) NSBeep();
++        return;
++    }
++    caskrunSteamShutdownPending = NO;
++    if (failed)
++    {
++        caskrunSteamQuitHeld = NO;
++        CaskrunSteamQuitFailed();
++        return;
++    }
++    /* Core's success proves submission, not that Steam exited. Hold Dock shows
++     * for five seconds after this child completed; only a timer of the same
++     * generation may end the hold, so it never unblocks a newer Quit. No timer
++     * cancels or signals a process. */
++    generation = caskrunSteamQuitGeneration;
++    caskrunSteamQuitHeld = YES;
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++        if (generation == caskrunSteamQuitGeneration) caskrunSteamQuitHeld = NO;
++    });
++}
++
++static BOOL CaskrunRequestSteamShutdown(void)
++{
++    if (caskrunSteamShutdownPending || caskrunSteamQuitQueued) return YES;
++    if (caskrunSteamShowPending)
++    {
++        /* Never submit Quit beside a show whose Core lock order may differ. */
++        caskrunSteamQuitQueued = YES;
++        return YES;
++    }
++    return CaskrunSubmitSteamQuit();
++}
++
++/* Returns whether a new show request was submitted. Pending, queued or
++ * recently submitted Quit suppresses it; a refused binding or spawn beeps. */
++static BOOL CaskrunRequestSteamShow(void)
++{
++    if (caskrunSteamShutdownPending || caskrunSteamQuitQueued || caskrunSteamQuitHeld ||
++        caskrunSteamShowPending) return NO;
++    if (!CaskrunSpawnSteamControl(CASKRUN_STEAM_CONTROL_SHOW))
++    {
++        NSBeep();
++        return NO;
++    }
++    caskrunSteamShowPending = YES;
+     return YES;
+ }
+-
++
+ /* A native identity belongs to this Windows image, not its launcher. The
+  * generated .app's Info.plist overrides the loader's neutral embedded plist. */
+ static BOOL CaskrunNativeDockEnabled(void)
+ {
+     const char *value = getenv("CASKRUN_NATIVE_EXEC");
+@@ -359,16 +440,32 @@
+             role = [argument substringFromIndex:7];
+         else if ([argument isEqualToString:@"--type"])
+             role = i + 1 < [arguments count] ? arguments[++i] : @"";
+     }
+     return [role isEqualToString:@"renderer"] || [role isEqualToString:@"gpu-process"] ||
+            [role isEqualToString:@"utility"] || [role isEqualToString:@"zygote"] ||
+            [role isEqualToString:@"crashpad-handler"];
+ }
++
++/* Only the prepared visible Steam browser asks Core for Steam controls. Raw
++ * loaders, background helpers, games and other native identities keep Wine's
++ * ordinary behavior. */
++static BOOL CaskrunPreparedSteamUI(void)
++{
++    return CaskrunSteamDockEnabled() && CaskrunNativeDockEnabled() &&
++           CaskrunIsWindowsProcess(@"steamwebhelper.exe") && !CaskrunNativeBackgroundProcess();
++}
++
++/* Wine's existing hidden-app visibility state, implemented in cocoa_window.m. */
++@interface WineWindow (CaskrunSteamReopen)
++- (BOOL) wouldBeVisible;
++- (BOOL) closing;
++- (BOOL) drawnSinceShown;
++@end
+-
++
+ static NSImage* CaskrunNativeIcon(void)
+ {
+     NSBundle *bundle = [NSBundle mainBundle];
+     NSString *path = [bundle pathForResource:@"app" ofType:@"icns"];
+     if (!path) path = [bundle pathForResource:@"app" ofType:@"ico"];
+     struct stat info;
+     const char *raw = [path fileSystemRepresentation];
+@@ -1833,18 +1930,30 @@
+     - (void) window:(WineWindow*)window isBeingDragged:(BOOL)dragged
+     {
+         if (dragged)
+             [windowsBeingDragged addObject:window];
+         else
+             [windowsBeingDragged removeObject:window];
+     }
+-
++
++    - (void) caskrunRememberPresentedSteamWindow:(WineWindow*)window
++    {
++        /* doOrderOut calls us before clearing these existing Wine states.
++         * A closing window can still prove its prior presentation here. */
++        if (CaskrunPreparedSteamUI() && [window isKindOfClass:[WineWindow class]] &&
++            [window presentsVisibleContent] && [window drawnSinceShown] &&
++            ([window wouldBeVisible] || [window isMiniaturized]) &&
++            NSWidth(window.frame) >= 600 && NSHeight(window.frame) >= 320)
++            caskrunSteamPresentedClient = YES;
++    }
++
+     - (void) windowWillOrderOut:(WineWindow*)window
+     {
++        [self caskrunRememberPresentedSteamWindow:window];
+         [caskrunSteamHeaderRouter forgetWindow:window];
+         if ([windowsBeingDragged containsObject:window])
+         {
+             [self window:window isBeingDragged:NO];
+-
++
+             macdrv_event* event = macdrv_create_event(WINDOW_DRAG_END, window);
+             [window.queue postEvent:event];
+             macdrv_release_event(event);
+@@ -2824,21 +2933,45 @@
+         [self releaseMouseCapture];
+     }
+-
++
+     - (void) applicationDidUnhide:(NSNotification*)aNotification
+     {
+         [self adjustWindowLevels];
+     }
+-
++
++    - (BOOL) caskrunHasRestorableSteamWindow
++    {
++        /* Wine's own rules: real content that is visible, would be visible once
++         * AppKit unhides the app, or is minimized. Windows that Windows hid or
++         * destroyed were ordered out and do not count. */
++        for (WineWindow *window in [NSApp windows])
++        {
++            if ([window isKindOfClass:[WineWindow class]] && !window.closing &&
++                [window presentsVisibleContent] && ([window wouldBeVisible] || [window isMiniaturized]))
++                return YES;
++        }
++        return NO;
++    }
++
+     - (BOOL) applicationShouldHandleReopen:(NSApplication*)theApplication hasVisibleWindows:(BOOL)flag
+     {
++        /* Decide for the prepared Steam UI before AppKit unhides or Wine
++         * deminiaturizes; other processes keep Wine's behavior unchanged. */
++        BOOL steamNeedsShow = CaskrunPreparedSteamUI() && caskrunSteamPresentedClient &&
++                              ![self caskrunHasRestorableSteamWindow];
++
+         // Note that "flag" is often wrong.  WineWindows are NSPanels and NSPanels
+         // don't count as "visible windows" for this purpose.
+         [self unminimizeWindowIfNoneVisible];
++        /* Steam hid or destroyed its own windows while it keeps running. Ask
++         * the verified client to show its UI; never order a window that
++         * Windows hid in from Cocoa. */
++        if (steamNeedsShow)
++            CaskrunRequestSteamShow();
+         return YES;
+     }
+-
++
+     - (NSApplicationTerminateReply) applicationShouldTerminate:(NSApplication *)sender
+     {
+         NSApplicationTerminateReply ret = NSTerminateNow;
+         NSAppleEventManager* m = [NSAppleEventManager sharedAppleEventManager];
+         NSAppleEventDescriptor* desc = [m currentAppleEvent];
