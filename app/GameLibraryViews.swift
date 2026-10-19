@@ -800,14 +800,15 @@ struct BrowserGameTile: View {
 }
 
 enum LibraryScope: String, CaseIterable, Identifiable {
-    case all, steam, epic, gog, apps, browser
+    case all, steam, epic, gog, ea, ubisoft, apps, browser
     var id: String { rawValue }
     var title: String {
-        switch self { case .all: "All"; case .steam: "Steam"; case .epic: "Epic"; case .gog: "GOG"; case .apps: "Apps"; case .browser: "Browser" }
+        switch self { case .all: "All"; case .steam: "Steam"; case .epic: "Epic"; case .gog: "GOG"; case .ea: "EA"; case .ubisoft: "Ubisoft"; case .apps: "Apps"; case .browser: "Browser" }
     }
     var symbol: String {
-        switch self { case .all: "square.grid.2x2"; case .steam: "gamecontroller"; case .epic: "gamecontroller"; case .gog: "gamecontroller"; case .apps: "app"; case .browser: "safari" }
+        switch self { case .all: "square.grid.2x2"; case .steam, .epic, .gog, .ea, .ubisoft: "gamecontroller"; case .apps: "app"; case .browser: "safari" }
     }
+    var isPublisher: Bool { [.epic, .gog, .ea, .ubisoft].contains(self) }
 }
 
 struct LibraryScopeBar: View {
@@ -867,7 +868,7 @@ struct GameLibraryEntry: Identifiable {
         case .browser: "Play in browser"
         case .apps: "Open app"
         case .epic, .gog: "Open store"
-        case .all, .steam: "Play"
+        case .all, .steam, .ea, .ubisoft: "Play"
         }
     }
 
@@ -879,7 +880,7 @@ struct GameLibraryEntry: Identifiable {
         case .browser: action = "play in your browser"
         case .apps: action = "open the app"
         case .epic, .gog: action = "open its store"
-        case .all, .steam: action = "play"
+        case .all, .steam, .ea, .ubisoft: action = "play"
         }
         return "\(details) Double-click to \(action)."
     }
@@ -1161,7 +1162,7 @@ struct GameLibraryView: View {
                     Text(item.compatibilityDetail).font(.caption).foregroundStyle(.secondary)
                     Text("Opens using this bottle's saved program, arguments and working folder.")
                         .font(.caption).foregroundStyle(.secondary)
-                } else if item.source == .epic || item.source == .gog {
+                } else if item.source.isPublisher {
                     Label("Installed game", systemImage: "internaldrive").font(.caption.weight(.medium))
                     Text(item.compatibilityDetail).font(.caption).foregroundStyle(.secondary)
                     Text(item.canPlay ? "Open its store to play. Your sign-in and game ownership stay with the publisher." : "Save this store's Windows client in the bottle to open it here.")

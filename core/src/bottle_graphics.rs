@@ -5,6 +5,9 @@ use super::*;
 
 const SETTINGS: &str = "graphics.json";
 const SETTINGS_LIMIT: u64 = 4096;
+const AUTO_SETTINGS: &str = "auto-graphics.json";
+const AUTO_TARGET_LIMIT: usize = 32;
+const AUTO_IDLE_TIMEOUT: Duration = Duration::from_millis(250);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 const DXMT_ROOT: &str = "components/dxmt/runtime";
 // Original x64/x86 lifecycle and all three spatial-scale gates pass with the
@@ -22,14 +25,6 @@ pub(super) enum Backend {
 }
 
 impl Backend {
-    fn effective(self) -> Self {
-        if self == Self::Auto {
-            Self::Wined3d
-        } else {
-            self
-        }
-    }
-
     fn value(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -46,6 +41,291 @@ impl Backend {
             _ => Err("Choose automatic, WineD3D, or DXMT graphics".into()),
         }
     }
+}
+
+/// A local, derived decision, not a game-compatibility or performance claim.
+/// The portable preference remains `auto`; only an idle launch may refresh
+/// this decision. Every DXMT use still requires the reviewed package proof.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum AutoReason {
+    D3d11Detected,
+    NoSupportedEvidence,
+    MixedOrIncompleteEvidence,
+    EngineUnavailable,
+    NotYetScanned,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AutoSettings {
+    version: u32,
+    effective_backend: Backend,
+    reason: AutoReason,
+}
+
+impl AutoSettings {
+    fn baseline(reason: AutoReason) -> Self {
+        Self {
+            version: 1,
+            effective_backend: Backend::Wined3d,
+            reason,
+        }
+    }
+}
+
+/// Bounded, nonblocking, no-follow reads also reject a concurrent rename or
+/// modification. Neither a restored cache nor an arbitrary path can select a
+/// runtime: this file carries only two known backends and closed reason codes.
+fn read_auto_settings(dir: &Path) -> Result<(Option<AutoSettings>, Option<Vec<u8>>), String> {
+    let bytes = read_small_file(&dir.join(AUTO_SETTINGS), SETTINGS_LIMIT)?;
+    let Some(bytes) = bytes else {
+        return Ok((None, None));
+    };
+    let settings: AutoSettings = serde_json::from_slice(&bytes).map_err(|_| {
+        "Invalid automatic graphics decision; review the bottle's graphics setting".to_owned()
+    })?;
+    if settings.version != 1
+        || settings.effective_backend == Backend::Auto
+        || (settings.effective_backend == Backend::Dxmt)
+            != (settings.reason == AutoReason::D3d11Detected)
+    {
+        return Err("Unsupported automatic graphics decision".into());
+    }
+    Ok((Some(settings), Some(bytes)))
+}
+
+fn read_small_file(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, String> {
+    let before = match fs::symlink_metadata(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Could not inspect automatic graphics metadata".into()),
+    };
+    if !before.is_file() || before.len() > limit {
+        return Err("Automatic graphics metadata must be a bounded regular file".into());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW_ANY | 0x4)
+        .open(path)
+        .map_err(|_| "Could not safely open automatic graphics metadata".to_owned())?;
+    if !same_snapshot(&before, &file.metadata().map_err(|e| e.to_string())?) {
+        return Err("Automatic graphics metadata changed while opening".into());
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > limit
+        || !same_snapshot(&before, &file.metadata().map_err(|e| e.to_string())?)
+        || !same_snapshot(
+            &before,
+            &fs::symlink_metadata(path).map_err(|e| e.to_string())?,
+        )
+    {
+        return Err("Automatic graphics metadata changed while reading".into());
+    }
+    Ok(Some(bytes))
+}
+
+fn effective_backend(dir: &Path, selected: Backend) -> Result<Backend, String> {
+    if selected != Backend::Auto {
+        return Ok(selected);
+    }
+    Ok(read_auto_settings(dir)?
+        .0
+        .map_or(Backend::Wined3d, |saved| saved.effective_backend))
+}
+
+#[derive(Default)]
+struct AutoEvidence {
+    supported: bool,
+    incomplete: bool,
+}
+
+impl AutoEvidence {
+    fn include(&mut self, probe: &graphics_probe::Probe) {
+        if probe.supports_dxmt() {
+            self.supported = true;
+        } else {
+            self.incomplete = true;
+        }
+    }
+
+    fn decision(self, dxmt_available: bool) -> AutoSettings {
+        if !dxmt_available {
+            return AutoSettings::baseline(AutoReason::EngineUnavailable);
+        }
+        if self.incomplete {
+            return AutoSettings::baseline(AutoReason::MixedOrIncompleteEvidence);
+        }
+        if self.supported {
+            return AutoSettings {
+                version: 1,
+                effective_backend: Backend::Dxmt,
+                reason: AutoReason::D3d11Detected,
+            };
+        }
+        AutoSettings::baseline(AutoReason::NoSupportedEvidence)
+    }
+}
+
+/// Inspect only store-declared installed game directories and registered EXEs.
+/// No account files, network requests, registry overrides or app DLL writes.
+/// A mixed bottle remains on WineD3D: its clients must share one engine view.
+fn automatic_evidence(dir: &Path) -> Result<AutoEvidence, String> {
+    use std::collections::BTreeSet;
+    let prefix = dir.join("prefix");
+    let mut targets = BTreeSet::new();
+    let mut evidence = AutoEvidence::default();
+    match steam_library::discover(&prefix) {
+        Ok(library) => {
+            evidence.incomplete |= library.truncated;
+            for game in library.games {
+                // Steam's shared prerequisite package is not a game and has no
+                // meaningful renderer. It must not mask actual game imports.
+                if game.app_id == 228980 {
+                    continue;
+                }
+                targets.insert(PathBuf::from(game.install_path));
+            }
+        }
+        Err(_) => evidence.incomplete = true,
+    }
+    match publisher_library::discover(&prefix) {
+        Ok(library) => {
+            evidence.incomplete |= library.truncated;
+            for game in library.games {
+                targets.insert(PathBuf::from(game.install_path));
+            }
+        }
+        Err(_) => evidence.incomplete = true,
+    }
+    match read_small_file(&dir.join("launchers.json"), 1024 * 1024) {
+        Ok(Some(bytes)) => match serde_json::from_slice::<Vec<Launcher>>(&bytes) {
+            Ok(launchers) if launchers.len() <= 1024 => {
+                for launcher in launchers {
+                    let path = PathBuf::from(launcher.path);
+                    let name = path
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    // Store clients are not evidence about their games. In
+                    // particular, Steam's x86 client must not mask an installed
+                    // x64 D3D11 game. These names never establish compatibility.
+                    if [
+                        "steam.exe",
+                        "epicgameslauncher.exe",
+                        "galaxyclient.exe",
+                        "battle.net.exe",
+                        "battle.net launcher.exe",
+                        "eadesktop.exe",
+                        "ubisoftconnect.exe",
+                        "uplay.exe",
+                        "itch.exe",
+                        "rockstargameslauncher.exe",
+                    ]
+                    .contains(&name.as_str())
+                    {
+                        continue;
+                    }
+                    if path.is_absolute()
+                        && path
+                            .extension()
+                            .and_then(OsStr::to_str)
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                        && !targets.iter().any(|root| path.starts_with(root))
+                    {
+                        targets.insert(path);
+                    } else if !path.is_absolute() {
+                        evidence.incomplete = true;
+                    }
+                }
+            }
+            _ => evidence.incomplete = true,
+        },
+        Ok(None) => {}
+        Err(_) => evidence.incomplete = true,
+    }
+    if targets.len() > AUTO_TARGET_LIMIT {
+        evidence.incomplete = true;
+    }
+    for target in targets.into_iter().take(AUTO_TARGET_LIMIT) {
+        cancellation::check()?;
+        match graphics_probe::scan(&target) {
+            Ok(probe) => evidence.include(&probe),
+            Err(_) => evidence.incomplete = true,
+        }
+    }
+    cancellation::check()?;
+    Ok(evidence)
+}
+
+fn automatic_idle(dir: &Path, wine: &Path) -> Result<(), String> {
+    refuse_running_bottle(dir)?;
+    refuse_live_wine_server(dir, AUTO_IDLE_TIMEOUT, Some(wine))?;
+    prefix_processes::wait_until_idle(dir, AUTO_IDLE_TIMEOUT)?;
+    refuse_running_bottle(dir)
+}
+
+/// Caller holds this bottle's lock and has verified/migrated its runtime.
+/// Read-only consumers and native aliases never rescan. A running session keeps
+/// its exact recorded view, including the legacy WineD3D default when no local
+/// decision exists yet. Newly installed games are considered on the next idle
+/// startup, never by changing the Wine/DXMT view under an active client.
+pub(super) fn prepare_automatic(home: &Path, id: &str, wine: &Path) -> Result<(), String> {
+    let dir = bottle_dir(home, id)?;
+    prepare_automatic_with(&dir, wine, automatic_idle, automatic_evidence, dxmt_support)
+}
+
+fn prepare_automatic_with(
+    dir: &Path,
+    wine: &Path,
+    idle: impl Fn(&Path, &Path) -> Result<(), String>,
+    evidence: impl FnOnce(&Path) -> Result<AutoEvidence, String>,
+    support: impl FnOnce(&Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let (preferences, preference_bytes) = read_settings(dir)?;
+    if preferences.backend != Backend::Auto {
+        return Ok(());
+    }
+    let (previous, previous_bytes) = read_auto_settings(dir)?;
+    let (directory_guard, directory_snapshot) = open_stable_directory(dir)?;
+    let prefix = dir.join("prefix");
+    let (prefix_guard, prefix_snapshot) = open_stable_directory(&prefix)?;
+    if idle(dir, wine).is_err() {
+        cancellation::check()?;
+        return Ok(());
+    }
+    let available = support(dir, wine).is_ok();
+    let updated = if available {
+        evidence(dir)?.decision(true)
+    } else {
+        AutoSettings::baseline(AutoReason::EngineUnavailable)
+    };
+    cancellation::check()?;
+    if previous == Some(updated) {
+        return Ok(());
+    }
+    // The scan can take time. Prove idle and both directory identities again
+    // immediately before publishing a decision any later client will consume.
+    if idle(dir, wine).is_err() {
+        cancellation::check()?;
+        return Ok(());
+    }
+    bottle_control::assert_same_prefix(dir, &directory_guard, &directory_snapshot)?;
+    bottle_control::assert_same_prefix(&prefix, &prefix_guard, &prefix_snapshot)?;
+    if read_settings(dir)?.1 != preference_bytes || read_auto_settings(dir)?.1 != previous_bytes {
+        return Err("Bottle graphics changed during automatic detection; try again".into());
+    }
+    let bytes = serde_json::to_vec_pretty(&updated).map_err(|e| e.to_string())?;
+    write_preference(&dir.join(AUTO_SETTINGS), &bytes)?;
+    if read_auto_settings(dir)?.0 != Some(updated) {
+        return Err("Automatic graphics decision changed during verification".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -100,6 +380,8 @@ pub(super) struct GraphicsResult {
     dxmt_frame_rate: u16,
     dxmt_spatial_scale: u16,
     dxmt_spatial_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic_reason: Option<AutoReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unavailable_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -192,6 +474,16 @@ fn dxmt_support(dir: &Path, wine: &Path) -> Result<(), String> {
             }
             record.runtime_identity.unwrap()
         }
+        Some(record) if record.runtime_identity.is_some() => {
+            // A verified but non-switchable package cannot acquire DXMT by
+            // rehashing the same tree. This is a conservative negative result,
+            // not an authorization based on a writable record. Normal launch
+            // has already verified/upgraded the record before Auto runs; a
+            // tampered identity still fails that ordinary runtime verification.
+            // Legacy path-pinned records without an identity retain the full
+            // attestation path below.
+            return Err("DXMT is not included in this Windows engine package".into());
+        }
         _ => {
             runtime_identity::bundled_runtime_attestation(wine)?
                 .ok_or("DXMT requires Caskrun's verified graphics engine package")?
@@ -250,16 +542,40 @@ fn result(dir: &Path, id: &str, preferences: Preferences, wine: Option<&Path>) -
         .ok_or_else(|| "The Windows engine is unavailable".to_owned())
         .and_then(|wine| dxmt_support(dir, wine));
     let available = support.is_ok();
+    let automatic = if selected == Backend::Auto {
+        Some(read_auto_settings(dir))
+    } else {
+        None
+    };
+    let automatic_error = automatic.as_ref().and_then(|value| value.as_ref().err());
+    let automatic_settings = automatic
+        .as_ref()
+        .and_then(|value| value.as_ref().ok())
+        .and_then(|value| value.0);
+    let effective = automatic_settings.map_or_else(
+        || {
+            if selected == Backend::Auto {
+                Backend::Wined3d
+            } else {
+                selected
+            }
+        },
+        |value| value.effective_backend,
+    );
     GraphicsResult {
         bottle_id: id.to_owned(),
         selected_backend: selected,
-        effective_backend: selected.effective(),
+        effective_backend: effective,
         dxmt_available: available,
         dxmt_frame_rate: preferences.frame_rate,
         dxmt_spatial_scale: preferences.spatial_scale,
         dxmt_spatial_available: available && SPATIAL_VALIDATED,
+        automatic_reason: (selected == Backend::Auto)
+            .then(|| automatic_settings.map_or(AutoReason::NotYetScanned, |value| value.reason)),
         unavailable_reason: support.err(),
-        warning: if selected == Backend::Dxmt {
+        warning: if automatic_error.is_some() {
+            Some("The automatic graphics decision could not be read. Review this bottle's graphics setting before opening apps.".into())
+        } else if effective == Backend::Dxmt {
             Some(if available {
                 "DXMT is experimental. Rendering probes pass; game compatibility still needs testing."
             } else {
@@ -281,6 +597,13 @@ pub(super) fn bottle_graphics(home: &Path, id: &str) -> Result<GraphicsResult, S
 /// not attest, initialize or start Wine, and emits only the closed backend enum.
 pub(super) fn selected_backend(dir: &Path) -> Result<Backend, String> {
     read_settings(dir).map(|(preferences, _)| preferences.backend)
+}
+
+/// The same local decision used by launch and native aliases, with no scan,
+/// attestation, process startup or path-bearing output. Diagnostics must not
+/// describe Automatic as WineD3D after an idle launch has resolved it to DXMT.
+pub(super) fn resolved_backend(dir: &Path) -> Result<Backend, String> {
+    effective_backend(dir, selected_backend(dir)?)
 }
 
 pub(super) fn validate_portable_settings(dir: &Path) -> Result<(), String> {
@@ -436,7 +759,7 @@ pub(super) fn selected_runtime_root(dir: &Path, wine: &Path) -> Result<PathBuf, 
         .parent()
         .and_then(Path::parent)
         .ok_or("The Windows engine has no package directory")?;
-    match read_settings(dir)?.0.backend {
+    match effective_backend(dir, read_settings(dir)?.0.backend)? {
         Backend::Dxmt => {
             dxmt_support(dir, wine)?;
             Ok(package.join(DXMT_ROOT))
@@ -453,8 +776,8 @@ pub(super) fn configure_launch(
     wine: &Path,
 ) -> Result<(), String> {
     let (preferences, _) = read_settings(dir)?;
-    let backend = preferences.backend;
-    command.env("CASKRUN_GRAPHICS_BACKEND", backend.effective().value());
+    let backend = effective_backend(dir, preferences.backend)?;
+    command.env("CASKRUN_GRAPHICS_BACKEND", backend.value());
     if backend == Backend::Dxmt {
         dxmt_support(dir, wine)?;
         let inherited = env::var("WINEDLLOVERRIDES").unwrap_or_default();
@@ -635,7 +958,10 @@ mod tests {
     fn missing_preference_defaults_to_wined3d_without_writing() {
         let dir = fixture();
         assert_eq!(read_settings(&dir).unwrap(), (Preferences::default(), None));
-        assert_eq!(Backend::Auto.effective(), Backend::Wined3d);
+        assert_eq!(
+            effective_backend(&dir, Backend::Auto).unwrap(),
+            Backend::Wined3d
+        );
         assert!(!dir.join(SETTINGS).exists());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -1183,6 +1509,407 @@ mod tests {
                 .exists()
         );
         assert_eq!(fs::read_link(preserved).unwrap(), PathBuf::from("absent"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn automatic_fixture() -> PathBuf {
+        let dir = fixture();
+        fs::create_dir_all(dir.join("prefix/drive_c")).unwrap();
+        dir
+    }
+
+    fn save_automatic(dir: &Path, settings: AutoSettings) -> Vec<u8> {
+        let bytes = serde_json::to_vec(&settings).unwrap();
+        fs::write(dir.join(AUTO_SETTINGS), &bytes).unwrap();
+        bytes
+    }
+
+    fn positive_evidence(_: &Path) -> Result<AutoEvidence, String> {
+        Ok(AutoEvidence {
+            supported: true,
+            incomplete: false,
+        })
+    }
+
+    fn d3d11_fixture_image() -> Vec<u8> {
+        // A section-backed x64 PE with one D3D11 import. This is original
+        // structural test data, never an executable downloaded from a game.
+        let mut bytes = vec![0; 4096];
+        let put16 = |bytes: &mut [u8], offset: usize, value: u16| {
+            bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        };
+        let put32 = |bytes: &mut [u8], offset: usize, value: u32| {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        bytes[..2].copy_from_slice(b"MZ");
+        put32(&mut bytes, 0x3c, 0x80);
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        put16(&mut bytes, 0x84, 0x8664);
+        put16(&mut bytes, 0x86, 1);
+        put16(&mut bytes, 0x94, 240);
+        put16(&mut bytes, 0x96, 2);
+        put16(&mut bytes, 0x98, 0x20b);
+        put32(&mut bytes, 0x98 + 60, 512);
+        put32(&mut bytes, 0x98 + 108, 16);
+        let section = 0x98 + 240;
+        put32(&mut bytes, section + 8, 3584);
+        put32(&mut bytes, section + 12, 0x1000);
+        put32(&mut bytes, section + 16, 3584);
+        put32(&mut bytes, section + 20, 512);
+        let imports = 0x98 + 112 + 8;
+        put32(&mut bytes, imports, 0x1000);
+        put32(&mut bytes, imports + 4, 40);
+        put32(&mut bytes, 512 + 12, 0x1600);
+        bytes[2048..2058].copy_from_slice(b"d3d11.dll\0");
+        bytes
+    }
+
+    #[test]
+    fn automatic_reads_store_game_imports_and_registered_apps_without_client_guessing() {
+        for source in ["steam", "epic", "registered"] {
+            let dir = automatic_fixture();
+            let drive = dir.join("prefix/drive_c");
+            let game = if source == "steam" {
+                let steam = drive.join("Program Files (x86)/Steam");
+                let game = steam.join("steamapps/common/FixtureGame");
+                fs::create_dir_all(&game).unwrap();
+                fs::write(
+                    steam.join("Steam.exe"),
+                    b"store client is not graphics evidence",
+                )
+                .unwrap();
+                fs::write(steam.join("steamapps/appmanifest_480.acf"), br#""AppState" { "appid" "480" "name" "Fixture Game" "installdir" "FixtureGame" "StateFlags" "4" }"#).unwrap();
+                let prerequisites = steam.join("steamapps/common/Steamworks Shared");
+                fs::create_dir_all(&prerequisites).unwrap();
+                fs::write(
+                    prerequisites.join("Prerequisite.exe"),
+                    b"not a game or renderer",
+                )
+                .unwrap();
+                fs::write(steam.join("steamapps/appmanifest_228980.acf"), br#""AppState" { "appid" "228980" "name" "Steamworks Common Redistributables" "installdir" "Steamworks Shared" "StateFlags" "4" }"#).unwrap();
+                game
+            } else {
+                let game = drive.join("Games/FixtureGame");
+                fs::create_dir_all(&game).unwrap();
+                game
+            };
+            let exe = game.join("FixtureGame.exe");
+            fs::write(&exe, d3d11_fixture_image()).unwrap();
+            if source == "epic" {
+                let manifests = drive.join("ProgramData/Epic/EpicGamesLauncher/Data/Manifests");
+                fs::create_dir_all(&manifests).unwrap();
+                fs::write(manifests.join("Fixture.item"), br#"{"AppName":"fixture-game","DisplayName":"Fixture Game","InstallLocation":"C:\\Games\\FixtureGame","bIsIncompleteInstall":false}"#).unwrap();
+            }
+            let mut launchers = vec![Launcher {
+                id: "fixture".into(),
+                name: "Fixture".into(),
+                path: if source == "registered" {
+                    exe
+                } else {
+                    drive.join("Program Files (x86)/Steam/Steam.exe")
+                }
+                .display()
+                .to_string(),
+                created_at: 0,
+                hidden_from_home: false,
+                saved_arguments: Vec::new(),
+                working_directory: None,
+            }];
+            for (index, client) in ["uplay.exe", "Battle.net Launcher.exe"]
+                .into_iter()
+                .enumerate()
+            {
+                let mut launcher = launchers[0].clone();
+                launcher.id = format!("store-fixture-{index}");
+                launcher.path = drive
+                    .join("StoreClients")
+                    .join(client)
+                    .display()
+                    .to_string();
+                launchers.push(launcher);
+            }
+            fs::write(
+                dir.join("launchers.json"),
+                serde_json::to_vec(&launchers).unwrap(),
+            )
+            .unwrap();
+            let evidence = automatic_evidence(&dir).unwrap();
+            assert!(
+                evidence.supported,
+                "Missing positive import evidence for {source}"
+            );
+            assert!(!evidence.incomplete, "Incomplete fixture for {source}");
+            assert_eq!(evidence.decision(true).effective_backend, Backend::Dxmt);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn automatic_real_tracked_owner_keeps_session_without_rescan() {
+        let dir = automatic_fixture();
+        save_json(
+            &dir.join("active-processes.json"),
+            &vec![std::process::id()],
+        )
+        .unwrap();
+        let original = save_automatic(
+            &dir,
+            AutoSettings::baseline(AutoReason::NoSupportedEvidence),
+        );
+        prepare_automatic_with(
+            &dir,
+            &dir.join("wine"),
+            automatic_idle,
+            |_| panic!("Tracked live process must keep the session"),
+            |_, _| panic!("Tracked live process must not select an engine"),
+        )
+        .unwrap();
+        assert_eq!(fs::read(dir.join(AUTO_SETTINGS)).unwrap(), original);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn automatic_selects_only_available_positive_unmixed_evidence() {
+        assert_eq!(
+            AutoEvidence {
+                supported: true,
+                incomplete: false
+            }
+            .decision(true)
+            .effective_backend,
+            Backend::Dxmt
+        );
+        for (supported, incomplete, available) in [
+            (false, false, true),
+            (true, true, true),
+            (false, true, true),
+            (true, false, false),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            assert_eq!(
+                AutoEvidence {
+                    supported,
+                    incomplete
+                }
+                .decision(available)
+                .effective_backend,
+                Backend::Wined3d
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_idle_decision_is_shared_by_reads_aliases_and_client_environment() {
+        let dir = automatic_fixture();
+        let wine = dir.join("engine/bin/wine");
+        prepare_automatic_with(&dir, &wine, |_, _| Ok(()), positive_evidence, |_, _| Ok(()))
+            .unwrap();
+        assert_eq!(
+            effective_backend(&dir, Backend::Auto).unwrap(),
+            Backend::Dxmt
+        );
+        let status = result(&dir, "fixture", Preferences::default(), None);
+        assert_eq!(status.selected_backend, Backend::Auto);
+        assert_eq!(status.effective_backend, Backend::Dxmt);
+        assert_eq!(status.automatic_reason, Some(AutoReason::D3d11Detected));
+        // A cached choice never grants access to an unreviewed engine view.
+        assert!(selected_runtime_root(&dir, &wine).is_err());
+        assert!(configure_launch(&mut Command::new("unused"), &dir, &wine).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn automatic_active_session_keeps_recorded_view_without_scanning() {
+        for saved in [
+            None,
+            Some(AutoSettings {
+                version: 1,
+                effective_backend: Backend::Dxmt,
+                reason: AutoReason::D3d11Detected,
+            }),
+        ] {
+            let dir = automatic_fixture();
+            let original = saved.map(|value| save_automatic(&dir, value));
+            prepare_automatic_with(
+                &dir,
+                &dir.join("wine"),
+                |_, _| Err("busy".into()),
+                |_| panic!("A live bottle must not be rescanned"),
+                |_, _| panic!("A live bottle must not be reselected"),
+            )
+            .unwrap();
+            assert_eq!(read_auto_settings(&dir).unwrap().1, original);
+            assert_eq!(
+                effective_backend(&dir, Backend::Auto).unwrap(),
+                saved.map_or(Backend::Wined3d, |value| value.effective_backend)
+            );
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn automatic_does_not_publish_when_a_session_begins_during_detection() {
+        use std::cell::Cell;
+        let dir = automatic_fixture();
+        let original = save_automatic(
+            &dir,
+            AutoSettings::baseline(AutoReason::NoSupportedEvidence),
+        );
+        let calls = Cell::new(0);
+        prepare_automatic_with(
+            &dir,
+            &dir.join("wine"),
+            |_, _| {
+                let previous = calls.get();
+                calls.set(previous + 1);
+                if previous == 0 {
+                    Ok(())
+                } else {
+                    Err("new live client".into())
+                }
+            },
+            positive_evidence,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(fs::read(dir.join(AUTO_SETTINGS)).unwrap(), original);
+        assert_eq!(
+            effective_backend(&dir, Backend::Auto).unwrap(),
+            Backend::Wined3d
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn manual_choice_ignores_cache_and_bypasses_automatic_detection() {
+        let dir = automatic_fixture();
+        fs::write(dir.join(AUTO_SETTINGS), b"invalid local cache").unwrap();
+        for backend in [Backend::Wined3d, Backend::Dxmt] {
+            fs::write(
+                dir.join(SETTINGS),
+                serde_json::to_vec(&Settings {
+                    version: 1,
+                    backend,
+                    dxmt_frame_rate: None,
+                    dxmt_spatial_scale: None,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let original = fs::read(dir.join(SETTINGS)).unwrap();
+            prepare_automatic_with(
+                &dir,
+                &dir.join("wine"),
+                |_, _| panic!("manual settings require no Auto idle probe"),
+                |_| panic!("manual settings must not be scanned"),
+                |_, _| panic!("manual settings must not be reselected"),
+            )
+            .unwrap();
+            assert_eq!(effective_backend(&dir, backend).unwrap(), backend);
+            assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), original);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn automatic_cache_is_closed_bounded_and_never_follows_a_link() {
+        let dir = automatic_fixture();
+        for bytes in [
+            br#"{"version":2,"effective_backend":"dxmt","reason":"d3d11-detected"}"#.as_slice(),
+            br#"{"version":1,"effective_backend":"auto","reason":"not-yet-scanned"}"#.as_slice(),
+            br#"{"version":1,"effective_backend":"dxmt","reason":"engine-unavailable"}"#.as_slice(),
+            br#"{"version":1,"effective_backend":"dxvk","reason":"d3d11-detected"}"#.as_slice(),
+            br#"{"version":1,"effective_backend":"dxmt","reason":"d3d11-detected","path":"elsewhere"}"#.as_slice(),
+        ] {
+            fs::write(dir.join(AUTO_SETTINGS), bytes).unwrap();
+            assert!(read_auto_settings(&dir).is_err());
+            assert!(effective_backend(&dir, Backend::Auto).is_err());
+        }
+        fs::write(dir.join(AUTO_SETTINGS), vec![b' '; 4097]).unwrap();
+        assert!(read_auto_settings(&dir).is_err());
+        fs::remove_file(dir.join(AUTO_SETTINGS)).unwrap();
+        symlink("missing", dir.join(AUTO_SETTINGS)).unwrap();
+        assert!(read_auto_settings(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unavailable_engine_never_scans_or_promotes_automatic_to_dxmt() {
+        let dir = automatic_fixture();
+        prepare_automatic_with(
+            &dir,
+            &dir.join("wine"),
+            |_, _| Ok(()),
+            |_| panic!("No reason to scan with an unavailable backend"),
+            |_, _| Err("unreviewed engine".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            read_auto_settings(&dir).unwrap().0,
+            Some(AutoSettings::baseline(AutoReason::EngineUnavailable))
+        );
+        let mut command = Command::new("unused");
+        configure_launch(&mut command, &dir, &dir.join("engine/bin/wine")).unwrap();
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "CASKRUN_GRAPHICS_BACKEND"
+                    && value == Some(OsStr::new("wined3d")))
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_manual_setting_is_not_replaced_by_auto_detection() {
+        let dir = automatic_fixture();
+        let changed = br#"{"version":1,"backend":"wined3d"}"#;
+        let error = prepare_automatic_with(
+            &dir,
+            &dir.join("wine"),
+            |_, _| Ok(()),
+            |_| {
+                fs::write(dir.join(SETTINGS), changed).unwrap();
+                positive_evidence(&dir)
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.contains("changed during automatic detection"));
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), changed);
+        assert!(!dir.join(AUTO_SETTINGS).exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_detection_keeps_the_previous_confirmed_decision() {
+        let dir = automatic_fixture();
+        let original = save_automatic(
+            &dir,
+            AutoSettings::baseline(AutoReason::NoSupportedEvidence),
+        );
+        assert!(
+            prepare_automatic_with(
+                &dir,
+                &dir.join("wine"),
+                |_, _| Ok(()),
+                |_| Err("canceled fixture".into()),
+                |_, _| Ok(())
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(dir.join(AUTO_SETTINGS)).unwrap(), original);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reading_automatic_graphics_never_scans_or_writes() {
+        let dir = automatic_fixture();
+        let before = fs::read_dir(&dir).unwrap().count();
+        let status = result(&dir, "fixture", Preferences::default(), None);
+        assert_eq!(status.automatic_reason, Some(AutoReason::NotYetScanned));
+        assert_eq!(status.effective_backend, Backend::Wined3d);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), before);
         fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -19,6 +19,22 @@ Caskrun's MIT license does not replace these licenses or upstream copyright noti
 
 `catalog/game-compatibility.json` contains a metadata-only snapshot from [Highball's community database](https://github.com/gauthierpiarrette/highball-db/tree/d8d165834cd0b77613ac0f00300e8fac0b98b143), under **CC0-1.0**. Its original [license text](catalog/licenses/highball-db-CC0.txt) is included. The snapshot records its source revision and links each report to its public source; it does not import contributor identity fields or report prose. See [data provenance](docs/GAME_COMPATIBILITY.md). Caskrun's MIT license does not replace the snapshot's CC0 terms.
 
+## MaPC / MacadeKit source adaptations
+
+The automatic graphics inspection and EA/Ubisoft store handling were reviewed
+against [MacadeKit](https://github.com/abduzeedo/mapc-engine/tree/37bb046423dbb85c5cb98fee742868dccb96002d),
+Copyright 2026 Steale LLC, under **Apache-2.0**. Caskrun's Rust adaptations in
+`core/src/graphics_probe.rs`, `publisher_install.rs`, `publisher_library.rs` and
+`publisher_launch.rs` preserve this attribution. See the exact
+[license](third-party/mapc-engine/LICENSE), [upstream notice](third-party/mapc-engine/NOTICE)
+and [adaptation record](third-party/mapc-engine/README.md).
+
+The adaptations add bounded no-follow reads, strict publisher identifiers,
+conservative renderer evidence and Caskrun's existing bottle/session checks.
+MaPC's proprietary interface, trademarks, artwork, runtime binaries and
+CrossOver-derived engine sources are not included. Caskrun's original code
+retains its MIT license; that does not replace the terms on adapted material.
+
 ## External runtimes and dependencies
 
 Wine, Wine Mono, Wine Gecko, FreeType, GnuTLS, and their dependencies retain their respective licenses. They are downloaded or built separately; their binaries and source archives are excluded from this Git repository. Rust dependencies retain their own licenses, with versions recorded in `core/Cargo.lock`.

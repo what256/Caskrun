@@ -13,12 +13,14 @@ mod crossover_import;
 mod diagnostics;
 mod epic_install;
 mod gog_install;
+mod graphics_probe;
 mod installed_apps;
 mod itch_install;
 mod native_app_identity;
 mod prefix_processes;
 mod program_inventory;
 mod publisher_install;
+mod publisher_launch;
 mod publisher_library;
 mod rockstar_install;
 mod runtime_identity;
@@ -1460,6 +1462,7 @@ fn duplicate_bottle_with_runtime(
                 "active-processes.json",
                 "native-apps",
                 "icon-repair-cache",
+                "auto-graphics.json",
             ],
         )?;
         cancellation::check()?;
@@ -1549,6 +1552,7 @@ fn export_bottle_with_runtime(
                 "active-processes.json",
                 "native-apps",
                 "icon-repair-cache",
+                "auto-graphics.json",
             ],
         )?;
         cancellation::check()?;
@@ -1652,7 +1656,13 @@ fn import_bottle(home: &Path, source: &Path, name: Option<&str>) -> Result<Impor
         // A mapping the payload still carries is restored alongside the recorded
         // ones; a path listed twice is refused rather than silently merged.
         let mut policy = CopyPolicy::with_recorded(&payload, manifest.host_folders.clone());
-        copy_tree_contents(&mut policy, &payload, &destination, Path::new(""), &[])?;
+        copy_tree_contents(
+            &mut policy,
+            &payload,
+            &destination,
+            Path::new(""),
+            &["auto-graphics.json"],
+        )?;
         cancellation::check()?;
         let restored = bottle_xdg::restore_host_folder_links(
             policy.account_home.as_deref(),
@@ -2024,10 +2034,7 @@ fn run_launcher_with_wine(
     wine: &Path,
     user_arguments: &[String],
 ) -> Result<LaunchResult, String> {
-    let launcher = list_launchers(home, bottle_id)?
-        .into_iter()
-        .find(|item| item.id == launcher_id)
-        .ok_or("Launcher not found")?;
+    let launcher = resolve_saved_launcher(home, bottle_id, launcher_id)?;
     let steam_mode = steam_install::is_steam_client_launcher(home, bottle_id, &launcher);
     let itch_mode = itch_install::is_recipe_itch_launcher(home, bottle_id, &launcher);
     let arguments = launcher_arguments(
@@ -2045,6 +2052,58 @@ fn run_launcher_with_wine(
         steam_mode,
         launcher.working_directory.as_deref(),
     )
+}
+
+// EA can remove a numbered client directory during its own update. Recover
+// only a plain saved EA client in this same prefix; custom commands, working
+// directories, existing files and links preserve their explicit behavior.
+fn resolve_saved_launcher(
+    home: &Path,
+    bottle_id: &str,
+    launcher_id: &str,
+) -> Result<Launcher, String> {
+    let dir = bottle_dir(home, bottle_id)?;
+    let saved = list_launchers(home, bottle_id)?
+        .into_iter()
+        .find(|item| item.id == launcher_id)
+        .ok_or("Launcher not found")?;
+    // Ordinary requests remain read-only until launch validation succeeds.
+    // Acquire the recovery lock only when a missing reviewed EA client can
+    // actually be replaced, then re-read and revalidate under that lock.
+    if !saved.saved_arguments.is_empty()
+        || saved.working_directory.is_some()
+        || publisher_install::resolve_saved_ea_client(&dir.join("prefix"), Path::new(&saved.path))
+            .is_none()
+    {
+        return Ok(saved);
+    }
+    let _lock = lock_bottle(home, bottle_id)?;
+    let mut launchers = list_launchers(home, bottle_id)?;
+    let original = serde_json::to_vec(&launchers).map_err(|e| e.to_string())?;
+    let launcher = launchers
+        .iter_mut()
+        .find(|item| item.id == launcher_id)
+        .ok_or("Launcher not found")?;
+    if launcher.saved_arguments.is_empty()
+        && launcher.working_directory.is_none()
+        && let Some(path) = publisher_install::resolve_saved_ea_client(
+            &dir.join("prefix"),
+            Path::new(&launcher.path),
+        )
+    {
+        launcher.path = path.display().to_string();
+        let updated = launcher.clone();
+        if serde_json::to_vec(&list_launchers(home, bottle_id)?).map_err(|e| e.to_string())?
+            != original
+        {
+            return Err(
+                "Saved apps changed while recovering the EA client; refresh and try again".into(),
+            );
+        }
+        save_json(&dir.join("launchers.json"), &launchers)?;
+        return Ok(updated);
+    }
+    Ok(launcher.clone())
 }
 
 fn launcher_arguments(
@@ -2463,6 +2522,9 @@ fn ensure_prefix_without_migration(
             refuse_live_wine_server(&dir, Duration::from_secs(1), Some(wine))?;
             bottle_xdg::migrate_host_desktop_links(&prefix, &xdg)?;
         }
+        // Resolve only while the verified bottle is idle. All later clients,
+        // native aliases and control requests read the same recorded view.
+        bottle_graphics::prepare_automatic(home, id, wine)?;
         cancellation::check()?;
         return Ok(PrefixResult {
             prefix_path: prefix.display().to_string(),
@@ -2832,7 +2894,7 @@ fn configure_control_environment(
     ] {
         let _ = open_stable_directory(&path)?;
     }
-    let backend = match bottle_graphics::selected_backend(dir)? {
+    let backend = match bottle_graphics::resolved_backend(dir)? {
         bottle_graphics::Backend::Dxmt => "dxmt",
         _ => "wined3d",
     };
@@ -3215,6 +3277,10 @@ fn start_launch_with_wine_checked(
         cmd.arg("msiexec").arg("/i");
     }
     cmd.arg(&installer);
+    cmd.args(publisher_install::launcher_arguments(
+        &dir.join("prefix"),
+        &installer,
+    ));
     if flags.quiet_msi {
         cmd.arg("/qn");
     }
@@ -3363,6 +3429,7 @@ fn run() -> Result<(), String> {
         [command, path, name] if command == "import-crossover" => serde_json::to_value(crossover_import::import(&home, Path::new(path), Some(name))?),
         [command, id] if command == "steam-games" => serde_json::to_value(steam_games(&home, id)?),
         [command, id] if command == "publisher-games" => serde_json::to_value(publisher_games(&home, id)?),
+        [command, id, store, game_id] if command == "run-publisher-game" => serde_json::to_value(publisher_launch::run(&home, id, store, game_id)?),
         [command, id, app_id] if command == "run-steam-game" => serde_json::to_value(run_steam_game(&home, id, app_id.parse().map_err(|_| "Steam AppID must be an unsigned number")?)?),
         [command, id, app_id] if command == "install-steam-game" => serde_json::to_value(install_steam_game(&home, id, app_id.parse().map_err(|_| "Steam AppID must be an unsigned number")?)?),
         [command] if command == "browser-games" => serde_json::to_value(browser_games::list(&home)?),
@@ -3461,7 +3528,7 @@ fn run() -> Result<(), String> {
                 Path::new(path),
                 parse_wait_launch_options(options)?,
             )?),
-        _ => return Err("Usage: caskrun-core overview | status | probe-runtime | list | deleted | catalog-attempts | create <name> | install-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher | retry-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher <bottle-id> | rename <id> <name> | delete <id> | restore-deleted <id> | purge-deleted <id> | duplicate <id> [name] | export <id> <path.caskrun-bottle> | export-archive <id> <path.caskrun-backup> | import <path.caskrun-bottle> [name] | import-archive <path.caskrun-backup> [name] | import-crossover <bottle-folder> [name] | browser-games | add-browser-game <name> <https-url> | remove-browser-game <id> | rename-browser-game <id> <name> | publisher-games <id> | install-steam-game <id> <appid> | set-bottle-dxmt-options <id> <frame-rate> <spatial-scale> | steam-games <id> | run-steam-game <id> <appid> | initialize <id> | prefix-path <id> | apps <id> | installed-programs <id> | diagnostics <id> | rebuild-icons <id> | app-icon <bottle-id> <launcher-id> | bottle-icon <bottle-id> | bottle-notes <id> | set-bottle-notes <id> <text> | bottle-windows-version <id> | set-bottle-windows-version <id> default|win11|win10|win81|win8|win7|vista|winxp | bottle-resolution <id> | set-bottle-resolution <id> on|off | quit-all-bottles | quit-bottle <id> | open-uninstaller <id> | open-winecfg <id> | open-regedit <id> | open-controller-panel <id> | open-taskmgr <id> | open-internet-settings <id> | open-command-prompt <id> | simulate-reboot <id> | discover-apps <id> | logs <id> | read-log <id> <log-file-name> | add-app <id> <name> <file.exe> [--working-directory <drive_c/folder>] [-- <program-args...>] | set-app-visibility <id> <app-id> show|hide | set-app-arguments <id> <app-id> -- [arguments...] | rename-app <id> <app-id> <name> | run-app <id> <app-id> [-- <program-args...>] | launch <id> <file.exe|file.msi> [-- <program-args...>] | launch-wait <id> <file.exe|file.msi> [--quiet-msi] [--timeout-seconds 1..3600] [-- <program-args...>]".into()),
+        _ => return Err("Usage: caskrun-core overview | status | probe-runtime | list | deleted | catalog-attempts | create <name> | install-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher | retry-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher <bottle-id> | rename <id> <name> | delete <id> | restore-deleted <id> | purge-deleted <id> | duplicate <id> [name] | export <id> <path.caskrun-bottle> | export-archive <id> <path.caskrun-backup> | import <path.caskrun-bottle> [name] | import-archive <path.caskrun-backup> [name] | import-crossover <bottle-folder> [name] | browser-games | add-browser-game <name> <https-url> | remove-browser-game <id> | rename-browser-game <id> <name> | publisher-games <id> | run-publisher-game <id> epic|gog|ea|ubisoft <game-id> | install-steam-game <id> <appid> | set-bottle-dxmt-options <id> <frame-rate> <spatial-scale> | steam-games <id> | run-steam-game <id> <appid> | initialize <id> | prefix-path <id> | apps <id> | installed-programs <id> | diagnostics <id> | rebuild-icons <id> | app-icon <bottle-id> <launcher-id> | bottle-icon <bottle-id> | bottle-notes <id> | set-bottle-notes <id> <text> | bottle-windows-version <id> | set-bottle-windows-version <id> default|win11|win10|win81|win8|win7|vista|winxp | bottle-resolution <id> | set-bottle-resolution <id> on|off | quit-all-bottles | quit-bottle <id> | open-uninstaller <id> | open-winecfg <id> | open-regedit <id> | open-controller-panel <id> | open-taskmgr <id> | open-internet-settings <id> | open-command-prompt <id> | simulate-reboot <id> | discover-apps <id> | logs <id> | read-log <id> <log-file-name> | add-app <id> <name> <file.exe> [--working-directory <drive_c/folder>] [-- <program-args...>] | set-app-visibility <id> <app-id> show|hide | set-app-arguments <id> <app-id> -- [arguments...] | rename-app <id> <app-id> <name> | run-app <id> <app-id> [-- <program-args...>] | launch <id> <file.exe|file.msi> [-- <program-args...>] | launch-wait <id> <file.exe|file.msi> [--quiet-msi] [--timeout-seconds 1..3600] [-- <program-args...>]".into()),
     }.map_err(|e| e.to_string())?;
     println!(
         "{}",
@@ -3484,6 +3551,45 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ea_update_recovery_preserves_shortcut_identity_and_custom_commands() {
+        let home = test_home();
+        let bottle = create(&home, "EA fixture").unwrap();
+        let prefix = bottle_dir(&home, &bottle.id).unwrap().join("prefix");
+        let root = prefix.join("drive_c/Program Files/Electronic Arts/EA Desktop");
+        let old = root.join("13.1.0/EA Desktop/EADesktop.exe");
+        let new = root.join("13.2.0/EA Desktop/EADesktop.exe");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        fs::create_dir_all(new.parent().unwrap()).unwrap();
+        let mut pe = vec![0; 128];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c..0x40].copy_from_slice(&64u32.to_le_bytes());
+        pe[64..68].copy_from_slice(b"PE\0\0");
+        pe[68..70].copy_from_slice(&0x8664u16.to_le_bytes());
+        fs::write(&old, &pe).unwrap();
+        fs::write(&new, &pe).unwrap();
+        let saved = add_launcher(&home, &bottle.id, "My EA client", &old).unwrap();
+        let custom = add_launcher_with_arguments(
+            &home,
+            &bottle.id,
+            "Custom EA",
+            &old,
+            vec!["custom".into()],
+        )
+        .unwrap();
+        fs::remove_file(&old).unwrap();
+        let recovered = resolve_saved_launcher(&home, &bottle.id, &saved.id).unwrap();
+        assert_eq!(recovered.id, saved.id);
+        assert_eq!(recovered.name, saved.name);
+        assert_eq!(recovered.created_at, saved.created_at);
+        assert_eq!(Path::new(&recovered.path), new.canonicalize().unwrap());
+        let unchanged = resolve_saved_launcher(&home, &bottle.id, &custom.id).unwrap();
+        assert_eq!(unchanged.path, custom.path);
+        assert_eq!(unchanged.saved_arguments, custom.saved_arguments);
+        assert_eq!(list_launchers(&home, &bottle.id).unwrap().len(), 2);
+        fs::remove_dir_all(home).unwrap();
+    }
 
     fn test_home() -> PathBuf {
         let parent = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-data");
@@ -6410,6 +6516,11 @@ printf 'PREFIX=%s\nMODE=%s\nBOTTLE=%s\nIMAGE=%s\nCWD=%s\n' "$WINEPREFIX" "$CASKR
         symlink("/", source.join("native-apps/untrusted-host-link")).unwrap();
         fs::create_dir(source.join("icon-repair-cache")).unwrap();
         symlink("/", source.join("icon-repair-cache/untrusted-host-link")).unwrap();
+        fs::write(
+            source.join("auto-graphics.json"),
+            br#"{"version":1,"effective_backend":"dxmt","reason":"d3d11-detected"}"#,
+        )
+        .unwrap();
         let external = home.join("external.exe");
         fs::write(&external, b"external program").unwrap();
         add_launcher(&home, &original.id, "Installed", &installed).unwrap();
@@ -6422,6 +6533,7 @@ printf 'PREFIX=%s\nMODE=%s\nBOTTLE=%s\nIMAGE=%s\nCWD=%s\n' "$WINEPREFIX" "$CASKR
         let duplicate_dir = bottle_dir(&home, &duplicate.id).unwrap();
         assert!(!duplicate_dir.join("native-apps").exists());
         assert!(!duplicate_dir.join("icon-repair-cache").exists());
+        assert!(!duplicate_dir.join("auto-graphics.json").exists());
         assert_eq!(
             fs::read(duplicate_dir.join("prefix/drive_c/Game/game.exe")).unwrap(),
             b"installed program"
@@ -6496,6 +6608,7 @@ printf 'PREFIX=%s\nMODE=%s\nBOTTLE=%s\nIMAGE=%s\nCWD=%s\n' "$WINEPREFIX" "$CASKR
         assert!(!backup.join("payload/bottle.json").exists());
         assert!(!backup.join("payload/native-apps").exists());
         assert!(!backup.join("payload/icon-repair-cache").exists());
+        assert!(!backup.join("payload/auto-graphics.json").exists());
         assert_eq!(
             fs::read(cache.join("WindowsApp")).unwrap(),
             b"generated native loader"
@@ -6517,6 +6630,12 @@ printf 'PREFIX=%s\nMODE=%s\nBOTTLE=%s\nIMAGE=%s\nCWD=%s\n' "$WINEPREFIX" "$CASKR
                 .contains("reserved metadata: icon-repair-cache")
         );
         fs::remove_dir(backup.join("payload/icon-repair-cache")).unwrap();
+        // A foreign backup cannot inject a local automatic engine decision.
+        fs::write(
+            backup.join("payload/auto-graphics.json"),
+            br#"{"version":1,"effective_backend":"dxmt","reason":"d3d11-detected"}"#,
+        )
+        .unwrap();
         let restored_home = test_home();
         let restored = import_bottle(&restored_home, &backup, Some("Restored game")).unwrap();
         assert_eq!(restored.external_launchers, 1);
@@ -6530,6 +6649,7 @@ printf 'PREFIX=%s\nMODE=%s\nBOTTLE=%s\nIMAGE=%s\nCWD=%s\n' "$WINEPREFIX" "$CASKR
         assert_eq!(restored.bottle.name, "Restored game");
         assert_ne!(restored.bottle.id, original.id);
         let restored_dir = bottle_dir(&restored_home, &restored.bottle.id).unwrap();
+        assert!(!restored_dir.join("auto-graphics.json").exists());
         assert_eq!(
             fs::read(restored_dir.join("prefix/drive_c/Game/game.exe")).unwrap(),
             b"installed program"

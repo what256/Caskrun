@@ -256,6 +256,7 @@ struct BottleGraphicsStatus: Decodable, Sendable {
     let dxmt_frame_rate: UInt16
     let dxmt_spatial_scale: UInt16
     let dxmt_spatial_available: Bool
+    let automatic_reason: String?
 }
 
 struct WaitLaunchResult: Decodable, Sendable {
@@ -1744,7 +1745,8 @@ final class CaskrunModel: ObservableObject {
     }
 
     func runLauncher(_ launcher: SavedLauncher, in bottle: Bottle,
-                     arguments: [String] = [], onFailure: (() -> Void)? = nil) {
+                     arguments: [String] = [], publisherGame: PublisherGame? = nil,
+                     onFailure: (() -> Void)? = nil) {
         guard status.wine_path != nil else {
             message = "The included Windows engine is unavailable. Reinstall a complete Caskrun build."
             onFailure?()
@@ -1762,13 +1764,27 @@ final class CaskrunModel: ObservableObject {
                 // as current download progress. Other stores use neutral text.
                 let updateLog = client == .steam ? await captureSteamUpdateLog(in: bottle, launcher: launcher) : nil
                 var command = ["run-app", bottle.id, launcher.id]
+                if let game = publisherGame {
+                    command = ["run-publisher-game", bottle.id, game.store, game.store_id]
+                }
                 if !arguments.isEmpty {
                     command.append("--")
                     command.append(contentsOf: arguments)
                 }
                 _ = try await callAsync(command, as: LaunchResult.self)
-                if let client {
-                    try await waitForClientWindow(in: bottle, launcher: launcher, client: client, updateLog: updateLog)
+                refreshBottleGraphics(in: bottle)
+                var monitorLauncher = launcher
+                if client == .ea,
+                   let current = try? await callAsync(["apps", bottle.id], as: [SavedLauncher].self) {
+                    launchers[bottle.id] = current
+                    monitorLauncher = current.first(where: { $0.id == launcher.id }) ?? launcher
+                }
+                // A game's URI can be accepted while its store stays hidden.
+                // As with Steam games, submission does not require a store
+                // window or claim that the game reached its menu.
+                let requestsGame = publisherGame.map { ["ea", "ubisoft"].contains($0.store) } ?? false
+                if let client, !requestsGame {
+                    try await waitForClientWindow(in: bottle, launcher: monitorLauncher, client: client, updateLog: updateLog)
                 }
                 CaskrunWindowBridge.shared.hideMainWindow()
             } catch let outcome as SteamStartup.MonitorError {
@@ -2095,8 +2111,8 @@ final class CaskrunModel: ObservableObject {
 
     private func validateGraphicsResult(_ result: BottleGraphicsStatus, for bottle: Bottle) throws {
         guard result.bottle_id == bottle.id,
-              ["auto", "wined3d", "dxmt"].contains(result.selected_backend),
-              result.effective_backend == (result.selected_backend == "dxmt" ? "dxmt" : "wined3d"),
+              BottleGraphicsContract.accepts(selected: result.selected_backend,
+                  effective: result.effective_backend, dxmtAvailable: result.dxmt_available),
               result.dxmt_frame_rate <= 240, [100, 125, 150, 200].contains(result.dxmt_spatial_scale) else {
             throw NSError(domain: "Caskrun", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Graphics status is unavailable for this bottle."])
@@ -3929,7 +3945,7 @@ struct CaskrunApp: App {
                     graphicsDescription: model.bottleGraphics[bottle.id].map { "Bottle graphics: " + ($0.effective_backend == "dxmt" ? "DXMT" : "WineD3D") }))
             }
             for game in model.publisherGames[bottle.id] ?? [] {
-                let scope: LibraryScope = game.store == "epic" ? .epic : .gog
+                guard let scope = LibraryScope(rawValue: game.store), scope.isPublisher else { continue }
                 entries.append(GameLibraryEntry(id: "publisher:\(bottle.id):\(game.id)", name: game.name, source: scope,
                     subtitle: "\(scope.title) · \(bottle.name)", compatibilityText: "Not tested in Caskrun",
                     compatibilityDetail: "This title was found in the store's local installation manifest. Compatibility reports need an exact game identifier; a matching title alone is not evidence.",
@@ -3953,7 +3969,7 @@ struct CaskrunApp: App {
     private var gameLibraryWarnings: [String] {
         var warnings = model.bottles.compactMap { bottle in model.steamGameErrors[bottle.id].map { "\(bottle.name): \($0)" } }
         warnings += model.bottles.compactMap { bottle in model.publisherGameErrors[bottle.id].map { "\(bottle.name): \($0)" } }
-        if !model.truncatedPublisherLibraries.isEmpty { warnings.append("Some Epic or GOG manifests were skipped or exceeded the local scan limit.") }
+        if !model.truncatedPublisherLibraries.isEmpty { warnings.append("Some store installation records were skipped or exceeded the local scan limit.") }
         if model.bottles.count > 128 { warnings.append("Only the first 128 bottles were scanned. Use Manage bottles to select another bottle and read its library.") }
         if !model.truncatedSteamLibraries.isEmpty { warnings.append("Some Steam manifests could not be read completely.") }
         if let error = model.browserGamesError { warnings.append(error) }
@@ -3981,6 +3997,21 @@ struct CaskrunApp: App {
                 return (program.hasPrefix("program files (x86)/epic games/launcher/") || program.hasPrefix("program files/epic games/launcher/"))
                     && program.hasSuffix("/epicgameslauncher.exe")
             }
+            if game.store == "ubisoft" {
+                return ["program files (x86)/ubisoft/ubisoft game launcher/ubisoftconnect.exe",
+                        "program files/ubisoft/ubisoft game launcher/ubisoftconnect.exe",
+                        "program files (x86)/ubisoft/ubisoft game launcher/uplay.exe",
+                        "program files/ubisoft/ubisoft game launcher/uplay.exe"].contains(String(program))
+            }
+            if game.store == "ea" {
+                let parts = program.split(separator: "/").map(String.init)
+                guard parts.count == 5 || parts.count == 6,
+                      ["program files", "program files (x86)"].contains(parts[0]),
+                      parts[1] == "electronic arts", parts[2] == "ea desktop",
+                      parts.suffix(2) == ["ea desktop", "eadesktop.exe"] else { return false }
+                return parts.count == 5 || (parts[3].split(separator: ".").count >= 2
+                    && parts[3].allSatisfy { $0.isASCII && ($0.isNumber || $0 == ".") })
+            }
             return game.store == "gog" && (program == "program files (x86)/gog galaxy/galaxyclient.exe" || program == "program files/gog galaxy/galaxyclient.exe")
         }
     }
@@ -3991,7 +4022,7 @@ struct CaskrunApp: App {
         for bottle in model.bottles {
             if let game = model.publisherGames[bottle.id]?.first(where: { "publisher:\(bottle.id):\($0.id)" == entry.id }),
                let client = publisherClient(for: game, in: bottle) {
-                model.runLauncher(client, in: bottle); return
+                model.runLauncher(client, in: bottle, publisherGame: game); return
             }
             if let game = model.steamGames[bottle.id]?.first(where: { "steam:\(bottle.id):\($0.app_id)" == entry.id }) {
                 model.runSteamGame(game, in: bottle); return
@@ -4627,7 +4658,7 @@ struct CaskrunApp: App {
                     get: { model.bottleGraphics[bottle.id]?.selected_backend ?? "auto" },
                     set: { model.setBottleGraphics(in: bottle, backend: $0) }
                 )) {
-                    Text("Automatic (WineD3D)").tag("auto")
+                    Text("Automatic").tag("auto")
                     Text("WineD3D").tag("wined3d")
                     Text("DXMT · Experimental").tag("dxmt").disabled(!status.dxmt_available)
                 }
@@ -4640,6 +4671,12 @@ struct CaskrunApp: App {
                      ? "DXMT translates DirectX 10/11 to Metal. Game compatibility still needs testing."
                      : "WineD3D is the default renderer.")
                     .font(.caption).foregroundStyle(.secondary)
+                if status.selected_backend == "auto" {
+                    Text(BottleGraphicsContract.automaticDescription(reason: status.automatic_reason))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Newly installed games are checked after you quit this bottle’s apps and open it again.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Text("Saved for this bottle. Quit its apps before changing graphics; closing a window can leave them running.")
                     .font(.caption).foregroundStyle(.secondary)
                 if status.selected_backend == "dxmt" {

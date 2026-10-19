@@ -520,8 +520,18 @@ fn graphics_summary(
     if selected.is_none() {
         issue(issues, Issue::GraphicsUnreadable);
     }
+    let effective = bottle_graphics::resolved_backend(dir)
+        .ok()
+        .map(|backend| match backend {
+            bottle_graphics::Backend::Auto => Renderer::Auto,
+            bottle_graphics::Backend::Wined3d => Renderer::Wined3d,
+            bottle_graphics::Backend::Dxmt => Renderer::Dxmt,
+        });
+    if effective.is_none() {
+        issue(issues, Issue::GraphicsUnreadable);
+    }
     let available = dxmt_available(wine, runtime);
-    if matches!(selected, Some(Renderer::Dxmt)) {
+    if matches!(effective, Some(Renderer::Dxmt)) {
         issue(
             issues,
             if available {
@@ -533,10 +543,7 @@ fn graphics_summary(
     }
     GraphicsSummary {
         selected_backend: selected,
-        effective_backend: selected.map(|renderer| match renderer {
-            Renderer::Auto => Renderer::Wined3d,
-            renderer => renderer,
-        }),
+        effective_backend: effective,
         dxmt_available: available,
     }
 }
@@ -747,6 +754,28 @@ mod tests {
 
     fn has_issue(report: &serde_json::Value, value: &str) -> bool {
         report["issues"].as_array().unwrap().contains(&value.into())
+    }
+
+    #[test]
+    fn automatic_diagnostics_share_the_recorded_view_without_scanning() {
+        let fixture = Fixture::new();
+        let cache = fixture.dir.join("auto-graphics.json");
+        fs::write(
+            &cache,
+            br#"{"version":1,"effective_backend":"dxmt","reason":"d3d11-detected"}"#,
+        )
+        .unwrap();
+        let before = fs::read(&cache).unwrap();
+        let report = fixture.report();
+        assert_eq!(report["graphics"]["selected_backend"], "auto");
+        assert_eq!(report["graphics"]["effective_backend"], "dxmt");
+        assert!(has_issue(&report, "dxmt_unavailable"));
+        assert_eq!(fs::read(&cache).unwrap(), before);
+        assert!(!report.to_string().contains("auto-graphics"));
+        fs::write(&cache, b"invalid").unwrap();
+        let report = fixture.report();
+        assert!(report["graphics"]["effective_backend"].is_null());
+        assert!(has_issue(&report, "graphics_unreadable"));
     }
 
     #[test]

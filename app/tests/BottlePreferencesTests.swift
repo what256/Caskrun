@@ -70,6 +70,20 @@ struct BottlePreferencesTests {
                "a preserved cached selection is clearly labeled after a read failure")
         expect(!BottlePreferenceRequests.refreshFailure(hasConfirmedValue: false, detail: "Unavailable")
             .contains("last confirmed"), "a first read failure does not invent a saved selection")
+        expect(BottleGraphicsContract.accepts(selected: "auto", effective: "dxmt", dxmtAvailable: true),
+               "a verified automatic DXMT choice survives inspector validation")
+        expect(BottleGraphicsContract.accepts(selected: "auto", effective: "wined3d", dxmtAvailable: false),
+               "automatic fallback is valid without DXMT")
+        expect(!BottleGraphicsContract.accepts(selected: "auto", effective: "dxmt", dxmtAvailable: false),
+               "an unavailable automatic renderer is never confirmed")
+        expect(!BottleGraphicsContract.accepts(selected: "wined3d", effective: "dxmt", dxmtAvailable: true),
+               "manual WineD3D cannot silently turn into DXMT")
+        expect(!BottleGraphicsContract.accepts(selected: "dxmt", effective: "wined3d", dxmtAvailable: true),
+               "manual DXMT cannot silently fall back")
+        expect(!BottleGraphicsContract.accepts(selected: "auto", effective: "other", dxmtAvailable: true),
+               "unknown engine values are refused")
+        expect(BottleGraphicsContract.automaticDescription(reason: "d3d11-detected").contains("DXMT"),
+               "automatic evidence is explained without exposing local paths")
         print("Bottle preferences: \(checks) checks passed")
     }
 }

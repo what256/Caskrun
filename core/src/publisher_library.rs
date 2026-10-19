@@ -1,10 +1,17 @@
-//! Read-only Epic and GOG installed-game discovery within a bottle's real C: drive.
+//! EA/Ubisoft adaptation: MacadeKit LauncherStore.swift, revision
+//! 37bb046423dbb85c5cb98fee742868dccb96002d, Copyright 2026 Steale LLC,
+//! Apache-2.0. Modified for Caskrun: bounded no-follow reads, strict metadata,
+//! same-bottle identity and cancellation. See third-party/mapc-engine/.
+//!
+//! Read-only publisher installed-game discovery within a bottle's real C: drive.
 //!
 //! Identity comes from each store's own manifest, never from a guessed
 //! executable, so this module reports what a store says is installed and asserts
-//! nothing about whether it runs. It reads only manifest files under the
-//! bottle's C: drive; it opens no account, credential or token file, starts no
-//! Wine process, and performs no network access.
+//! nothing about whether it runs. It reads manifests under the bottle's C:
+//! drive and a limited machine-registry snapshot; it opens no account,
+//! credential or token file, starts no
+//! Wine process, and performs no network access. Ubisoft installation records
+//! are read from the bottle's bounded machine registry, never its account data.
 //!
 //! Epic manifest location and fields follow the launcher's own `Data/Manifests`
 //! directory. GOG game metadata follows its `goggame-<id>.info` files, which the
@@ -26,6 +33,7 @@ use crate::{
 const O_NONBLOCK: i32 = 0x0000_0004;
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_MACHINE_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TOTAL_READ_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SCAN_ENTRIES: usize = 8_192;
 const MAX_GAMES: usize = 1_024;
@@ -46,6 +54,18 @@ const GOG_ROOTS: &[&str] = &[
 
 pub(crate) const STORE_EPIC: &str = "epic";
 pub(crate) const STORE_GOG: &str = "gog";
+pub(crate) const STORE_EA: &str = "ea";
+pub(crate) const STORE_UBISOFT: &str = "ubisoft";
+
+// Store metadata locations and fixed launch identifiers are adapted from MaPC's
+// MacadeKit LauncherStore.swift, Apache-2.0, commit
+// 37bb046423dbb85c5cb98fee742868dccb96002d. See THIRD_PARTY_NOTICES.md.
+// All containment, snapshot checks, budgets and parsers below are Caskrun's.
+const EA_GAME_ROOTS: &[&str] = &["Program Files/EA Games", "Program Files (x86)/EA Games"];
+const UBISOFT_ROOTS: &[&str] = &[
+    "Program Files (x86)/Ubisoft/Ubisoft Game Launcher",
+    "Program Files/Ubisoft/Ubisoft Game Launcher",
+];
 
 #[derive(Debug, Serialize)]
 pub(crate) struct PublisherLibrary {
@@ -172,6 +192,15 @@ fn discover_with_budget(prefix: &Path, max_read_bytes: u64) -> Result<PublisherL
 
     scan_epic(&drive, &mut budget, &mut examined, &mut found, &mut result)?;
     scan_gog(&drive, &mut budget, &mut examined, &mut found, &mut result)?;
+    scan_ea(&drive, &mut budget, &mut examined, &mut found, &mut result)?;
+    scan_ubisoft(
+        prefix,
+        &drive,
+        &mut budget,
+        &mut examined,
+        &mut found,
+        &mut result,
+    )?;
 
     // Nothing is published for a scan the caller has already walked away from.
     cancellation::check()?;
@@ -435,10 +464,361 @@ fn scan_gog_game_directory(
     Ok(())
 }
 
+fn scan_ea(
+    drive: &CheckedDrive,
+    budget: &mut ReadBudget,
+    examined: &mut usize,
+    found: &mut Vec<PublisherGame>,
+    result: &mut PublisherLibrary,
+) -> Result<(), String> {
+    for root in EA_GAME_ROOTS {
+        cancellation::check()?;
+        if budget.exhausted {
+            return Ok(());
+        }
+        let Some(root_path) = contained_directory(drive, root) else {
+            continue;
+        };
+        let Ok((_guard, snapshot)) = open_stable_directory(&root_path) else {
+            result.truncated = true;
+            continue;
+        };
+        let Ok(entries) = fs::read_dir(&root_path) else {
+            result.truncated = true;
+            continue;
+        };
+        for entry in entries {
+            cancellation::check()?;
+            if budget.exhausted {
+                return Ok(());
+            }
+            if *examined >= MAX_SCAN_ENTRIES {
+                result.truncated = true;
+                return Ok(());
+            }
+            *examined += 1;
+            let Ok(entry) = entry else {
+                result.truncated = true;
+                continue;
+            };
+            if !fs::symlink_metadata(&root_path)
+                .is_ok_and(|current| same_snapshot(&snapshot, &current))
+            {
+                result.truncated = true;
+                return Ok(());
+            }
+            let Some(game_dir) = contained_path(drive, &entry.path()) else {
+                continue;
+            };
+            let Some(installer_dir) = contained_path(drive, &game_dir.join("__Installer")) else {
+                continue;
+            };
+            let bytes = read_manifest(&installer_dir.join("installerdata.xml"), budget, result);
+            cancellation::check()?;
+            let Some(bytes) = bytes else {
+                continue;
+            };
+            let Some(store_id) = ea_content_id(&bytes) else {
+                continue;
+            };
+            let Some(name) = game_dir
+                .file_name()
+                .and_then(|value| value.to_str())
+                .and_then(checked_name)
+            else {
+                continue;
+            };
+            // Folder presence alone is never an install record. A literal EA
+            // manifest content ID is required; no guessed folder-name IDs.
+            if !drive.is_current() || contained_path(drive, &game_dir).is_none() {
+                result.truncated = true;
+                continue;
+            }
+            found.push(PublisherGame {
+                id: format!("{STORE_EA}:{store_id}"),
+                store: STORE_EA.into(),
+                store_id,
+                name,
+                install_path: game_dir.display().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Read EA's first declared launch content ID from its actual manifest shape.
+/// This intentionally does not resolve XML entities or accept a folder-name
+/// fallback. quick-xml performs no external-resource loading.
+fn ea_content_id(bytes: &[u8]) -> Option<String> {
+    use quick_xml::{Reader, events::Event};
+    let xml = std::str::from_utf8(bytes).ok()?;
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().check_comments = true;
+    let mut stack: Vec<String> = Vec::new();
+    let mut root_seen = false;
+    let mut root_finished = false;
+    let mut first_id = None;
+    let mut content = String::new();
+    let mut capturing = false;
+    for _ in 0..65_536 {
+        if cancellation::is_requested() {
+            return None;
+        }
+        match reader.read_event().ok()? {
+            Event::Start(tag) => {
+                if root_finished || capturing || stack.len() >= MAX_WINDOWS_PATH_DEPTH {
+                    return None;
+                }
+                let name = tag.name().as_ref().to_owned();
+                if name.len() > 128 {
+                    return None;
+                }
+                for attribute in tag.attributes() {
+                    attribute.ok()?;
+                }
+                if stack.is_empty() {
+                    if root_seen || name != "DiPManifest" {
+                        return None;
+                    }
+                    root_seen = true;
+                }
+                stack.push(name);
+                if first_id.is_none() && stack == ["DiPManifest", "contentIDs", "contentID"] {
+                    capturing = true;
+                    content.clear();
+                }
+            }
+            Event::End(_) => {
+                if capturing {
+                    first_id = Some(checked_identifier(content.trim())?);
+                    capturing = false;
+                }
+                stack.pop()?;
+                if stack.is_empty() {
+                    root_finished = true;
+                }
+            }
+            Event::Empty(tag) => {
+                if root_finished || capturing {
+                    return None;
+                }
+                for attribute in tag.attributes() {
+                    attribute.ok()?;
+                }
+                if stack.is_empty() {
+                    return None;
+                }
+                if first_id.is_none()
+                    && stack == ["DiPManifest", "contentIDs"]
+                    && tag.name().as_ref() == "contentID"
+                {
+                    return None;
+                }
+            }
+            Event::Text(text) if capturing => {
+                if content.len() + text.len() > MAX_STORE_ID_CHARS + 256 {
+                    return None;
+                }
+                content.push_str(&text);
+            }
+            Event::Text(text) if stack.is_empty() && !text.trim().is_empty() => return None,
+            Event::DocType(_) | Event::GeneralRef(_) | Event::CData(_) => return None,
+            Event::Eof => {
+                return (root_seen && root_finished && stack.is_empty())
+                    .then_some(first_id)
+                    .flatten();
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[derive(Default)]
+struct UbisoftRecord {
+    id: String,
+    install: Option<String>,
+    invalid: bool,
+}
+
+fn scan_ubisoft(
+    prefix: &Path,
+    drive: &CheckedDrive,
+    budget: &mut ReadBudget,
+    examined: &mut usize,
+    found: &mut Vec<PublisherGame>,
+    result: &mut PublisherLibrary,
+) -> Result<(), String> {
+    cancellation::check()?;
+    if budget.exhausted
+        || !UBISOFT_ROOTS
+            .iter()
+            .any(|root| contained_directory(drive, root).is_some())
+    {
+        return Ok(());
+    }
+    let Some(bytes) = read_metadata_file(
+        &prefix.join("system.reg"),
+        MAX_MACHINE_REGISTRY_BYTES,
+        budget,
+        result,
+    ) else {
+        cancellation::check()?;
+        return Ok(());
+    };
+    let Ok(contents) = std::str::from_utf8(&bytes) else {
+        return Ok(());
+    };
+    if !contents.starts_with("WINE REGISTRY Version 2\n")
+        && !contents.starts_with("WINE REGISTRY Version 2\r\n")
+    {
+        return Ok(());
+    }
+    let mut records = Vec::new();
+    let mut current: Option<UbisoftRecord> = None;
+    let mut continued = false;
+    for line in contents.lines() {
+        cancellation::check()?;
+        if continued {
+            continued = line.ends_with('\\');
+            continue;
+        }
+        if line.ends_with('\\') {
+            if let Some(record) = current.as_mut() {
+                record.invalid = true;
+            }
+            continued = true;
+            continue;
+        }
+        if line.starts_with('[') {
+            if let Some(record) = current.take() {
+                records.push(record);
+            }
+            current = ubisoft_section_id(line).map(|id| UbisoftRecord {
+                id,
+                ..Default::default()
+            });
+            if current.is_some() {
+                if *examined >= MAX_SCAN_ENTRIES {
+                    result.truncated = true;
+                    current = None;
+                    break;
+                }
+                *examined += 1;
+            }
+        } else if let Some(record) = current.as_mut() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            if key.trim().eq_ignore_ascii_case("\"InstallDir\"") {
+                if record.install.is_some() {
+                    record.invalid = true;
+                }
+                match registry_quoted_path(value.trim()) {
+                    Some(path) => record.install = Some(path),
+                    None => record.invalid = true,
+                }
+            }
+        }
+    }
+    if let Some(record) = current {
+        records.push(record);
+    }
+    let mut seen = BTreeSet::new();
+    let mut duplicates = BTreeSet::new();
+    for record in &records {
+        if !seen.insert(record.id.clone()) {
+            duplicates.insert(record.id.clone());
+        }
+    }
+    for record in records {
+        if record.invalid || duplicates.contains(&record.id) {
+            continue;
+        }
+        let Some(install_path) = record
+            .install
+            .as_deref()
+            .and_then(|path| windows_directory(drive, path))
+        else {
+            continue;
+        };
+        let Some(name) = install_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .and_then(checked_name)
+        else {
+            continue;
+        };
+        found.push(PublisherGame {
+            id: format!("{STORE_UBISOFT}:{}", record.id),
+            store: STORE_UBISOFT.into(),
+            store_id: record.id,
+            name,
+            install_path: install_path.display().to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn ubisoft_section_id(line: &str) -> Option<String> {
+    let end = line.find(']')?;
+    let trailer = line[end + 1..].trim();
+    if !trailer.is_empty() && !trailer.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let section = line.get(1..end)?;
+    let (parent, id) = section.rsplit_once(r"\\")?;
+    if !(parent.eq_ignore_ascii_case(r"Software\\Wow6432Node\\Ubisoft\\Launcher\\Installs")
+        || parent.eq_ignore_ascii_case(r"Software\\Ubisoft\\Launcher\\Installs"))
+        || id.is_empty()
+        || id.len() > 20
+        || !id.bytes().all(|byte| byte.is_ascii_digit())
+        || id.parse::<u64>().ok()? == 0
+        || id.parse::<u64>().ok()?.to_string() != id
+    {
+        return None;
+    }
+    Some(id.into())
+}
+
+/// Wine .reg quoted string decoding limited to literal path characters. No
+/// expansion, hex values, shell syntax or arbitrary registry lookup is used.
+fn registry_quoted_path(value: &str) -> Option<String> {
+    let quoted = value.strip_prefix('"')?.strip_suffix('"')?;
+    let mut result = String::new();
+    let mut chars = quoted.chars();
+    while let Some(character) = chars.next() {
+        if character == '\\' {
+            match chars.next()? {
+                '\\' => result.push('\\'),
+                '"' => result.push('"'),
+                _ => return None,
+            }
+        } else if character == '"' || character.is_control() {
+            return None;
+        } else {
+            result.push(character);
+        }
+        if result.len() > MAX_WINDOWS_PATH_CHARS {
+            return None;
+        }
+    }
+    Some(result)
+}
+
 /// Read a manifest without following a symlink and without exceeding either the
 /// per-file or the whole-scan budget.
 fn read_manifest(
     path: &Path,
+    budget: &mut ReadBudget,
+    result: &mut PublisherLibrary,
+) -> Option<Vec<u8>> {
+    read_metadata_file(path, MAX_MANIFEST_BYTES, budget, result)
+}
+
+fn read_metadata_file(
+    path: &Path,
+    max_bytes: u64,
     budget: &mut ReadBudget,
     result: &mut PublisherLibrary,
 ) -> Option<Vec<u8>> {
@@ -460,7 +840,7 @@ fn read_manifest(
     if !opened.is_file() || !same_snapshot(&before, &opened) {
         return None;
     }
-    let bytes = read_manifest_contents(&mut file, before.len(), budget, result)?;
+    let bytes = read_metadata_contents(&mut file, before.len(), max_bytes, budget, result)?;
     // Publish bytes only when the handle that produced them and the path it was
     // opened from are both still exactly what was measured, so a file replaced
     // or rewritten while it was being read is discarded instead of parsed.
@@ -476,16 +856,27 @@ fn read_manifest(
 
 /// Account for bytes actually returned, even when a file grew or a later read
 /// failed. At most one overflow byte is read for the entire exhausted scan.
+#[cfg(test)]
 fn read_manifest_contents(
     reader: &mut impl Read,
     measured_len: u64,
     budget: &mut ReadBudget,
     result: &mut PublisherLibrary,
 ) -> Option<Vec<u8>> {
+    read_metadata_contents(reader, measured_len, MAX_MANIFEST_BYTES, budget, result)
+}
+
+fn read_metadata_contents(
+    reader: &mut impl Read,
+    measured_len: u64,
+    max_bytes: u64,
+    budget: &mut ReadBudget,
+    result: &mut PublisherLibrary,
+) -> Option<Vec<u8>> {
     if budget.exhausted || cancellation::is_requested() {
         return None;
     }
-    if measured_len > MAX_MANIFEST_BYTES {
+    if measured_len > max_bytes {
         result.truncated = true;
         return None;
     }
@@ -494,7 +885,7 @@ fn read_manifest_contents(
         result.truncated = true;
         return None;
     }
-    let limit = MAX_MANIFEST_BYTES.min(budget.remaining);
+    let limit = max_bytes.min(budget.remaining);
     let mut bytes = Vec::with_capacity(measured_len as usize);
     let read_result = crate::copy_cancellable(&mut reader.take(limit + 1), &mut bytes);
     let consumed = bytes.len() as u64;
@@ -736,6 +1127,217 @@ mod tests {
         assert_eq!(gog.name, "Zenith");
         assert_eq!(gog.id, "gog:1207658924");
         assert!(gog.install_path.ends_with("GOG Games/Zenith"));
+        fs::remove_dir_all(prefix).unwrap();
+    }
+
+    fn ea_manifest(prefix: &Path, folder: &str, contents: &str) {
+        write(
+            &prefix
+                .join("drive_c/Program Files/EA Games")
+                .join(folder)
+                .join("__Installer/installerdata.xml"),
+            contents,
+        );
+    }
+
+    fn ubisoft_registry(prefix: &Path, contents: &str) {
+        fs::create_dir_all(prefix.join("drive_c").join(UBISOFT_ROOTS[0])).unwrap();
+        write(
+            &prefix.join("system.reg"),
+            &format!("WINE REGISTRY Version 2\n\n{contents}"),
+        );
+    }
+
+    #[test]
+    fn reads_ea_manifest_ids_and_both_ubisoft_machine_registry_layouts() {
+        let prefix = test_prefix("ea-ubisoft-libraries");
+        ea_manifest(
+            &prefix,
+            "Example EA Game",
+            "<?xml version=\"1.0\"?><DiPManifest><contentIDs><contentID>Origin.OFR.50.0001</contentID><contentID>71173</contentID></contentIDs></DiPManifest>",
+        );
+        for name in ["Example Ubisoft Game", "Another Ubisoft Game"] {
+            fs::create_dir_all(prefix.join("drive_c/Games").join(name)).unwrap();
+        }
+        ubisoft_registry(
+            &prefix,
+            r#"[Software\\Wow6432Node\\Ubisoft\\Launcher\\Installs\\46] 1700000001
+"InstallDir"="C:\\Games\\Example Ubisoft Game\\"
+[Software\\Ubisoft\\Launcher\\Installs\\99]
+"InstallDir"="C:/Games/Another Ubisoft Game/"
+[Software\\Wow6432Node\\Ubisoft\\Launcher\\Installs\\100]
+"InstallDir"="C:/Games/Absent/"
+"#,
+        );
+        let library = discover(&prefix).unwrap();
+        assert!(!library.truncated);
+        assert_eq!(library.games.len(), 3);
+        let ea = &library.games[0];
+        assert_eq!(ea.id, "ea:Origin.OFR.50.0001");
+        assert_eq!(ea.name, "Example EA Game");
+        assert_eq!(library.games[1].id, "ubisoft:99");
+        assert_eq!(library.games[2].id, "ubisoft:46");
+        fs::remove_dir_all(prefix).unwrap();
+    }
+
+    #[test]
+    fn ea_content_id_requires_literal_bounded_manifest_field_and_well_formed_xml() {
+        assert_eq!(ea_content_id(b"<DiPManifest><contentIDs><contentID> 71173 </contentID><contentID>1035052</contentID></contentIDs></DiPManifest>"), Some("71173".into()));
+        for xml in [
+            "<x><contentID>71173</contentID></x>",
+            "<DiPManifest><!-- <contentIDs><contentID>71173</contentID></contentIDs> --></DiPManifest>",
+            "<DiPManifest><contentID>71173</contentID></DiPManifest>",
+            "<!DOCTYPE DiPManifest [<!ENTITY id '71173'>]><DiPManifest><contentIDs><contentID>&id;</contentID></contentIDs></DiPManifest>",
+            "<DiPManifest><contentIDs><contentID><![CDATA[71173]]></contentID></contentIDs></DiPManifest>",
+            "<DiPManifest><contentIDs><contentID>71173&amp;x</contentID></contentIDs></DiPManifest>",
+            "<DiPManifest><contentIDs><contentID><x>71173</x></contentID></contentIDs></DiPManifest>",
+            "<DiPManifest><contentIDs><contentID>71173</contentID>",
+            "<DiPManifest><contentIDs><contentID/></contentIDs></DiPManifest>",
+            "<DiPManifest><contentIDs><contentID>71173?execute=bad</contentID></contentIDs></DiPManifest>",
+            "<DiPManifest><contentIDs><contentID>71173</contentID></contentIDs></DiPManifest><DiPManifest/>",
+            "<DiPManifest><contentIDs><contentID a='1' a='2'>71173</contentID></contentIDs></DiPManifest>",
+        ] {
+            assert!(ea_content_id(xml.as_bytes()).is_none(), "accepted {xml}");
+        }
+        assert!(ea_content_id(&[0xff, 0xfe]).is_none());
+        let xml = format!(
+            "<DiPManifest><contentIDs><contentID>{}</contentID></contentIDs></DiPManifest>",
+            "a".repeat(MAX_STORE_ID_CHARS + 1)
+        );
+        assert!(ea_content_id(xml.as_bytes()).is_none());
+        let xml = format!(
+            "<DiPManifest>{}{} </DiPManifest>",
+            "<x>".repeat(64),
+            "</x>".repeat(64)
+        );
+        assert!(ea_content_id(xml.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn ea_installer_directory_alone_is_not_an_installed_game() {
+        let prefix = test_prefix("ea-manifest-required");
+        fs::create_dir_all(prefix.join("drive_c/Program Files/EA Games/Folder Only/__Installer"))
+            .unwrap();
+        ea_manifest(&prefix, "Empty XML", "<DiPManifest/>");
+        ea_manifest(&prefix, "No ID", "<DiPManifest><contentIDs/></DiPManifest>");
+        assert!(discover(&prefix).unwrap().games.is_empty());
+        fs::remove_dir_all(prefix).unwrap();
+    }
+
+    #[test]
+    fn ea_game_manifest_and_install_dirs_cannot_follow_symlinks() {
+        let prefix = test_prefix("ea-no-follow");
+        let outside = prefix.join("outside");
+        write(
+            &outside.join("installerdata.xml"),
+            "<DiPManifest><contentIDs><contentID>71173</contentID></contentIDs></DiPManifest>",
+        );
+        let games = prefix.join("drive_c/Program Files/EA Games");
+        fs::create_dir_all(&games).unwrap();
+        symlink(&outside, games.join("Linked Game")).unwrap();
+        fs::create_dir(games.join("Linked Installer")).unwrap();
+        symlink(&outside, games.join("Linked Installer/__Installer")).unwrap();
+        fs::create_dir_all(games.join("Linked File/__Installer")).unwrap();
+        symlink(
+            outside.join("installerdata.xml"),
+            games.join("Linked File/__Installer/installerdata.xml"),
+        )
+        .unwrap();
+        assert!(discover(&prefix).unwrap().games.is_empty());
+        fs::remove_dir_all(prefix).unwrap();
+    }
+
+    #[test]
+    fn ubisoft_registry_parser_refuses_ambiguous_or_non_machine_install_records() {
+        let prefix = test_prefix("ubisoft-registry-refusals");
+        fs::create_dir_all(prefix.join("drive_c/Games/Real")).unwrap();
+        ubisoft_registry(
+            &prefix,
+            r#"[Software\\Wow6432Node\\Ubisoft\\Launcher\\Installs\\46]
+"InstallDir"="C:/Games/Real"
+"InstallDir"="C:/Games/Real"
+[Software\\Wow6432Node\\Ubisoft\\Launcher\\Installs\\99]
+"InstallDir"="C:/Games/Real"
+[Software\\Ubisoft\\Launcher\\Installs\\99]
+"InstallDir"="C:/Games/Real"
+[Software\\Ubisoft\\Launcher\\Installs\\100] unknown-trailer
+"InstallDir"="C:/Games/Real"
+[Software\\Ubisoft\\Launcher\\Installs\\101\\Child]
+"InstallDir"="C:/Games/Real"
+[Software\\Other\\Ubisoft\\Launcher\\Installs\\102]
+"InstallDir"="C:/Games/Real"
+[Software\\Ubisoft\\Launcher\\Installs\\103]
+"InstallDir"="Z:/Games/Real"
+[Software\\Ubisoft\\Launcher\\Installs\\104]
+"InstallDir"="C:/Games/../Games/Real"
+[Software\\Ubisoft\\Launcher\\Installs\\105]
+"InstallDir"=hex:43,3a,2f
+[Software\\Ubisoft\\Launcher\\Installs\\106]
+"InstallDir"="C:/Games/Real\q"
+[Software\\Ubisoft\\Launcher\\Installs\\107?x=bad]
+"InstallDir"="C:/Games/Real"
+[Software\\Ubisoft\\Launcher\\Installs\\0]
+"InstallDir"="C:/Games/Real"
+[Software\\Ubisoft\\Launcher\\Installs\\00108]
+"InstallDir"="C:/Games/Real"
+"#,
+        );
+        assert!(discover(&prefix).unwrap().games.is_empty());
+        fs::remove_dir_all(prefix).unwrap();
+    }
+
+    #[test]
+    fn ubisoft_registry_and_recorded_install_dirs_refuse_symlinks_and_fifos() {
+        let prefix = test_prefix("ubisoft-no-follow");
+        fs::create_dir_all(prefix.join("drive_c/Games/Real")).unwrap();
+        ubisoft_registry(
+            &prefix,
+            r#"[Software\\Ubisoft\\Launcher\\Installs\\46]
+"InstallDir"="C:/Games/Real"
+"#,
+        );
+        let registry = prefix.join("system.reg");
+        let outside = prefix.join("outside.reg");
+        fs::rename(&registry, &outside).unwrap();
+        symlink(&outside, &registry).unwrap();
+        assert!(discover(&prefix).unwrap().games.is_empty());
+        fs::remove_file(&registry).unwrap();
+        make_fifo(&registry);
+        assert!(discover(&prefix).unwrap().games.is_empty());
+        fs::remove_file(&registry).unwrap();
+        fs::rename(&outside, &registry).unwrap();
+        fs::remove_dir(prefix.join("drive_c/Games/Real")).unwrap();
+        symlink(prefix.join("outside"), prefix.join("drive_c/Games/Real")).unwrap();
+        fs::create_dir(prefix.join("outside")).unwrap();
+        assert!(discover(&prefix).unwrap().games.is_empty());
+        fs::remove_dir_all(prefix).unwrap();
+    }
+
+    #[test]
+    fn ubisoft_registry_obeys_total_file_and_record_budgets() {
+        let prefix = test_prefix("ubisoft-budgets");
+        fs::create_dir_all(prefix.join("drive_c/Games/Real")).unwrap();
+        ubisoft_registry(
+            &prefix,
+            r#"[Software\\Ubisoft\\Launcher\\Installs\\46]
+"InstallDir"="C:/Games/Real"
+"#,
+        );
+        let library = discover_with_budget(&prefix, 10).unwrap();
+        assert!(library.truncated && library.games.is_empty());
+        File::options()
+            .write(true)
+            .open(prefix.join("system.reg"))
+            .unwrap()
+            .set_len(MAX_MACHINE_REGISTRY_BYTES + 1)
+            .unwrap();
+        let library = discover(&prefix).unwrap();
+        assert!(library.truncated && library.games.is_empty());
+        let records: String = (1..=MAX_SCAN_ENTRIES + 1).map(|id| format!("[Software\\\\Ubisoft\\\\Launcher\\\\Installs\\\\{id}]\n\"InstallDir\"=\"C:/Games/Real\"\n")).collect();
+        ubisoft_registry(&prefix, &records);
+        let library = discover(&prefix).unwrap();
+        assert!(library.truncated);
+        assert_eq!(library.games.len(), MAX_GAMES);
         fs::remove_dir_all(prefix).unwrap();
     }
 

@@ -1,14 +1,17 @@
 # Optional DXMT in the development app
 
-_8 October 2026 integration snapshot. Later game results are recorded in [launcher validation](LAUNCHER_VALIDATION.md)._
+_The package section retains the 8 October 2026 snapshot. Current automatic selection is described below; later game results are recorded in [launcher validation](LAUNCHER_VALIDATION.md)._
 
 ## Behavior
 
-Home's bottle inspector → Display & Graphics offers **Automatic (WineD3D)**,
-**WineD3D**, and **DXMT · Experimental**. Automatic conservatively uses WineD3D;
-there is no tested per-game automatic profile database yet. Ordinary Discover
-installation still chooses the included engine without a Wine picker. High
-Resolution remains a separate optional setting, off by default.
+Collection’s bottle inspector → Display & Graphics offers **Automatic**,
+**WineD3D**, and **DXMT · Experimental**. Automatic now uses bounded static
+Direct3D 10/11 evidence to select the verified DXMT view at an idle launch;
+mixed, unsupported or incomplete evidence keeps WineD3D. See
+[automatic graphics and stores](AUTOMATIC_GRAPHICS_AND_STORES.md) for the
+selection rules and limits. Ordinary Discover installation still chooses the
+included engine without a Wine picker. High Resolution remains separate,
+optional and off by default.
 
 DXMT is selectable only with the exact reviewed package. A saved DXMT preference
 on an unavailable engine blocks launch with a clear error rather than silently

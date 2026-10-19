@@ -1,3 +1,8 @@
+//! EA/Ubisoft adaptation: MacadeKit LauncherStore.swift, revision
+//! 37bb046423dbb85c5cb98fee742868dccb96002d, Copyright 2026 Steale LLC,
+//! Apache-2.0. Modified for Caskrun: bounded no-follow reads, strict metadata,
+//! same-bottle identity and cancellation. See third-party/mapc-engine/.
+//!
 //! Independent, experimental Windows installer recipes for EA app and Ubisoft Connect.
 //! Only setup and launcher registration are automated. Account sign-in, updates,
 //! game downloads, and gameplay have not been validated in this Wine build.
@@ -8,6 +13,17 @@ use super::steam_install::{
 };
 use super::*;
 use sha2::{Digest, Sha256};
+
+// EA version-folder lookup and Chromium client switches are adapted from
+// MacadeKit LauncherStore.swift (MaPC), Apache-2.0, commit
+// 37bb046423dbb85c5cb98fee742868dccb96002d. See THIRD_PARTY_NOTICES.md.
+// Caskrun adds bounded numeric selection, checked PE files and no-follow opens.
+const MAX_EA_VERSION_ENTRIES: usize = 256;
+const EA_ROOTS: &[&str] = &[
+    "Program Files/Electronic Arts/EA Desktop",
+    "Program Files (x86)/Electronic Arts/EA Desktop",
+];
+const EA_CLIENT_SWITCHES: &[&str] = &["--disable-gpu", "--disable-gpu-compositing"];
 
 pub(super) const EA_ID: &str = "ea-app";
 pub(super) const UBISOFT_ID: &str = "ubisoft-connect";
@@ -274,40 +290,278 @@ fn pe_machine(file: &mut File, length: u64) -> Result<u16, String> {
     Ok(machine)
 }
 
-fn launcher_in_prefix(prefix: &Path, profile: Profile) -> Option<PathBuf> {
+/// Locate only a real, checked publisher client inside this bottle. EA's
+/// installer may leave its current-version junction absent under Wine; search
+/// its numeric version directories instead of treating setup as failed.
+pub(super) fn installed_launcher(prefix: &Path, catalog_id: &str) -> Option<PathBuf> {
+    launcher_in_prefix(prefix, profile(catalog_id).ok()?)
+}
+
+/// Recover only a missing, previously reviewed EA client pathname after an EA
+/// self-update removed its version directory. Existing files, invalid clients,
+/// symlinks and paths belonging to another bottle are never redirected.
+/// The caller must retain the bottle lock and compare the saved record again
+/// before publishing the returned path; this function changes no files.
+pub(super) fn resolve_saved_ea_client(prefix: &Path, saved_path: &Path) -> Option<PathBuf> {
+    let (_prefix_guard, prefix_snapshot) = open_stable_directory(prefix).ok()?;
     let real_prefix = prefix.canonicalize().ok()?;
-    profile.launcher_candidates.iter().find_map(|candidate| {
-        let path = prefix.join("drive_c").join(candidate);
-        let before = fs::symlink_metadata(&path).ok()?;
-        if !before.file_type().is_file() {
+    if !saved_path.is_absolute() {
+        return None;
+    }
+    let relative = reviewed_client_relative(&real_prefix, saved_path, EA)?;
+    if !relative
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    if !reviewed_path_is_missing(&real_prefix, &relative) {
+        return None;
+    }
+    let recovered = installed_launcher(&real_prefix, EA_ID)?;
+    if !is_reviewed_client(&real_prefix, &recovered, EA_ID)
+        || !reviewed_path_is_missing(&real_prefix, &relative)
+        || !fs::symlink_metadata(prefix)
+            .is_ok_and(|current| same_identity(&prefix_snapshot, &current))
+    {
+        return None;
+    }
+    let (current_guard, current_snapshot) = open_stable_directory(prefix).ok()?;
+    if !same_identity(&prefix_snapshot, &current_snapshot) {
+        return None;
+    }
+    // Retain both anchored handles through the final validation.
+    drop(current_guard);
+    Some(recovered)
+}
+
+fn reviewed_path_is_missing(prefix: &Path, relative: &Path) -> bool {
+    let mut current = prefix.join("drive_c");
+    let Ok((drive_guard, drive_snapshot)) = open_stable_directory(&current) else {
+        return false;
+    };
+    let mut guards = vec![(current.clone(), drive_guard, drive_snapshot)];
+    let mut missing = false;
+    let components: Vec<_> = relative.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing = true;
+                break;
+            }
+            Err(_) => return false,
+            Ok(metadata) => {
+                // A final path of any existing kind must be preserved. Every
+                // existing ancestor must be a real directory, never a link.
+                if index + 1 == components.len() || !metadata.file_type().is_dir() {
+                    return false;
+                }
+                let Ok((guard, snapshot)) = open_stable_directory(&current) else {
+                    return false;
+                };
+                if !same_identity(&metadata, &snapshot) {
+                    return false;
+                }
+                guards.push((current.clone(), guard, snapshot));
+            }
+        }
+    }
+    missing
+        && guards.iter().all(|(path, guard, snapshot)| {
+            guard
+                .metadata()
+                .is_ok_and(|current| same_identity(snapshot, &current))
+                && OpenOptions::new()
+                    .read(true)
+                    .custom_flags(O_NOFOLLOW_ANY | O_DIRECTORY)
+                    .open(path)
+                    .and_then(|file| file.metadata())
+                    .is_ok_and(|current| same_identity(snapshot, &current))
+        })
+}
+
+/// Shared by regular app launches and store URI routing. A copied executable
+/// merely named EADesktop.exe or UbisoftConnect.exe is not a publisher client.
+pub(super) fn is_reviewed_client(prefix: &Path, program: &Path, catalog_id: &str) -> bool {
+    let Ok(real_prefix) = prefix.canonicalize() else {
+        return false;
+    };
+    let Ok(program_guard) = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW_ANY | libc::O_NONBLOCK)
+        .open(program)
+    else {
+        return false;
+    };
+    let Ok(program_snapshot) = program_guard.metadata() else {
+        return false;
+    };
+    if !program_snapshot.is_file() {
+        return false;
+    }
+    let Ok(real_program) = program.canonicalize() else {
+        return false;
+    };
+    let Ok(profile) = profile(catalog_id) else {
+        return false;
+    };
+    let Some(relative) = reviewed_client_relative(&real_prefix, &real_program, profile) else {
+        return false;
+    };
+    checked_launcher(prefix, &relative).is_some_and(|checked| checked == real_program)
+        && program_guard
+            .metadata()
+            .is_ok_and(|current| same_snapshot(&program_snapshot, &current))
+        && fs::symlink_metadata(program)
+            .is_ok_and(|current| same_snapshot(&program_snapshot, &current))
+}
+
+/// These switches affect the EA launcher's embedded CEF only; they are never
+/// added to installers, game executables, Steam, or generic Chromium programs.
+/// The translator selected for games in the bottle is left unchanged.
+pub(super) fn launcher_arguments(prefix: &Path, program: &Path) -> Vec<String> {
+    if is_reviewed_client(prefix, program, EA_ID) {
+        EA_CLIENT_SWITCHES
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn reviewed_client_relative(prefix: &Path, program: &Path, profile: Profile) -> Option<PathBuf> {
+    let drive = prefix.join("drive_c");
+    let relative = program.strip_prefix(&drive).ok()?;
+    if profile
+        .launcher_candidates
+        .iter()
+        .any(|candidate| relative == Path::new(candidate))
+    {
+        return Some(relative.to_owned());
+    }
+    if profile.id == EA_ID {
+        for root in EA_ROOTS {
+            let Ok(tail) = relative.strip_prefix(root) else {
+                continue;
+            };
+            let parts: Vec<_> = tail.components().collect();
+            if parts.len() == 3
+                && parts[0]
+                    .as_os_str()
+                    .to_str()
+                    .and_then(numeric_ea_version)
+                    .is_some()
+                && parts[1].as_os_str() == "EA Desktop"
+                && parts[2].as_os_str() == "EADesktop.exe"
+            {
+                return Some(relative.to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn numeric_ea_version(value: &str) -> Option<Vec<u32>> {
+    if value.len() > 64 {
+        return None;
+    }
+    let mut numbers = Vec::new();
+    for part in value.split('.') {
+        if numbers.len() == 6 || part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(O_NOFOLLOW_ANY)
-            .open(&path)
-            .ok()?;
-        if !same_snapshot(&before, &file.metadata().ok()?) {
-            return None;
+        numbers.push(part.parse::<u32>().ok()?);
+    }
+    (numbers.len() >= 2).then_some(numbers)
+}
+
+fn newest_ea_launcher(prefix: &Path, root: &str) -> Option<PathBuf> {
+    let path = prefix.join("drive_c").join(root);
+    let (_guard, snapshot) = open_stable_directory(&path).ok()?;
+    let entries = fs::read_dir(&path).ok()?;
+    let mut candidates = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_EA_VERSION_ENTRIES || cancellation::is_requested() {
+            return None; // A partial scan cannot prove which version is newest.
         }
-        let real = path.canonicalize().ok()?;
-        if !real.starts_with(&real_prefix) || pe_machine(&mut file, before.len()).is_err() {
-            return None;
-        }
-        if !same_snapshot(&before, &file.metadata().ok()?)
-            || !same_snapshot(&before, &fs::symlink_metadata(&path).ok()?)
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(version) = numeric_ea_version(name) else {
+            continue;
+        };
+        if !fs::symlink_metadata(entry.path())
+            .ok()?
+            .file_type()
+            .is_dir()
         {
-            return None;
+            continue;
         }
-        Some(real)
-    })
+        let relative = Path::new(root).join(name).join("EA Desktop/EADesktop.exe");
+        if let Some(client) = checked_launcher(prefix, &relative) {
+            candidates.push((version, name.to_owned(), client));
+        }
+    }
+    if !fs::symlink_metadata(&path).is_ok_and(|current| same_snapshot(&snapshot, &current)) {
+        return None;
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    candidates.pop().map(|(_, _, client)| client)
+}
+
+fn launcher_in_prefix(prefix: &Path, profile: Profile) -> Option<PathBuf> {
+    if profile.id == EA_ID {
+        for root in EA_ROOTS {
+            if let Some(client) = newest_ea_launcher(prefix, root) {
+                return Some(client);
+            }
+        }
+    }
+    profile
+        .launcher_candidates
+        .iter()
+        .find_map(|candidate| checked_launcher(prefix, Path::new(candidate)))
+}
+
+fn checked_launcher(prefix: &Path, candidate: &Path) -> Option<PathBuf> {
+    let real_prefix = prefix.canonicalize().ok()?;
+    let path = prefix.join("drive_c").join(candidate);
+    let before = fs::symlink_metadata(&path).ok()?;
+    if !before.file_type().is_file() {
+        return None;
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW_ANY | libc::O_NONBLOCK)
+        .open(&path)
+        .ok()?;
+    if !same_snapshot(&before, &file.metadata().ok()?) {
+        return None;
+    }
+    let real = path.canonicalize().ok()?;
+    if !real.starts_with(&real_prefix) || pe_machine(&mut file, before.len()).is_err() {
+        return None;
+    }
+    if !same_snapshot(&before, &file.metadata().ok()?)
+        || !same_snapshot(&before, &fs::symlink_metadata(&path).ok()?)
+    {
+        return None;
+    }
+    Some(real)
 }
 
 fn wait_for_launcher(prefix: &Path, profile: Profile) -> Result<Option<PathBuf>, String> {
     let deadline = Instant::now() + LAUNCHER_APPEAR_TIMEOUT;
     loop {
         cancellation::check()?;
-        if let Some(path) = launcher_in_prefix(prefix, profile) {
+        if let Some(path) = installed_launcher(prefix, profile.id) {
             return Ok(Some(path));
         }
         if Instant::now() >= deadline {
@@ -640,6 +894,215 @@ esac
         fs::remove_file(&path).unwrap();
         symlink(home.join("outside.exe"), &path).unwrap();
         assert!(launcher_in_prefix(&prefix, EA).is_none());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn ea_versioned_client_lookup_is_numeric_and_preserves_real_latest_fallback() {
+        let home = test_home();
+        let prefix = home.join("prefix");
+        let ea_root = prefix.join("drive_c").join(EA_ROOTS[0]);
+        fs::create_dir_all(&ea_root).unwrap();
+        for version in ["13.9.0.1", "13.1000.0.1", "13.99.0.1"] {
+            fake_pe(&ea_root.join(version).join("EA Desktop/EADesktop.exe"), EA);
+        }
+        // A populated direct directory may be an old install rather than the
+        // missing latest junction; use the checked newest numeric version.
+        let direct = prefix.join("drive_c").join(EA_CANDIDATES[0]);
+        fake_pe(&direct, EA);
+        assert!(
+            installed_launcher(&prefix, EA_ID)
+                .unwrap()
+                .ends_with("13.1000.0.1/EA Desktop/EADesktop.exe")
+        );
+        fs::remove_dir_all(ea_root.join("13.1000.0.1")).unwrap();
+        assert!(
+            installed_launcher(&prefix, EA_ID)
+                .unwrap()
+                .ends_with("13.99.0.1/EA Desktop/EADesktop.exe")
+        );
+        for version in ["13.9.0.1", "13.99.0.1"] {
+            fs::remove_dir_all(ea_root.join(version)).unwrap();
+        }
+        assert_eq!(
+            installed_launcher(&prefix, EA_ID),
+            Some(direct.canonicalize().unwrap())
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn ea_version_lookup_refuses_aliases_bad_versions_and_non_pe_files() {
+        let home = test_home();
+        let prefix = home.join("prefix");
+        let root = prefix.join("drive_c").join(EA_ROOTS[0]);
+        fs::create_dir_all(&root).unwrap();
+        let outside = home.join("outside/EA Desktop/EADesktop.exe");
+        fake_pe(&outside, EA);
+        symlink(home.join("outside"), root.join("99.0.0.0")).unwrap();
+        for version in [
+            "latest",
+            "13..4",
+            "13.4-beta",
+            "13.4294967296",
+            "13",
+            "13.1.2.3.4.5.6",
+        ] {
+            fake_pe(&root.join(version).join("EA Desktop/EADesktop.exe"), EA);
+        }
+        let corrupt = root.join("99.99/EA Desktop/EADesktop.exe");
+        fs::create_dir_all(corrupt.parent().unwrap()).unwrap();
+        fs::write(corrupt, b"MZ fake").unwrap();
+        assert!(installed_launcher(&prefix, EA_ID).is_none());
+        assert!(!is_reviewed_client(&prefix, &outside, EA_ID));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn ea_version_lookup_refuses_a_partial_scan_and_symlinked_parent() {
+        let home = test_home();
+        let prefix = home.join("prefix");
+        let root = prefix.join("drive_c").join(EA_ROOTS[0]);
+        fake_pe(&root.join("13.1/EA Desktop/EADesktop.exe"), EA);
+        for index in 0..MAX_EA_VERSION_ENTRIES {
+            fs::create_dir(root.join(format!("ignored-{index}"))).unwrap();
+        }
+        assert!(installed_launcher(&prefix, EA_ID).is_none());
+        fs::remove_dir_all(&root).unwrap();
+        let outside = home.join("outside");
+        fake_pe(&outside.join("13.2/EA Desktop/EADesktop.exe"), EA);
+        symlink(&outside, &root).unwrap();
+        assert!(installed_launcher(&prefix, EA_ID).is_none());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn saved_ea_version_recovers_only_after_its_original_path_disappears() {
+        let home = test_home();
+        let prefix = home.join("prefix");
+        fs::create_dir_all(prefix.join("drive_c")).unwrap();
+        let prefix = prefix.canonicalize().unwrap();
+        let old = prefix
+            .join("drive_c")
+            .join(EA_ROOTS[0])
+            .join("13.9.0.1/EA Desktop/EADesktop.exe");
+        let current = prefix
+            .join("drive_c")
+            .join(EA_ROOTS[0])
+            .join("13.1000.0.1/EA Desktop/EADesktop.exe");
+        fake_pe(&old, EA);
+        fake_pe(&current, EA);
+        assert!(resolve_saved_ea_client(&prefix, &old).is_none());
+        fs::remove_dir_all(old.parent().unwrap().parent().unwrap()).unwrap();
+        assert_eq!(
+            resolve_saved_ea_client(&prefix, &old),
+            Some(current.clone())
+        );
+        let missing_fixed = prefix.join("drive_c").join(EA_CANDIDATES[0]);
+        assert_eq!(
+            resolve_saved_ea_client(&prefix, &missing_fixed),
+            Some(current)
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn saved_ea_recovery_preserves_existing_bad_files_and_symlinks() {
+        let home = test_home();
+        let prefix = home.join("prefix");
+        fs::create_dir_all(prefix.join("drive_c")).unwrap();
+        let prefix = prefix.canonicalize().unwrap();
+        let old = prefix.join("drive_c").join(EA_CANDIDATES[0]);
+        let current = prefix
+            .join("drive_c")
+            .join(EA_ROOTS[0])
+            .join("13.1000.0.1/EA Desktop/EADesktop.exe");
+        fake_pe(&current, EA);
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        fs::write(&old, b"corrupt client must be preserved").unwrap();
+        assert!(resolve_saved_ea_client(&prefix, &old).is_none());
+        fs::remove_file(&old).unwrap();
+        symlink(&current, &old).unwrap();
+        assert!(resolve_saved_ea_client(&prefix, &old).is_none());
+        fs::remove_file(&old).unwrap();
+        symlink(home.join("missing-target"), &old).unwrap();
+        assert!(resolve_saved_ea_client(&prefix, &old).is_none());
+        fs::remove_file(&old).unwrap();
+        fs::remove_dir(old.parent().unwrap()).unwrap();
+        symlink(home.join("missing-parent-target"), old.parent().unwrap()).unwrap();
+        assert!(resolve_saved_ea_client(&prefix, &old).is_none());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn saved_ea_recovery_refuses_other_bottles_generic_names_and_linked_prefixes() {
+        let home = test_home();
+        let prefix = home.join("prefix");
+        fs::create_dir_all(prefix.join("drive_c")).unwrap();
+        let prefix = prefix.canonicalize().unwrap();
+        let current = prefix
+            .join("drive_c")
+            .join(EA_ROOTS[0])
+            .join("13.1000.0.1/EA Desktop/EADesktop.exe");
+        fake_pe(&current, EA);
+        for path in [
+            home.join("another-prefix/drive_c").join(EA_CANDIDATES[0]),
+            prefix.join("drive_c/Games/EADesktop.exe"),
+            prefix
+                .join("drive_c")
+                .join(EA_ROOTS[0])
+                .join("latest/EA Desktop/EADesktop.exe"),
+            prefix
+                .join("drive_c")
+                .join(EA_ROOTS[0])
+                .join("13.bad/EA Desktop/EADesktop.exe"),
+            PathBuf::from(EA_CANDIDATES[0]),
+        ] {
+            assert!(
+                resolve_saved_ea_client(&prefix, &path).is_none(),
+                "accepted an unreviewed saved path"
+            );
+        }
+        let alias = home.join("linked-prefix");
+        symlink(&prefix, &alias).unwrap();
+        assert!(
+            resolve_saved_ea_client(&alias, &prefix.join("drive_c").join(EA_CANDIDATES[0]))
+                .is_none()
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn ea_cef_switches_are_restricted_to_checked_store_client_layouts() {
+        let home = test_home();
+        let prefix = home.join("prefix");
+        for relative in [
+            EA_CANDIDATES[0],
+            EA_CANDIDATES[1],
+            "Program Files/Electronic Arts/EA Desktop/13.1000.0.1/EA Desktop/EADesktop.exe",
+        ] {
+            let path = prefix.join("drive_c").join(relative);
+            fake_pe(&path, EA);
+            assert!(is_reviewed_client(&prefix, &path, EA_ID));
+            assert_eq!(launcher_arguments(&prefix, &path), EA_CLIENT_SWITCHES);
+        }
+        for relative in [
+            "Games/Example/EADesktop.exe",
+            "Games/Example/Game.exe",
+            "Program Files/Electronic Arts/EA Desktop/EA Desktop/EAappInstaller.exe",
+            UBISOFT_CANDIDATES[0],
+        ] {
+            let path = prefix.join("drive_c").join(relative);
+            fake_pe(&path, EA);
+            assert!(launcher_arguments(&prefix, &path).is_empty());
+        }
+        let alias = home.join("linked-EADesktop.exe");
+        symlink(prefix.join("drive_c").join(EA_CANDIDATES[0]), &alias).unwrap();
+        assert!(launcher_arguments(&prefix, &alias).is_empty());
+        let ubisoft = prefix.join("drive_c").join(UBISOFT_CANDIDATES[0]);
+        assert!(is_reviewed_client(&prefix, &ubisoft, UBISOFT_ID));
+        assert!(!is_reviewed_client(&prefix, &ubisoft, EA_ID));
+        assert!(!is_reviewed_client(&prefix, &ubisoft, "unknown"));
         fs::remove_dir_all(home).unwrap();
     }
 
