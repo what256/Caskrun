@@ -11,18 +11,29 @@ hardwired to WineD3D. Its frame pacing and spatial controls now remain available
 when Automatic selects DXMT, and save/reset preserves the automatic decision.
 EA startup feedback recognizes bounded numeric client-update folders. Local
 packaging checks the app, Core, icon helper and runtime before replacement.
-This pass uses source and isolated fixture checks; publisher apps and games are
-left to the user's [final manual checks](NEXT_MANUAL_TESTS.md).
+The engine pass also uses original Windows GPU and synchronization probes in
+isolated disposable prefixes; publisher apps and games are left to the user's
+[final manual checks](NEXT_MANUAL_TESTS.md).
 
 The separately licensed MaPC core informed the 19 October graphics/store
 adaptation; its Apache notices remain in source and packages. See
 [automatic graphics and stores](AUTOMATIC_GRAPHICS_AND_STORES.md). That work did
 not import the proprietary CrossOver application or engine.
 
-The [backend status](GRAPHICS_BACKEND_STATUS.md) distinguishes implemented
-controls from missing engine work, including the newly documented Vulkan 1.4
-route. DXVK, D3DMetal and MSync are still unavailable in the current runtime;
-this pass does not turn an environment variable into engine support.
+The coordinated candidate adds the separately pinned hybrid DXVK view and an
+original Wine 11 MSync port. All four x86/x64 D3D9/D3D11 cells passed through
+the actual optimized Core, its saved DXVK selection and packaged dispatcher;
+mapped images and all prefix graphics DLLs remained unchanged, and a busy
+renderer change was refused without replacing preferences or the runtime pin.
+The MSync off/on WineD3D/DXMT matrix passed 296 checks; it remains opt-in and
+off by default. The full Rust run passed 659 unit and 7 integration tests, with
+3 existing unit tests ignored. These are candidate/source gates, not a new
+installed artifact or game acceptance claim.
+
+[Backend status](GRAPHICS_BACKEND_STATUS.md) records exact evidence and limits.
+D3DMetal's official input was privately staged after its actual license was
+accepted, but its factory probe failed before device creation; it remains
+unavailable. Whether the independent Wine host ABI can satisfy it is unresolved.
 
 ## Keep the ordinary flow simple
 
@@ -58,16 +69,21 @@ Do not combine historical profile variants, install arbitrary redistributables f
 
 ## Graphics and synchronization
 
-An explicit backend choice should be one mutually exclusive bottle setting. Automatic selection needs original, tested per-app/game profiles with a supported fallback. CrossOver documents a per-game database for Auto, while explicit DXMT, D3DMetal, DXVK or WineD3D choices apply bottle-wide. Its database is not Caskrun's data. ([Advanced settings](https://support.codeweavers.com/en_US/advanced-settings-in-crossover-mac-26))
+An explicit backend choice is one mutually exclusive bottle setting. Current
+Automatic uses conservative static import evidence with verified capability
+gates and a WineD3D fallback; tested per-game profiles remain future work.
+CrossOver documents a per-game database for Auto, while explicit DXMT,
+D3DMetal, DXVK or WineD3D choices apply bottle-wide. Its database is not
+Caskrun's data. ([Advanced settings](https://support.codeweavers.com/en_US/advanced-settings-in-crossover-mac-26))
 
 | Capability | Current Caskrun state | Implementation gate |
 | --- | --- | --- |
 | WineD3D | Current included path; limited Direct3D probe success, no game validation. | Keep exact tested limitations visible in compatibility results. |
 | High resolution | Real 96/192 DPI and Retina controls, idle checks, verification and rollback. **Validated on Steam:** with the control off its client is drawn at 1x and upscaled; with it on the same window is genuinely drawn at 2x. | Also measured on the engine's own builtin window, which is upscaled by default and matches native Retina applications with the control on. A DPI-unaware client such as the itch.io installer stays at 1x even with the control on, so it sharpens DPI-aware clients only. High Resolution stays optional and off by default; the user will test games later. |
 | DXMT | Independently built, integrated experimental bottle control with exact package capabilities, preserved WineD3D default, idle changes and reviewed native-v2 migration/record rollback. The separate rendering experiment passes x64/x86 hardware feature levels 10_0/11_0, shaders/readback, HWND Present and resize/recreate/destruction checks. A user confirmed R.E.P.O. launched and worked with DXMT on 16 October after WineD3D device creation failed. | Test sustained play, visible output quality, performance, controllers and other titles/devices. See [current game results](LAUNCHER_VALIDATION.md), [app integration](DXMT_APP_INTEGRATION.md) and [DXMT smoke](DXMT_SMOKE.md). |
-| DXVK / Vulkan | Older MoltenVK enumeration experiment; no successful Direct3D gate. The newer KosmicKrisp route has source-level Rosetta evidence, but its actual driver and Wine integration are not validated. | Independently package the driver/loader and matching Wine modules; prove x86/x64 device, draw, readback and window lifecycle before exposing a choice. See [backend status](GRAPHICS_BACKEND_STATUS.md). |
-| D3DMetal | No integrated backend. | Separate component terms/source/distribution review and runtime validation. Never extract it from another app bundle. |
-| MSync | Not implemented in current Wine 11. | Coordinated client/server implementation and synchronization correctness/performance tests; an environment toggle alone adds no support. |
+| DXVK / Vulkan | Candidate hybrid uses source-built legacy D3D9, modern DX10/11 and official MoltenVK. Actual Core/dispatcher tests passed both architectures: per architecture, D3D11 had 242 checks, 56 readback pixels and 14 Present calls; D3D9 had 154 checks, 24 readback pixels and 6 Present calls. | Test games, visible output and performance; Vulkan feature limits remain title-dependent. D3D8 stays on Wine and D3D12 is unsupported by this hybrid. Exact pins, mapped-module proof and the historical failed routes are in [backend status](GRAPHICS_BACKEND_STATUS.md). |
+| D3DMetal | Official private input/license reviewed and accepted for local evaluation; CreateDXGIFactory1 failed before device creation. No selectable backend. | Resolve independent host-interface compatibility, then pass actual device/render/lifecycle gates. Local acceptance is not distribution approval; never extract it from another app bundle. |
+| MSync | Original coordinated Wine 11 port, protocol 932 and one canonical server; 296 checks passed across x86/x64, off/on and WineD3D/DXMT views. Bottle-scoped toggle is off by default and requires idle checks. | Real-game behavior/performance and unsupported mixed wait objects remain acceptance limits. An unavailable saved enabled choice fails clearly. See [MSync implementation](MSYNC_FEASIBILITY.md). |
 | DXMT frame target | Optional bounded presentation-pacing control; original x64/x86 API matrix passed. | Measure displayed FPS, fullscreen behavior and real games; API-submission timing is not a performance benchmark. See [DXMT options](DXMT_OPTIONS.md). |
 | MetalFX spatial scaling | Optional DXMT output scales with device capability checks; original x64/x86 matrix passed. Off by default. | Verify visible output, image quality and real-game performance. It does not change internal game resolution or provide temporal reconstruction. See [DXMT options](DXMT_OPTIONS.md). |
 | DLSS / temporal scaling / frame generation | Not implemented. | Separate supported backend/vendor-extension integration and per-game tests; spatial scaling and frame targets do not supply these features. |
@@ -75,7 +91,16 @@ An explicit backend choice should be one mutually exclusive bottle setting. Auto
 
 DXMT's upstream runtime requirements include exported Wine `winemac` APIs; copying translator DLLs is insufficient. Its upstream repository publishes LGPL-2.1-or-later source and build instructions. Use pinned upstream source with notices and corresponding-source records, separately from the proprietary reference bundle. ([Runtime requirements](https://github.com/3Shain/dxmt/wiki/Device-System-Runtime-Specifications), [build guide](https://github.com/3Shain/dxmt/blob/main/docs/DEVELOPMENT.md), [license](https://github.com/3Shain/dxmt/blob/main/LICENSE))
 
-The switchable DXMT development package carries a hashed component receipt with pinned source and patch records, both runtime views and an exact approved package identity. The core applies the bottle selection to setup, apps, children, tools and reboot; native identities and shutdown proofs follow the saved view. Selection preserves user DLLs and registry overrides, requires idleness and verifies its preference write. Runtime rollback restores the record before Wine starts; it does not roll back application data after Wine runs. Unavailable controls stay informational. See [app integration](DXMT_APP_INTEGRATION.md).
+The coordinated candidate carries hashed component receipts, pinned source and
+patch records, fixed renderer views and an exact approved package identity.
+All views route to one canonical server. The core applies saved renderer and
+MSync choices to setup, apps, children and controls; DXMT reopen/Quit requests
+also retain typed tuning without repairing prefixes or creating caches.
+Version-3 preferences preserve renderer/tuning/MSync together on save and
+duplicate/backup. Native identities and shutdown proofs follow the saved view.
+Selection preserves user DLLs and registry overrides, requires idleness and
+verifies its write. Runtime rollback restores the record before Wine starts;
+it does not roll back app data after Wine runs. See [app integration](DXMT_APP_INTEGRATION.md).
 
 CodeWeavers' source page offers its FOSS components and recommends using component upstreams. It is not the full proprietary application or compatibility database. ([Official source page](https://www.codeweavers.com/crossover/source))
 

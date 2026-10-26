@@ -12,7 +12,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 // Exact reviewed predecessor identities also used by runtime_migration.rs.
 // This shutdown-only fallback does not adopt or migrate any runtime record.
 #[cfg(test)]
-const SHUTDOWN_PREDECESSORS: [&str; 14] = runtime_migration::REVIEWED_RUNTIME_IDENTITIES;
+const SHUTDOWN_PREDECESSORS: &[&str] = &runtime_migration::REVIEWED_RUNTIME_IDENTITIES;
 const RECORDED_PREDECESSOR_DISPATCH: &str =
     "Caskrun.app/Contents/Resources/wine-runtime/bin/_dispatch";
 const SELECTED_REPLACEMENT_WINE: &str = "Caskrun.app/Contents/Resources/wine-runtime/bin/wine";

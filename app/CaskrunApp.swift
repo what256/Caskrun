@@ -251,11 +251,15 @@ struct BottleGraphicsStatus: Decodable, Sendable {
     let selected_backend: String
     let effective_backend: String
     let dxmt_available: Bool
+    let dxvk_available: Bool
+    let dxvk_unavailable_reason: String?
     let unavailable_reason: String?
     let warning: String?
     let dxmt_frame_rate: UInt16
     let dxmt_spatial_scale: UInt16
     let dxmt_spatial_available: Bool
+    let msync_enabled: Bool
+    let msync_available: Bool
     let automatic_reason: String?
 }
 
@@ -2066,9 +2070,10 @@ final class CaskrunModel: ObservableObject {
     func setBottleGraphics(in bottle: Bottle, backend: String) {
         guard !isQuitting && !isManagingBottle && !isLaunching &&
                 !loadingBottleGraphics.contains(bottle.id) else { return }
-        guard ["auto", "wined3d", "dxmt"].contains(backend),
+        guard ["auto", "wined3d", "dxmt", "dxvk"].contains(backend),
               let current = bottleGraphics[bottle.id], current.selected_backend != backend,
-              backend != "dxmt" || current.dxmt_available else { return }
+              backend != "dxmt" || current.dxmt_available,
+              backend != "dxvk" || current.dxvk_available else { return }
         guard sessionState(for: bottle).activity != .running, !isStoppingBottle(bottle.id) else {
             message = "Quit this bottle’s apps before changing graphics. Closing their windows can leave them running."
             return
@@ -2112,10 +2117,57 @@ final class CaskrunModel: ObservableObject {
     private func validateGraphicsResult(_ result: BottleGraphicsStatus, for bottle: Bottle) throws {
         guard result.bottle_id == bottle.id,
               BottleGraphicsContract.accepts(selected: result.selected_backend,
-                  effective: result.effective_backend, dxmtAvailable: result.dxmt_available),
+                  effective: result.effective_backend, dxmtAvailable: result.dxmt_available,
+                  dxvkAvailable: result.dxvk_available),
               result.dxmt_frame_rate <= 240, [100, 125, 150, 200].contains(result.dxmt_spatial_scale) else {
             throw NSError(domain: "Caskrun", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Graphics status is unavailable for this bottle."])
+        }
+    }
+
+    func setMSync(in bottle: Bottle, enabled: Bool) {
+        guard !isQuitting, !isLaunching, !isManagingBottle,
+              !loadingBottleGraphics.contains(bottle.id),
+              let current = bottleGraphics[bottle.id], current.msync_enabled != enabled,
+              !enabled || current.msync_available else { return }
+        guard sessionState(for: bottle).activity != .running, !isStoppingBottle(bottle.id) else {
+            message = "Quit this bottle’s apps before changing MSync."
+            return
+        }
+        guard let token = graphicsRequests[bottle.id, default: BottlePreferenceRequests()].beginWrite() else { return }
+        let requestedWine = wineExecutable
+        isManagingBottle = true
+        bottleOperationLabel = "Updating MSync…"
+        bottleGraphicsErrors.removeValue(forKey: bottle.id)
+        Task {
+            defer {
+                graphicsRequests[bottle.id]?.finishWrite(token)
+                isManagingBottle = false
+                bottleOperationLabel = "Updating bottle…"
+            }
+            do {
+                let result = try await callAsync(["set-bottle-msync", bottle.id, enabled ? "on" : "off"], as: BottleGraphicsStatus.self)
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }),
+                      graphicsRequests[bottle.id]?.acceptsWrite(token) == true else { return }
+                try validateGraphicsResult(result, for: bottle)
+                guard result.msync_enabled == enabled else {
+                    throw NSError(domain: "Caskrun", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: "MSync’s saved value could not be confirmed."])
+                }
+                bottleGraphics[bottle.id] = result
+            } catch {
+                guard wineExecutable == requestedWine,
+                      graphicsRequests[bottle.id]?.acceptsWrite(token) == true else { return }
+                let detail = error.localizedDescription
+                let restored = try? await callAsync(["bottle-graphics", bottle.id], as: BottleGraphicsStatus.self)
+                guard wineExecutable == requestedWine, bottles.contains(where: { $0.id == bottle.id }),
+                      graphicsRequests[bottle.id]?.acceptsWrite(token) == true else { return }
+                if let restored, (try? validateGraphicsResult(restored, for: bottle)) != nil {
+                    bottleGraphics[bottle.id] = restored
+                }
+                bottleGraphicsErrors[bottle.id] = "The MSync change could not be confirmed. \(detail)"
+                message = detail
+            }
         }
     }
 
@@ -3943,8 +3995,10 @@ struct CaskrunApp: App {
                     compatibility: compatibility, icon: model.gameIcons["\(bottle.id):\(game.id)"],
                     artworkRevision: model.gameArtworkRevision(game, in: bottle),
                     canPlay: canLaunch && model.savedSteamClients.contains(where: { $0.bottle_id == bottle.id }), canManageBottle: true,
-                    availableRenderers: model.bottleGraphics[bottle.id].map { $0.dxmt_available ? Set(["wined3d", "dxmt"]) : Set(["wined3d"]) },
-                    graphicsDescription: model.bottleGraphics[bottle.id].map { "Bottle graphics: " + ($0.effective_backend == "dxmt" ? "DXMT" : "WineD3D") }))
+                    availableRenderers: model.bottleGraphics[bottle.id].map {
+                        Set(["wined3d"] + ($0.dxmt_available ? ["dxmt"] : []) + ($0.dxvk_available ? ["dxvk"] : []))
+                    },
+                    graphicsDescription: model.bottleGraphics[bottle.id].map { "Bottle graphics: " + BottleGraphicsContract.rendererName($0.effective_backend) }))
             }
             for game in model.publisherGames[bottle.id] ?? [] {
                 guard let scope = LibraryScope(rawValue: game.store), scope.isPublisher else { continue }
@@ -4657,6 +4711,7 @@ struct CaskrunApp: App {
                     Text("Automatic").tag("auto")
                     Text("WineD3D").tag("wined3d")
                     Text("DXMT · Experimental").tag("dxmt").disabled(!status.dxmt_available)
+                    Text("DXVK · Experimental").tag("dxvk").disabled(!status.dxvk_available)
                 }
                 .pickerStyle(.menu)
                 .font(.subheadline)
@@ -4665,6 +4720,8 @@ struct CaskrunApp: App {
                           model.sessionState(for: bottle).activity == .running || model.isStoppingBottle(bottle.id))
                 Text(status.effective_backend == "dxmt"
                      ? "DXMT translates DirectX 10/11 to Metal. Game compatibility still needs testing."
+                     : status.effective_backend == "dxvk"
+                     ? "DXVK translates DirectX 9–11 through Vulkan. Game compatibility still needs testing."
                      : "WineD3D is the default renderer.")
                     .font(.caption).foregroundStyle(.secondary)
                 if status.selected_backend == "auto" {
@@ -4683,7 +4740,22 @@ struct CaskrunApp: App {
                             model.setDXMTOptions(in: bottle, frameRate: rate, spatialScale: scale)
                         }
                 }
+                if status.msync_available || status.msync_enabled {
+                    Toggle("MSync", isOn: Binding(
+                        get: { model.bottleGraphics[bottle.id]?.msync_enabled ?? false },
+                        set: { model.setMSync(in: bottle, enabled: $0) }
+                    ))
+                    .toggleStyle(.switch).controlSize(.small)
+                    .disabled(model.isQuitting || model.isLaunching || model.isManagingBottle ||
+                              model.loadingBottleGraphics.contains(bottle.id) ||
+                              model.sessionState(for: bottle).activity == .running || model.isStoppingBottle(bottle.id))
+                    Text("Uses macOS synchronization for Windows apps. Off by default; game performance needs testing.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if !status.dxmt_available, let reason = status.unavailable_reason {
+                    Text(reason).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if status.selected_backend == "dxvk", !status.dxvk_available, let reason = status.dxvk_unavailable_reason {
                     Text(reason).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 if let warning = status.warning {
@@ -4710,7 +4782,8 @@ struct CaskrunApp: App {
                 }
             }
             DisclosureGroup("Other graphics & sync options") {
-                ForEach(["DXVK", "D3DMetal", "MSync"], id: \.self) { name in
+                ForEach(["D3DMetal"] + ((model.bottleGraphics[bottle.id]?.msync_available ?? false) ||
+                    (model.bottleGraphics[bottle.id]?.msync_enabled ?? false) ? [] : ["MSync"]), id: \.self) { name in
                     HStack {
                         Text(name)
                         Spacer()

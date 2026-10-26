@@ -4,8 +4,8 @@
 *.rs text eol=lf
 *.swift text eol=lf
 *.md text eol=lf
-# Unified diffs mark empty context lines with one space, including at EOF.
-*.patch whitespace=-blank-at-eol,-blank-at-eof
+# Unified diffs prefix context with one space, including Makefile tab indents.
+*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 *.png binary
 # Preserve the upstream license's original blank-line whitespace.
 runtime-patches/licenses/COPYING.LIB whitespace=-blank-at-eol

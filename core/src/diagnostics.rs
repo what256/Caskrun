@@ -16,12 +16,7 @@ const REPORT_ERROR: &str = "Choose an existing bottle with readable, regular Cas
 
 // Only hashes already published as reviewed Caskrun packages may leave the
 // device. A random digest in a writable record can itself carry user data.
-const REVIEWED_IDENTITIES: &[&str] = &[
-    "sha256:6df2a9f5dfaa119ba3d6c84214d79f885c70e887ef7f3bc9d2255aeb8b2f88e6",
-    "sha256:07c5721ad17efa9d4ea89ff61522133407756c4aea8a47866625dcf118e7347c",
-    "sha256:9dcab17f21490998ad03f6ee4f553da0992a1d9234dfe40efd82956b63fd47ce",
-    runtime_migration::SWITCHABLE_WINE_11_IDENTITY,
-];
+const REVIEWED_IDENTITIES: &[&str] = &runtime_migration::REVIEWED_RUNTIME_IDENTITIES;
 
 #[derive(Debug, Serialize)]
 pub(super) struct DiagnosticReport {
@@ -83,6 +78,7 @@ enum Renderer {
     Auto,
     Wined3d,
     Dxmt,
+    Dxvk,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +88,7 @@ struct GraphicsSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     effective_backend: Option<Renderer>,
     dxmt_available: bool,
+    dxvk_available: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -175,6 +172,7 @@ enum Issue {
     RuntimeRecordMismatch,
     GraphicsUnreadable,
     DxmtUnavailable,
+    DxvkUnavailable,
     ExperimentalGraphics,
     InstallerStateUnreadable,
     InstallerFailed,
@@ -464,7 +462,9 @@ fn runtime_summary_with_attestor(
 }
 
 fn dxmt_available(wine: Option<&Path>, runtime: &RuntimeSummary) -> bool {
-    if runtime.identity != Some(runtime_migration::SWITCHABLE_WINE_11_IDENTITY)
+    if !runtime
+        .identity
+        .is_some_and(runtime_migration::is_reviewed_switchable_runtime)
         || runtime.record_matches == Some(false)
     {
         return false;
@@ -516,6 +516,7 @@ fn graphics_summary(
             bottle_graphics::Backend::Auto => Renderer::Auto,
             bottle_graphics::Backend::Wined3d => Renderer::Wined3d,
             bottle_graphics::Backend::Dxmt => Renderer::Dxmt,
+            bottle_graphics::Backend::Dxvk => Renderer::Dxvk,
         });
     if selected.is_none() {
         issue(issues, Issue::GraphicsUnreadable);
@@ -526,6 +527,7 @@ fn graphics_summary(
             bottle_graphics::Backend::Auto => Renderer::Auto,
             bottle_graphics::Backend::Wined3d => Renderer::Wined3d,
             bottle_graphics::Backend::Dxmt => Renderer::Dxmt,
+            bottle_graphics::Backend::Dxvk => Renderer::Dxvk,
         });
     if effective.is_none() {
         issue(issues, Issue::GraphicsUnreadable);
@@ -541,10 +543,22 @@ fn graphics_summary(
             },
         );
     }
+    let dxvk_available = wine.is_some_and(|wine| bottle_graphics::dxvk_support(dir, wine).is_ok());
+    if matches!(effective, Some(Renderer::Dxvk)) {
+        issue(
+            issues,
+            if dxvk_available {
+                Issue::ExperimentalGraphics
+            } else {
+                Issue::DxvkUnavailable
+            },
+        );
+    }
     GraphicsSummary {
         selected_backend: selected,
         effective_backend: effective,
         dxmt_available: available,
+        dxvk_available,
     }
 }
 
@@ -754,6 +768,25 @@ mod tests {
 
     fn has_issue(report: &serde_json::Value, value: &str) -> bool {
         report["issues"].as_array().unwrap().contains(&value.into())
+    }
+
+    #[test]
+    fn dxvk_diagnostics_preserve_saved_selection_and_flag_unavailable_without_paths() {
+        let fixture = Fixture::new();
+        let settings = fixture.dir.join("graphics.json");
+        let original = br#"{"version":3,"backend":"dxvk","dxmt_frame_rate":0,"dxmt_spatial_scale":100,"msync":false}"#;
+        fs::write(&settings, original).unwrap();
+        let report = fixture.report();
+        assert_eq!(report["graphics"]["selected_backend"], "dxvk");
+        assert_eq!(report["graphics"]["effective_backend"], "dxvk");
+        assert_eq!(report["graphics"]["dxvk_available"], false);
+        assert!(has_issue(&report, "dxvk_unavailable"));
+        assert_eq!(fs::read(settings).unwrap(), original);
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains(fixture.home.to_str().unwrap())
+        );
     }
 
     #[test]
@@ -1216,16 +1249,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn path_only_pin_does_not_misclassify_a_verified_bundle_or_hide_dxmt() {
-        let fixture = Fixture::new();
-        let wine = selected_engine_fixture(&fixture);
-        let engine = wine.parent().unwrap().parent().unwrap();
-        fs::write(
-            fixture.dir.join("prefix-record.json"),
-            serde_json::to_vec(&serde_json::json!({"wine_path": wine})).unwrap(),
-        )
-        .unwrap();
+    fn install_dxmt_fixture(engine: &Path) {
         fs::write(
             engine.join("components.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -1246,6 +1270,57 @@ mod tests {
                 fs::write(dlls.join(dll), b"fixture").unwrap();
             }
         }
+    }
+
+    #[test]
+    fn every_reviewed_successor_keeps_its_diagnostic_identity_and_graphics_capability() {
+        let fixture = Fixture::new();
+        let wine = selected_engine_fixture(&fixture);
+        install_dxmt_fixture(wine.parent().unwrap().parent().unwrap());
+        for identity in runtime_migration::REVIEWED_RUNTIME_IDENTITIES {
+            fs::write(
+                fixture.dir.join("prefix-record.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "wine_path": wine, "runtime_identity": identity
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let mut issues = Vec::new();
+            let runtime =
+                runtime_summary_with_attestor(&fixture.dir, Some(&wine), &mut issues, |_| {
+                    Ok(Some(runtime_identity::BundleAttestation {
+                        identity: identity.to_owned(),
+                        metadata_fingerprint: "fixture-only".to_owned(),
+                    }))
+                });
+            assert_eq!(runtime.identity, Some(identity));
+            assert_eq!(runtime.record_matches, Some(true));
+            assert!(issues.is_empty(), "{identity}: {issues:?}");
+            assert_eq!(
+                dxmt_available(Some(&wine), &runtime),
+                runtime_migration::is_reviewed_switchable_runtime(identity),
+                "{identity}",
+            );
+            assert!(
+                !serde_json::to_string(&runtime)
+                    .unwrap()
+                    .contains(fixture.home.to_str().unwrap())
+            );
+        }
+        assert_eq!(known_identity(Some("private-unreviewed-digest")), None);
+    }
+
+    #[test]
+    fn path_only_pin_does_not_misclassify_a_verified_bundle_or_hide_dxmt() {
+        let fixture = Fixture::new();
+        let wine = selected_engine_fixture(&fixture);
+        install_dxmt_fixture(wine.parent().unwrap().parent().unwrap());
+        fs::write(
+            fixture.dir.join("prefix-record.json"),
+            serde_json::to_vec(&serde_json::json!({"wine_path": wine})).unwrap(),
+        )
+        .unwrap();
         let mut issues = Vec::new();
         let mut calls = 0;
         let runtime = runtime_summary_with_attestor(&fixture.dir, Some(&wine), &mut issues, |_| {

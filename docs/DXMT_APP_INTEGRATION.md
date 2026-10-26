@@ -1,17 +1,28 @@
 # Optional DXMT in the development app
 
-_The package section retains the 8 October 2026 snapshot. Current automatic selection is described below; later game results are recorded in [launcher validation](LAUNCHER_VALIDATION.md)._
+_Current source behavior updated 26 October 2026. The package and historical
+validation sections retain the 8 October snapshot. Later user game results are
+recorded in [launcher validation](LAUNCHER_VALIDATION.md)._
 
 ## Behavior
 
 Collection’s bottle inspector → Display & Graphics offers **Automatic**,
-**WineD3D**, and **DXMT · Experimental**. Automatic now uses bounded static
-Direct3D 10/11 evidence to select the verified DXMT view at an idle launch;
-mixed, unsupported or incomplete evidence keeps WineD3D. See
+**WineD3D**, **DXMT · Experimental**, and a package-gated **DXVK · Experimental**.
+Automatic uses bounded static Direct3D 10/11 evidence to select the verified
+DXMT view at an idle launch; complete unmixed x86/x64 Direct3D 9 evidence can
+select the verified hybrid DXVK view. Mixed, unsupported or incomplete evidence
+keeps WineD3D. The existing inspector layout is retained. See
 [automatic graphics and stores](AUTOMATIC_GRAPHICS_AND_STORES.md) for the
 selection rules and limits. Ordinary Discover installation still chooses the
 included engine without a Wine picker. High Resolution remains separate,
 optional and off by default.
+
+The new candidate also supplies opt-in MSync, off by default, after coordinated
+client/server API checks. Its version-3 graphics record preserves synchronization
+alongside renderer and tuning. This does not change High Resolution defaults or
+prove game performance. Current hybrid DXVK and MSync evidence, and the failed
+private D3DMetal factory gate, are recorded in
+[backend status](GRAPHICS_BACKEND_STATUS.md).
 
 DXMT is selectable only with the exact reviewed package. A saved DXMT preference
 on an unavailable engine blocks launch with a clear error rather than silently
@@ -24,7 +35,23 @@ Wine server and an independent open-file owner check. A refused switch preserves
 the previous preference and leaves running apps alone. Atomic writes are read
 back; a failed verification restores only Caskrun's own unchanged write.
 
-## Package and loader
+Normal DXMT launches and read-only Steam reopen/Quit requests share the same
+managed graphics-only DLL overrides and saved tuning. Control requests do not
+repair prefixes or create shader-cache/log folders. Unrelated overrides and
+the exact saved preference remain untouched. Diagnostics recognizes every
+reviewed switchable successor rather than only the original DXMT package.
+
+## Current candidate loader boundary
+
+The coordinated candidate adds the fixed `components/dxvk/runtime/` view. Its
+eight hybrid PE files are kept outside prefixes, and the dispatcher and direct
+native aliases use the same selected view and fixed ICD. Secondary views' server
+entries are relative links to the canonical common wineserver; an environment
+variable alone is insufficient because Wine checks its adjacent server first.
+Exact final package identity and app-build acceptance are separate from the
+source/API evidence in this document.
+
+## Historical package and loader — 8 October 2026
 
 Build with the pinned inputs described in [DXMT smoke](DXMT_SMOKE.md):
 
@@ -72,7 +99,7 @@ cache and diagnostics stay in the bottle. Old prefixes receive only missing
 replaced; unsafe paths are refused, and a partial placeholder-copy failure
 removes only the newly created files.
 
-## Existing bottles and rollback boundary
+## Historical migration evidence and rollback boundary
 
 Only the exact approved native-v2 package can advance to this exact successor,
 while idle. This general transition does not require a Steam recipe. Custom
@@ -87,7 +114,7 @@ an application's files after Wine has run. A successful upgrade changes no
 registry, profile, launcher, application DLL or user data. Imported prefixes
 without a record still initialize normally.
 
-## Evidence and remaining scope
+## Historical DXMT evidence and remaining scope
 
 The original [DXMT API/lifecycle experiment](DXMT_SMOKE.md) established hardware
 feature levels 10_0/11_0, shader readback, HWND presentation, resizing,
@@ -141,6 +168,8 @@ architectures. Both packaged test prefixes stopped, independent zero-owner
 checks passed and their disposable storage was removed.
 
 Game play, visible screen-pixel composition, game performance, authentication,
-other launchers, D3D12, NVAPI, DLSS, DXVK, D3DMetal and MSync remain outside this
-validation. Later user-led game checks are recorded in [launcher validation](LAUNCHER_VALIDATION.md).
+other launchers, D3D12, NVAPI, DLSS, DXVK, D3DMetal and MSync were outside that
+historical DXMT validation. The 26 October hybrid DXVK/MSync probes add only their
+explicit API scope; no new game was launched. Later user-led game checks are
+recorded in [launcher validation](LAUNCHER_VALIDATION.md).
 Source publication is authorized; binary distribution still requires its separate privacy and runtime-license review.

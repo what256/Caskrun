@@ -1,0 +1,20 @@
+{
+  "upstream": "https://github.com/marzent/wine-msync",
+  "revision": "be7f3e2ff40670018cd7aa9042bad487fa7a83ec",
+  "variant": "msync-devel.patch (generic upstream; no CX variants)",
+  "license": "LGPL-2.1-or-later",
+  "inputs": [
+    {
+      "name": "msync-devel.patch",
+      "url": "https://raw.githubusercontent.com/marzent/wine-msync/be7f3e2ff40670018cd7aa9042bad487fa7a83ec/msync-devel.patch",
+      "sha256": "ba20515c8c89b2035f887d2131b22f67222598ea2cd3ffa0219b31df4a67453b"
+    },
+    {
+      "name": "LICENSE",
+      "url": "https://raw.githubusercontent.com/marzent/wine-msync/be7f3e2ff40670018cd7aa9042bad487fa7a83ec/LICENSE",
+      "sha256": "20c17d8b8c48a600800dfd14f95d5cb9ff47066a9641ddeab48dc54aec96e331"
+    }
+  ],
+  "wine_version": "11.0",
+  "wine_source_sha512": "a2c3db14f8cf0d19927466805c8f17c68ee7e93d1196d1162dd2279af497c21ec611a63f7a9de59953bbdfdb44c87d7bf55373c6533224a5d54e434c29428d1b"
+}

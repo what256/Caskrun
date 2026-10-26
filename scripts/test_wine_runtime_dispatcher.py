@@ -22,7 +22,12 @@ class SwitchableDispatcher(unittest.TestCase):
         (self.package / "lib/libfreetype.6.dylib").touch()
         self.base = self.package / "runtime"
         self.dxmt = self.package / "components/dxmt/runtime"
-        for view, label in [(self.base, "base"), (self.dxmt, "dxmt")]:
+        self.dxvk = self.package / "components/dxvk/runtime"
+        self.icd = self.package / "components/dxvk/vulkan/icd.d/MoltenVK_icd.json"
+        self.icd.parent.mkdir(parents=True)
+        self.icd.write_text("{}\n")
+        (self.package / "dxvk-layout.txt").write_text("caskrun-dxvk-view-v1\n")
+        for view, label in [(self.base, "base"), (self.dxmt, "dxmt"), (self.dxvk, "dxvk")]:
             (view / "bin").mkdir(parents=True)
             (view / "lib/wine/x86_64-unix").mkdir(parents=True)
             (view / "lib/wine/x86_64-unix/ntdll.so").touch()
@@ -32,7 +37,8 @@ class SwitchableDispatcher(unittest.TestCase):
                                    "print(json.dumps({'view':" + repr(label) + ","
                                    "'arguments':sys.argv[1:], 'environment':{k:os.environ.get(k) for k in "
                                    "['CASKRUN_GRAPHICS_BACKEND','CASKRUN_NATIVE_NTDLL','WINEDLLPATH',"
-                                   "'WINEDLLOVERRIDES','WINELOADER','WINESERVER','WINEDATADIR']}}))\n")
+                                   "'WINEDLLOVERRIDES','WINELOADER','WINESERVER','WINEDATADIR',"
+                                   "'VK_DRIVER_FILES','VK_ICD_FILENAMES','VK_ADD_DRIVER_FILES']}}))\n")
                 program.chmod(0o755)
         shutil.copyfile(REPO / "scripts/wine-runtime-launch.sh", self.package / "bin/_dispatch")
         (self.package / "bin/_dispatch").chmod(0o755)
@@ -76,8 +82,8 @@ class SwitchableDispatcher(unittest.TestCase):
                 self.assertEqual(data["environment"]["WINEDLLPATH"], str(self.dxmt / "lib/wine"))
 
     def test_native_loader_is_remapped_only_between_the_exact_views(self):
-        for input_view in [self.base, self.dxmt]:
-            for backend, output_view in [("dxmt", self.dxmt), ("auto", self.base)]:
+        for input_view in [self.base, self.dxmt, self.dxvk]:
+            for backend, output_view in [("dxmt", self.dxmt), ("dxvk", self.dxvk), ("auto", self.base)]:
                 with self.subTest(input=input_view, backend=backend):
                     result = self.launch(backend=backend,
                                          CASKRUN_NATIVE_NTDLL=str(input_view / "lib/wine/x86_64-unix/ntdll.so"))
@@ -108,7 +114,7 @@ class SwitchableDispatcher(unittest.TestCase):
         self.assertEqual(result.stdout, "")
 
     def test_server_control_always_uses_base_even_with_invalid_backend(self):
-        for backend in ["dxmt", "unknown"]:
+        for backend in ["dxmt", "dxvk", "unknown"]:
             result = self.launch("wineserver", backend,
                                  CASKRUN_NATIVE_NTDLL=str(self.root / "unrelated/ntdll.so"))
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -120,6 +126,26 @@ class SwitchableDispatcher(unittest.TestCase):
         environment = json.loads(result.stdout)["environment"]
         self.assertEqual(environment["WINEDLLOVERRIDES"], "example=n,b")
         self.assertEqual(environment["WINEDLLPATH"], str(self.base / "lib/wine") + ":extra-search-path")
+
+    def test_dxvk_pins_the_driver_for_both_entrypoints(self):
+        for command in ["wine", "wineboot"]:
+            result = self.launch(command, "dxvk", VK_DRIVER_FILES="unrelated-driver",
+                                 VK_ICD_FILENAMES="another-driver", VK_ADD_DRIVER_FILES="extra-driver")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(result.stdout)
+            self.assertEqual(data["view"], "dxvk")
+            self.assertEqual(data["environment"]["VK_DRIVER_FILES"], str(self.icd))
+            self.assertIsNone(data["environment"]["VK_ICD_FILENAMES"])
+            self.assertIsNone(data["environment"]["VK_ADD_DRIVER_FILES"])
+            self.assertEqual(data["environment"]["WINESERVER"], str(self.base / "bin/wineserver"))
+
+    def test_dxvk_refuses_missing_marker_or_driver_before_execution(self):
+        self.icd.unlink()
+        result = self.launch(backend="dxvk")
+        self.assertEqual(result.returncode, 66)
+        self.assertEqual(result.stdout, "")
+        (self.package / "dxvk-layout.txt").write_text("unreviewed-layout\n")
+        self.assertEqual(self.launch(backend="dxvk").returncode, 65)
 
 
 if __name__ == "__main__":

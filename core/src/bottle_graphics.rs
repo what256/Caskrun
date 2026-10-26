@@ -9,6 +9,8 @@ const AUTO_SETTINGS: &str = "auto-graphics.json";
 const AUTO_TARGET_LIMIT: usize = 32;
 const AUTO_IDLE_TIMEOUT: Duration = Duration::from_millis(250);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
+const DXVK_ROOT: &str = "components/dxvk/runtime";
+const DXVK_ICD: &str = "components/dxvk/vulkan/icd.d/MoltenVK_icd.json";
 const DXMT_ROOT: &str = "components/dxmt/runtime";
 // Original x64/x86 lifecycle and all three spatial-scale gates pass with the
 // exact reviewed package. This does not establish game or image-quality support.
@@ -22,6 +24,7 @@ pub(super) enum Backend {
     Auto,
     Wined3d,
     Dxmt,
+    Dxvk,
 }
 
 impl Backend {
@@ -30,6 +33,7 @@ impl Backend {
             Self::Auto => "auto",
             Self::Wined3d => "wined3d",
             Self::Dxmt => "dxmt",
+            Self::Dxvk => "dxvk",
         }
     }
 
@@ -38,7 +42,8 @@ impl Backend {
             "auto" => Ok(Self::Auto),
             "wined3d" => Ok(Self::Wined3d),
             "dxmt" => Ok(Self::Dxmt),
-            _ => Err("Choose automatic, WineD3D, or DXMT graphics".into()),
+            "dxvk" => Ok(Self::Dxvk),
+            _ => Err("Choose Automatic, WineD3D, DXMT, or DXVK graphics".into()),
         }
     }
 }
@@ -50,6 +55,7 @@ impl Backend {
 #[serde(rename_all = "kebab-case")]
 enum AutoReason {
     D3d11Detected,
+    D3d9Detected,
     NoSupportedEvidence,
     MixedOrIncompleteEvidence,
     EngineUnavailable,
@@ -76,7 +82,7 @@ impl AutoSettings {
 
 /// Bounded, nonblocking, no-follow reads also reject a concurrent rename or
 /// modification. Neither a restored cache nor an arbitrary path can select a
-/// runtime: this file carries only two known backends and closed reason codes.
+/// runtime: this file carries only known backends and closed reason codes.
 fn read_auto_settings(dir: &Path) -> Result<(Option<AutoSettings>, Option<Vec<u8>>), String> {
     let bytes = read_small_file(&dir.join(AUTO_SETTINGS), SETTINGS_LIMIT)?;
     let Some(bytes) = bytes else {
@@ -86,9 +92,18 @@ fn read_auto_settings(dir: &Path) -> Result<(Option<AutoSettings>, Option<Vec<u8
         "Invalid automatic graphics decision; review the bottle's graphics setting".to_owned()
     })?;
     if settings.version != 1
-        || settings.effective_backend == Backend::Auto
-        || (settings.effective_backend == Backend::Dxmt)
-            != (settings.reason == AutoReason::D3d11Detected)
+        || !matches!(
+            (settings.effective_backend, settings.reason),
+            (Backend::Dxmt, AutoReason::D3d11Detected)
+                | (Backend::Dxvk, AutoReason::D3d9Detected)
+                | (
+                    Backend::Wined3d,
+                    AutoReason::NoSupportedEvidence
+                        | AutoReason::MixedOrIncompleteEvidence
+                        | AutoReason::EngineUnavailable
+                        | AutoReason::NotYetScanned
+                )
+        )
     {
         return Err("Unsupported automatic graphics decision".into());
     }
@@ -141,6 +156,7 @@ fn effective_backend(dir: &Path, selected: Backend) -> Result<Backend, String> {
 #[derive(Default)]
 struct AutoEvidence {
     supported: bool,
+    d3d9_supported: bool,
     incomplete: bool,
 }
 
@@ -148,23 +164,45 @@ impl AutoEvidence {
     fn include(&mut self, probe: &graphics_probe::Probe) {
         if probe.supports_dxmt() {
             self.supported = true;
+        } else if probe.supports_dxvk_d3d9() {
+            self.d3d9_supported = true;
         } else {
             self.incomplete = true;
         }
     }
 
+    #[cfg(test)]
     fn decision(self, dxmt_available: bool) -> AutoSettings {
-        if !dxmt_available {
+        self.decision_for(dxmt_available, false)
+    }
+
+    fn decision_for(self, dxmt_available: bool, dxvk_available: bool) -> AutoSettings {
+        if !dxmt_available && !dxvk_available {
             return AutoSettings::baseline(AutoReason::EngineUnavailable);
         }
-        if self.incomplete {
+        if self.incomplete || (self.supported && self.d3d9_supported) {
             return AutoSettings::baseline(AutoReason::MixedOrIncompleteEvidence);
         }
         if self.supported {
-            return AutoSettings {
-                version: 1,
-                effective_backend: Backend::Dxmt,
-                reason: AutoReason::D3d11Detected,
+            return if dxmt_available {
+                AutoSettings {
+                    version: 1,
+                    effective_backend: Backend::Dxmt,
+                    reason: AutoReason::D3d11Detected,
+                }
+            } else {
+                AutoSettings::baseline(AutoReason::EngineUnavailable)
+            };
+        }
+        if self.d3d9_supported {
+            return if dxvk_available {
+                AutoSettings {
+                    version: 1,
+                    effective_backend: Backend::Dxvk,
+                    reason: AutoReason::D3d9Detected,
+                }
+            } else {
+                AutoSettings::baseline(AutoReason::EngineUnavailable)
             };
         }
         AutoSettings::baseline(AutoReason::NoSupportedEvidence)
@@ -277,15 +315,37 @@ fn automatic_idle(dir: &Path, wine: &Path) -> Result<(), String> {
 /// startup, never by changing the Wine/DXMT view under an active client.
 pub(super) fn prepare_automatic(home: &Path, id: &str, wine: &Path) -> Result<(), String> {
     let dir = bottle_dir(home, id)?;
-    prepare_automatic_with(&dir, wine, automatic_idle, automatic_evidence, dxmt_support)
+    prepare_automatic_with_backends(
+        &dir,
+        wine,
+        automatic_idle,
+        automatic_evidence,
+        |dir, wine| {
+            let dxmt = dxmt_support(dir, wine).is_ok();
+            (dxmt, dxmt && dxvk_component_support(wine).is_ok())
+        },
+    )
 }
 
+#[cfg(test)]
 fn prepare_automatic_with(
     dir: &Path,
     wine: &Path,
     idle: impl Fn(&Path, &Path) -> Result<(), String>,
     evidence: impl FnOnce(&Path) -> Result<AutoEvidence, String>,
     support: impl FnOnce(&Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    prepare_automatic_with_backends(dir, wine, idle, evidence, |dir, wine| {
+        (support(dir, wine).is_ok(), false)
+    })
+}
+
+fn prepare_automatic_with_backends(
+    dir: &Path,
+    wine: &Path,
+    idle: impl Fn(&Path, &Path) -> Result<(), String>,
+    evidence: impl FnOnce(&Path) -> Result<AutoEvidence, String>,
+    support: impl FnOnce(&Path, &Path) -> (bool, bool),
 ) -> Result<(), String> {
     let (preferences, preference_bytes) = read_settings(dir)?;
     if preferences.backend != Backend::Auto {
@@ -299,9 +359,9 @@ fn prepare_automatic_with(
         cancellation::check()?;
         return Ok(());
     }
-    let available = support(dir, wine).is_ok();
-    let updated = if available {
-        evidence(dir)?.decision(true)
+    let (dxmt_available, dxvk_available) = support(dir, wine);
+    let updated = if dxmt_available || dxvk_available {
+        evidence(dir)?.decision_for(dxmt_available, dxvk_available)
     } else {
         AutoSettings::baseline(AutoReason::EngineUnavailable)
     };
@@ -337,6 +397,8 @@ struct Settings {
     dxmt_frame_rate: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dxmt_spatial_scale: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    msync: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -344,6 +406,7 @@ struct Preferences {
     backend: Backend,
     frame_rate: u16,
     spatial_scale: u16,
+    msync: bool,
 }
 
 impl Default for Preferences {
@@ -352,6 +415,7 @@ impl Default for Preferences {
             backend: Backend::Auto,
             frame_rate: 0,
             spatial_scale: 100,
+            msync: false,
         }
     }
 }
@@ -377,9 +441,14 @@ pub(super) struct GraphicsResult {
     selected_backend: Backend,
     effective_backend: Backend,
     dxmt_available: bool,
+    dxvk_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dxvk_unavailable_reason: Option<String>,
     dxmt_frame_rate: u16,
     dxmt_spatial_scale: u16,
     dxmt_spatial_available: bool,
+    msync_enabled: bool,
+    msync_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     automatic_reason: Option<AutoReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -424,6 +493,17 @@ fn read_settings(dir: &Path) -> Result<(Preferences, Option<Vec<u8>>), String> {
     }
     let settings: Settings = serde_json::from_slice(&bytes)
         .map_err(|error| format!("Invalid bottle graphics preference: {error}"))?;
+    if settings.version < 3
+        && serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|e| e.to_string())?
+            .get("msync")
+            .is_some()
+    {
+        return Err("Legacy graphics preferences cannot contain MSync settings".into());
+    }
+    if settings.version < 3 && settings.backend == Backend::Dxvk {
+        return Err("DXVK requires version-3 graphics preferences".into());
+    }
     let preferences = match settings.version {
         1 => {
             // A legacy record predates these fields. Even a null claim is not
@@ -438,7 +518,7 @@ fn read_settings(dir: &Path) -> Result<(Preferences, Option<Vec<u8>>), String> {
                 ..Preferences::default()
             }
         }
-        2 => {
+        2 | 3 => {
             let frame_rate = settings
                 .dxmt_frame_rate
                 .ok_or("Graphics preferences are missing their DXMT frame target")?;
@@ -450,6 +530,13 @@ fn read_settings(dir: &Path) -> Result<(Preferences, Option<Vec<u8>>), String> {
                 backend: settings.backend,
                 frame_rate,
                 spatial_scale,
+                msync: if settings.version == 3 {
+                    settings
+                        .msync
+                        .ok_or("Graphics preferences are missing their MSync setting")?
+                } else {
+                    false
+                },
             }
         }
         _ => return Err("Unsupported bottle graphics preference version".into()),
@@ -536,12 +623,106 @@ fn validate_receipt(receipt: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_dxvk_receipt(receipt: &serde_json::Value) -> Result<(), String> {
+    validate_receipt(receipt)?;
+    let component = &receipt["dxvk"];
+    if receipt["backend_roots"]["dxvk"] != DXVK_ROOT
+        || component["implementation"] != "caskrun-dxvk-hybrid-v1"
+        || component["loading_model"] != "wine-builtin-runtime-view-v1"
+        || component["runtime_view_validation_passed"] != true
+        || component["api_validation_passed"] != true
+        || component["d3d9_validation_passed"] != true
+        || component["d3d11_validation_passed"] != true
+        || component["d3d8_api_validation_passed"] != false
+        || component["d3d12_supported"] != false
+        || component["per_api"]["d3d9"]["revision"] != "7437b616f05bc678d2ff4b4b75832f9cbddeed75"
+        || component["per_api"]["d3d9"]["version"] != "1.10.3-20230507-async-macos"
+        || component["per_api"]["d3d10_11"]["revision"]
+            != "bd8921a3db6c4928f5b34672791121f7c14e38c2"
+        || component["per_api"]["d3d10_11"]["version"] != "3.1-macos1.0"
+        || component["moltenvk_version"] != "1.4.2"
+        || component["windows_architectures"] != serde_json::json!(["x86_64", "i386"])
+    {
+        return Err("DXVK is not included as a validated component in this Windows engine".into());
+    }
+    Ok(())
+}
+
+pub(super) fn dxvk_support(dir: &Path, wine: &Path) -> Result<(), String> {
+    // The complete reviewed package attestation comes first. Receipts cannot
+    // promote a custom engine or arbitrary native DLL paths into this view.
+    dxmt_support(dir, wine)?;
+    dxvk_component_support(wine)
+}
+
+// Only call after the complete package capability gate above has succeeded.
+fn dxvk_component_support(wine: &Path) -> Result<(), String> {
+    let root = wine
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("The Windows engine is unavailable")?;
+    let bytes = read_small_file(&root.join("components.json"), 1024 * 1024)?
+        .ok_or("The Windows engine component receipt is missing")?;
+    let receipt = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    validate_dxvk_receipt(&receipt)?;
+    if !path_is_real_file(&root.join(DXVK_ICD)) {
+        return Err("The DXVK Vulkan driver manifest is missing".into());
+    }
+    for architecture in ["x86_64", "i386"] {
+        for dll in ["d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll"] {
+            if !path_is_real_file(
+                &root
+                    .join(DXVK_ROOT)
+                    .join("lib/wine")
+                    .join(format!("{architecture}-windows"))
+                    .join(dll),
+            ) {
+                return Err("The DXVK graphics component is incomplete".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn msync_support(dir: &Path, wine: &Path) -> Result<(), String> {
+    // This proves the full reviewed package first, not just a mutable receipt.
+    dxmt_support(dir, wine)?;
+    msync_component_support(wine)
+}
+
+// This helper shares the attested package proof with the status/Auto paths.
+fn msync_component_support(wine: &Path) -> Result<(), String> {
+    let root = wine
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("The Windows engine is unavailable")?;
+    let bytes = read_small_file(&root.join("components.json"), 1024 * 1024)?
+        .ok_or("The Windows engine component receipt is missing")?;
+    let receipt: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if receipt["msync"]["implementation"] != "caskrun-wine11-msync-v1"
+        || receipt["msync"]["protocol"] != 932
+        || receipt["msync"]["default_enabled"] != false
+        || receipt["msync"]["api_validation_passed"] != true
+    {
+        return Err("MSync is not included in this Windows engine".into());
+    }
+    Ok(())
+}
+
 fn result(dir: &Path, id: &str, preferences: Preferences, wine: Option<&Path>) -> GraphicsResult {
     let selected = preferences.backend;
     let support = wine
         .ok_or_else(|| "The Windows engine is unavailable".to_owned())
         .and_then(|wine| dxmt_support(dir, wine));
     let available = support.is_ok();
+    let dxvk_support_result = match (&support, wine) {
+        (Ok(()), Some(wine)) => dxvk_component_support(wine),
+        (Err(reason), _) => Err(reason.clone()),
+        _ => Err("The Windows engine is unavailable".into()),
+    };
+    let dxvk_available = dxvk_support_result.is_ok();
+    let msync_available =
+        available && wine.is_some_and(|wine| msync_component_support(wine).is_ok());
     let automatic = if selected == Backend::Auto {
         Some(read_auto_settings(dir))
     } else {
@@ -567,19 +748,31 @@ fn result(dir: &Path, id: &str, preferences: Preferences, wine: Option<&Path>) -
         selected_backend: selected,
         effective_backend: effective,
         dxmt_available: available,
+        dxvk_available,
+        dxvk_unavailable_reason: dxvk_support_result.err(),
         dxmt_frame_rate: preferences.frame_rate,
         dxmt_spatial_scale: preferences.spatial_scale,
         dxmt_spatial_available: available && SPATIAL_VALIDATED,
+        msync_enabled: preferences.msync,
+        msync_available,
         automatic_reason: (selected == Backend::Auto)
             .then(|| automatic_settings.map_or(AutoReason::NotYetScanned, |value| value.reason)),
         unavailable_reason: support.err(),
-        warning: if automatic_error.is_some() {
+        warning: if preferences.msync && !msync_available {
+            Some("MSync is saved for this bottle but unavailable in this engine. Turn MSync off or restore the matching engine before opening apps.".into())
+        } else if automatic_error.is_some() {
             Some("The automatic graphics decision could not be read. Review this bottle's graphics setting before opening apps.".into())
         } else if effective == Backend::Dxmt {
             Some(if available {
                 "DXMT is experimental. Rendering probes pass; game compatibility still needs testing."
             } else {
                 "This bottle requests DXMT, but it is unavailable. Choose Automatic or restore the matching engine before opening apps."
+            }.into())
+        } else if effective == Backend::Dxvk {
+            Some(if dxvk_available {
+                "DXVK is experimental. D3D9/11 probes pass; games, geometry shaders and stream output are not generally validated."
+            } else {
+                "This bottle requests DXVK, but it is unavailable. Choose Automatic or restore the matching engine before opening apps."
             }.into())
         } else {
             None
@@ -649,6 +842,44 @@ pub(super) fn set_bottle_dxmt_options(
     validate_options(frame_rate, spatial_scale)?;
     let wine = wine_path().ok_or("The Windows engine is unavailable")?;
     set_options_with_wine(home, id, frame_rate, spatial_scale, &wine)
+}
+
+pub(super) fn set_bottle_msync(
+    home: &Path,
+    id: &str,
+    enabled: bool,
+) -> Result<GraphicsResult, String> {
+    let wine = wine_path().ok_or("The Windows engine is unavailable")?;
+    set_msync_with_wine(home, id, enabled, &wine)
+}
+
+fn set_msync_with_wine(
+    home: &Path,
+    id: &str,
+    enabled: bool,
+    wine: &Path,
+) -> Result<GraphicsResult, String> {
+    let _lock = lock_bottle(home, id)?;
+    let migration = runtime_migration::maybe_migrate_bundled_runtime(home, id, wine)?;
+    let result = (|| {
+        let dir = bottle_dir(home, id)?;
+        if enabled {
+            msync_support(&dir, wine)?;
+        }
+        let (mut preferences, original) = read_settings(&dir)?;
+        preferences.msync = enabled;
+        set_locked(home, id, preferences, original, wine)
+    })();
+    if result.is_err()
+        && let Some(backup) = migration
+    {
+        backup.restore().map_err(|error| {
+            format!(
+                "MSync update failed and its previous runtime record could not be restored: {error}"
+            )
+        })?;
+    }
+    result
 }
 
 fn set_options_with_wine(
@@ -764,6 +995,12 @@ fn set_locked_with_automatic(
     if preferences.backend == Backend::Dxmt {
         dxmt_support(&dir, wine)?;
     }
+    if preferences.backend == Backend::Dxvk {
+        dxvk_support(&dir, wine)?;
+    }
+    if preferences.msync {
+        msync_support(&dir, wine)?;
+    }
     refuse_running_bottle(&dir)?;
     refuse_live_wine_server(&dir, IDLE_TIMEOUT, Some(wine))?;
     prefix_processes::wait_until_idle(&dir, IDLE_TIMEOUT)?;
@@ -775,10 +1012,11 @@ fn set_locked_with_automatic(
     verify_automatic_option_selection(&dir, preferences.backend, expected_automatic)?;
     cancellation::check()?;
     let updated = serde_json::to_vec_pretty(&Settings {
-        version: 2,
+        version: 3,
         backend: preferences.backend,
         dxmt_frame_rate: Some(preferences.frame_rate),
         dxmt_spatial_scale: Some(preferences.spatial_scale),
+        msync: Some(preferences.msync),
     })
     .map_err(|e| e.to_string())?;
     write_preference(&dir.join(SETTINGS), &updated)?;
@@ -834,6 +1072,10 @@ pub(super) fn selected_runtime_root(dir: &Path, wine: &Path) -> Result<PathBuf, 
             dxmt_support(dir, wine)?;
             Ok(package.join(DXMT_ROOT))
         }
+        Backend::Dxvk => {
+            dxvk_support(dir, wine)?;
+            Ok(package.join(DXVK_ROOT))
+        }
         _ => Ok(package.join("runtime")),
     }
 }
@@ -847,11 +1089,29 @@ pub(super) fn configure_launch(
 ) -> Result<(), String> {
     let (preferences, _) = read_settings(dir)?;
     let backend = effective_backend(dir, preferences.backend)?;
+    if preferences.msync {
+        msync_support(dir, wine)?;
+    }
+    // Every client gets the saved choice. An inherited shell variable cannot
+    // activate a different synchronization mode for one child of a bottle.
+    command.env("WINEMSYNC", if preferences.msync { "1" } else { "0" });
     command.env("CASKRUN_GRAPHICS_BACKEND", backend.value());
+    if backend == Backend::Dxvk {
+        dxvk_support(dir, wine)?;
+        // The reviewed view contains Wine-marked copies of native DXVK PEs.
+        // Builtin-only resolution selects that view without installing native
+        // DLLs into the prefix or the application's working directory.
+        let inherited = env::var("WINEDLLOVERRIDES").unwrap_or_default();
+        command.env("WINEDLLOVERRIDES", dxvk_overrides(&inherited)?);
+        configure_dxvk_driver(command, wine)?;
+    }
     if backend == Backend::Dxmt {
         dxmt_support(dir, wine)?;
-        let inherited = env::var("WINEDLLOVERRIDES").unwrap_or_default();
-        let overrides = dxmt_overrides(&inherited)?;
+        configure_dxmt_session_environment(
+            command,
+            preferences,
+            &env::var("WINEDLLOVERRIDES").unwrap_or_default(),
+        )?;
         let prefix = dir.join("prefix");
         if path_is_real_file(&prefix.join("system.reg"))
             && ["system32", "syswow64"].iter().any(|folder| {
@@ -875,12 +1135,63 @@ pub(super) fn configure_launch(
             "DXMT_LOG_PATH",
             format!("Z:{}", logs.to_string_lossy().replace('/', "\\")),
         );
-        // Explicit DXMT selection overrides only its graphics modules for this
-        // launch. Preserve unrelated environment overrides and all registry /
-        // application-local DLL files so switching back is lossless.
-        command.env("WINEDLLOVERRIDES", overrides);
-        configure_dxmt_options(command, preferences);
     }
+    Ok(())
+}
+
+/// Read-only session environment for Steam reopen and graceful shutdown.
+/// It never repairs a prefix, creates a cache, or changes a saved preference.
+pub(super) fn configure_control_launch(
+    command: &mut Command,
+    dir: &Path,
+    wine: &Path,
+) -> Result<(), String> {
+    let (preferences, _) = read_settings(dir)?;
+    let backend = effective_backend(dir, preferences.backend)?;
+    if preferences.msync {
+        msync_support(dir, wine)?;
+    }
+    command.env("WINEMSYNC", if preferences.msync { "1" } else { "0" });
+    command.env("CASKRUN_GRAPHICS_BACKEND", backend.value());
+    if backend == Backend::Dxvk {
+        dxvk_support(dir, wine)?;
+        let inherited = env::var("WINEDLLOVERRIDES").unwrap_or_default();
+        command.env("WINEDLLOVERRIDES", dxvk_overrides(&inherited)?);
+        configure_dxvk_driver(command, wine)?;
+    }
+    if backend == Backend::Dxmt {
+        dxmt_support(dir, wine)?;
+        configure_dxmt_session_environment(
+            command,
+            preferences,
+            &env::var("WINEDLLOVERRIDES").unwrap_or_default(),
+        )?;
+    }
+    Ok(())
+}
+
+// Normal launches and read-only control clients must resolve the same DXMT
+// modules and tuning. This changes only the child environment: no prefix,
+// shader-cache or log directory is created during a reopen/Quit request.
+fn configure_dxmt_session_environment(
+    command: &mut Command,
+    preferences: Preferences,
+    inherited_overrides: &str,
+) -> Result<(), String> {
+    command.env("WINEDLLOVERRIDES", dxmt_overrides(inherited_overrides)?);
+    configure_dxmt_options(command, preferences);
+    Ok(())
+}
+
+fn configure_dxvk_driver(command: &mut Command, wine: &Path) -> Result<(), String> {
+    let root = wine
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("The Windows engine is unavailable")?;
+    command.env("VK_DRIVER_FILES", root.join(DXVK_ICD));
+    command
+        .env_remove("VK_ICD_FILENAMES")
+        .env_remove("VK_ADD_DRIVER_FILES");
     Ok(())
 }
 
@@ -988,7 +1299,26 @@ fn prepare_bridge_placeholders(dir: &Path, wine: &Path) -> Result<(), String> {
 }
 
 fn dxmt_overrides(inherited: &str) -> Result<String, String> {
-    const MANAGED: [&str; 4] = ["d3d11", "dxgi", "d3d10core", "winemetal"];
+    managed_graphics_overrides(
+        inherited,
+        &["d3d11", "dxgi", "d3d10core", "winemetal"],
+        "d3d11,dxgi,d3d10core,winemetal=b",
+    )
+}
+
+fn dxvk_overrides(inherited: &str) -> Result<String, String> {
+    managed_graphics_overrides(
+        inherited,
+        &["d3d9", "d3d10core", "d3d11", "dxgi"],
+        "d3d9,d3d10core,d3d11,dxgi=b",
+    )
+}
+
+fn managed_graphics_overrides(
+    inherited: &str,
+    managed: &[&str],
+    selected: &str,
+) -> Result<String, String> {
     let mut output = Vec::new();
     for entry in inherited
         .split(';')
@@ -996,19 +1326,19 @@ fn dxmt_overrides(inherited: &str) -> Result<String, String> {
     {
         let (names, order) = entry
             .split_once('=')
-            .ok_or("Invalid DLL override environment; clear it before choosing DXMT")?;
+            .ok_or("Invalid DLL override environment; clear it before choosing managed graphics")?;
         let preserved: Vec<_> = names
             .split(',')
             .filter(|name| {
                 let name = name.trim().trim_start_matches('*').to_ascii_lowercase();
-                !MANAGED.contains(&name.trim_end_matches(".dll"))
+                !managed.contains(&name.trim_end_matches(".dll"))
             })
             .collect();
         if !preserved.is_empty() {
             output.push(format!("{}={order}", preserved.join(",")));
         }
     }
-    output.push("d3d11,dxgi,d3d10core,winemetal=b".into());
+    output.push(selected.into());
     Ok(output.join(";"))
 }
 
@@ -1022,6 +1352,412 @@ mod tests {
             .join(format!("graphics-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn valid_dxvk_receipt() -> serde_json::Value {
+        serde_json::json!({"format":"caskrun-runtime-components", "version":1,
+            "layout":"switchable-v1", "default_backend":"wined3d", "game_validated":false,
+            "backend_roots":{"wined3d":"runtime","dxmt":DXMT_ROOT,"dxvk":DXVK_ROOT},
+            "dxvk":{"implementation":"caskrun-dxvk-hybrid-v1", "api_validation_passed":true,
+                "loading_model":"wine-builtin-runtime-view-v1", "runtime_view_validation_passed":true,
+                "d3d9_validation_passed":true,"d3d11_validation_passed":true,"d3d12_supported":false,
+                "d3d8_api_validation_passed":false,
+                "per_api":{
+                    "d3d9":{"revision":"7437b616f05bc678d2ff4b4b75832f9cbddeed75","version":"1.10.3-20230507-async-macos"},
+                    "d3d10_11":{"revision":"bd8921a3db6c4928f5b34672791121f7c14e38c2","version":"3.1-macos1.0"}},
+                "moltenvk_version":"1.4.2","windows_architectures":["x86_64","i386"]}})
+    }
+
+    #[test]
+    fn control_clients_use_saved_sync_mode_without_creating_integration_or_cache_files() {
+        let dir = fixture();
+        let mut command = Command::new("unused-control-command");
+        command.env("WINEMSYNC", "1");
+        configure_control_launch(&mut command, &dir, &dir.join("engine/bin/wine")).unwrap();
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "WINEMSYNC" && value == Some(OsStr::new("0")))
+        );
+        assert!(fs::read_dir(&dir).unwrap().next().is_none());
+        fs::write(dir.join(SETTINGS), br#"{"version":3,"backend":"auto","dxmt_frame_rate":0,"dxmt_spatial_scale":100,"msync":true}"#).unwrap();
+        assert!(
+            configure_control_launch(&mut command, &dir, &dir.join("engine/bin/wine")).is_err()
+        );
+        assert!(!dir.join("dxmt-cache").exists());
+        assert!(!dir.join("xdg").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dxmt_launch_and_control_environment_preserve_modules_tuning_and_files() {
+        let dir = fixture();
+        let settings = br#"{"version":3,"backend":"dxmt","dxmt_frame_rate":60,"dxmt_spatial_scale":150,"msync":false}"#;
+        fs::write(dir.join(SETTINGS), settings).unwrap();
+        let preferences = read_settings(&dir).unwrap().0;
+        let mut command = Command::new("unused-control-command");
+        command.env("DXMT_CONFIG_FILE", "untrusted-config");
+        command.env("DXMT_CONFIG", "d3d11.preferredMaxFrameRate=999;");
+        command.env("UNRELATED_CLIENT_OPTION", "keep");
+        configure_dxmt_session_environment(
+            &mut command,
+            preferences,
+            "mscoree,mshtml=;d3d11,custom=n;*DXGI.dll=n,b;vcruntime140=n,b",
+        )
+        .unwrap();
+        let values: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_owned)))
+            .collect();
+        assert_eq!(
+            values[OsStr::new("WINEDLLOVERRIDES")],
+            Some(
+                OsStr::new(
+                    "mscoree,mshtml=;custom=n;vcruntime140=n,b;d3d11,dxgi,d3d10core,winemetal=b"
+                )
+                .to_owned()
+            )
+        );
+        assert_eq!(
+            values[OsStr::new("DXMT_CONFIG")],
+            Some(
+                OsStr::new("d3d11.preferredMaxFrameRate=60;d3d11.metalSpatialUpscaleFactor=1.50;")
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            values[OsStr::new("DXMT_CONFIG_FILE")],
+            Some(OsStr::new("NUL").to_owned())
+        );
+        assert_eq!(
+            values[OsStr::new("DXMT_METALFX_SPATIAL_SWAPCHAIN")],
+            Some(OsStr::new("1").to_owned())
+        );
+        assert_eq!(
+            values[OsStr::new("UNRELATED_CLIENT_OPTION")],
+            Some(OsStr::new("keep").to_owned())
+        );
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), settings);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        // The real control entry point must still reject an unreviewed engine
+        // before applying DXMT options, even though no prefix repair is needed.
+        let mut refused = Command::new("unused-control-command");
+        assert!(
+            configure_control_launch(&mut refused, &dir, &dir.join("engine/bin/wine")).is_err()
+        );
+        assert!(!refused.get_envs().any(|(key, _)| key == "WINEDLLOVERRIDES"));
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), settings);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dxvk_driver_selection_is_fixed_for_native_aliases_without_a_shell() {
+        let dir = fixture();
+        let wine = dir.join("engine/bin/wine");
+        let mut command = Command::new("unused-test-command");
+        command.env("VK_DRIVER_FILES", "unreviewed-driver");
+        command.env("VK_ICD_FILENAMES", "unreviewed-legacy-driver");
+        command.env("VK_ADD_DRIVER_FILES", "unreviewed-extra-driver");
+        configure_dxvk_driver(&mut command, &wine).unwrap();
+        let values: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_owned)))
+            .collect();
+        assert_eq!(
+            values[OsStr::new("VK_DRIVER_FILES")],
+            Some(dir.join("engine").join(DXVK_ICD).into_os_string())
+        );
+        assert_eq!(values[OsStr::new("VK_ICD_FILENAMES")], None);
+        assert_eq!(values[OsStr::new("VK_ADD_DRIVER_FILES")], None);
+        assert!(!dir.join("engine").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dxvk_runtime_view_override_is_fixed_and_preserves_only_unrelated_entries() {
+        assert_eq!(
+            dxvk_overrides("mscoree,mshtml=;d3d9,custom=n;*DXGI.dll=n,b;vcruntime140=n,b;d3d8=n,b")
+                .unwrap(),
+            "mscoree,mshtml=;custom=n;vcruntime140=n,b;d3d8=n,b;d3d9,d3d10core,d3d11,dxgi=b"
+        );
+        assert!(dxvk_overrides("malformed").is_err());
+    }
+
+    #[test]
+    fn dxvk_receipt_requires_exact_component_and_both_architecture_validation() {
+        let baseline = valid_dxvk_receipt();
+        validate_dxvk_receipt(&baseline).unwrap();
+        for (key, value) in [
+            ("implementation", "unreviewed".into()),
+            ("loading_model", "app-directory-native".into()),
+            ("runtime_view_validation_passed", false.into()),
+            ("api_validation_passed", false.into()),
+            ("d3d9_validation_passed", false.into()),
+            ("d3d11_validation_passed", false.into()),
+            ("d3d8_api_validation_passed", true.into()),
+            ("d3d12_supported", true.into()),
+            ("per_api", serde_json::Value::Null),
+            ("moltenvk_version", "other".into()),
+            ("windows_architectures", serde_json::json!(["x86_64"])),
+        ] {
+            let mut changed = baseline.clone();
+            changed["dxvk"][key] = value;
+            assert!(validate_dxvk_receipt(&changed).is_err(), "{key}");
+        }
+        for api in ["d3d9", "d3d10_11"] {
+            for key in ["revision", "version"] {
+                let mut changed = baseline.clone();
+                changed["dxvk"]["per_api"][api][key] = "unreviewed".into();
+                assert!(validate_dxvk_receipt(&changed).is_err(), "{api}.{key}");
+            }
+        }
+        let mut modern_d3d9 = baseline.clone();
+        modern_d3d9["dxvk"]["per_api"]["d3d9"] = baseline["dxvk"]["per_api"]["d3d10_11"].clone();
+        assert!(validate_dxvk_receipt(&modern_d3d9).is_err());
+        let mut changed = baseline;
+        changed["backend_roots"]["dxvk"] = "../../unreviewed".into();
+        assert!(validate_dxvk_receipt(&changed).is_err());
+    }
+
+    #[test]
+    fn dxvk_receipt_alone_never_promotes_an_unreviewed_engine_or_mutates_apps() {
+        let home = fixture();
+        let bottle = create(&home, "Unreviewed DXVK").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let wine = home.join("engine/bin/wine");
+        fs::create_dir_all(wine.parent().unwrap()).unwrap();
+        fs::write(
+            wine.parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("components.json"),
+            serde_json::to_vec(&valid_dxvk_receipt()).unwrap(),
+        )
+        .unwrap();
+        let original = br#"{"version":3,"backend":"auto","dxmt_frame_rate":60,"dxmt_spatial_scale":100,"msync":false}"#;
+        fs::write(dir.join(SETTINGS), original).unwrap();
+        assert!(dxvk_support(&dir, &wine).is_err());
+        assert!(set_with_wine(&home, &bottle.id, Backend::Dxvk, &wine).is_err());
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), original);
+        assert!(
+            !dir.join("prefix/drive_c/windows/system32/d3d9.dll")
+                .exists()
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn automatic_prefers_dxmt_for_d3d11_and_uses_dxvk_only_for_unmixed_d3d9() {
+        for (d11, d9, incomplete, dxmt, dxvk, expected) in [
+            (true, false, false, true, true, Backend::Dxmt),
+            (false, true, false, true, true, Backend::Dxvk),
+            (false, true, false, false, true, Backend::Dxvk),
+            (false, true, false, true, false, Backend::Wined3d),
+            (true, false, false, false, true, Backend::Wined3d),
+            (true, true, false, true, true, Backend::Wined3d),
+            (false, true, true, true, true, Backend::Wined3d),
+            (false, false, false, true, true, Backend::Wined3d),
+        ] {
+            assert_eq!(
+                AutoEvidence {
+                    supported: d11,
+                    d3d9_supported: d9,
+                    incomplete
+                }
+                .decision_for(dxmt, dxvk)
+                .effective_backend,
+                expected
+            );
+        }
+        let dir = automatic_fixture();
+        prepare_automatic_with_backends(
+            &dir,
+            &dir.join("unused-wine"),
+            |_, _| Ok(()),
+            |_| {
+                Ok(AutoEvidence {
+                    d3d9_supported: true,
+                    ..AutoEvidence::default()
+                })
+            },
+            |_, _| (true, true),
+        )
+        .unwrap();
+        let (saved, _) = read_auto_settings(&dir).unwrap();
+        assert_eq!(saved.unwrap().reason, AutoReason::D3d9Detected);
+        assert_eq!(resolved_backend(&dir).unwrap(), Backend::Dxvk);
+        fs::write(
+            dir.join(AUTO_SETTINGS),
+            br#"{"version":1,"effective_backend":"dxvk","reason":"d3d11-detected"}"#,
+        )
+        .unwrap();
+        assert!(read_auto_settings(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dxvk_portable_v3_keeps_msync_and_dxmt_options_and_legacy_dxvk_is_refused() {
+        let dir = fixture();
+        fs::write(dir.join(SETTINGS), br#"{"version":3,"backend":"dxvk","dxmt_frame_rate":60,"dxmt_spatial_scale":100,"msync":true}"#).unwrap();
+        let expected = Preferences {
+            backend: Backend::Dxvk,
+            frame_rate: 60,
+            spatial_scale: 100,
+            msync: true,
+        };
+        assert_eq!(read_settings(&dir).unwrap().0, expected);
+        validate_portable_settings(&dir).unwrap();
+        let status = result(&dir, "fixture", expected, None);
+        assert_eq!(status.selected_backend, Backend::Dxvk);
+        assert!(!status.dxvk_available);
+        assert!(status.warning.unwrap().contains("MSync"));
+        for value in [
+            br#"{"version":1,"backend":"dxvk"}"#.as_slice(),
+            br#"{"version":2,"backend":"dxvk","dxmt_frame_rate":0,"dxmt_spatial_scale":100}"#
+                .as_slice(),
+        ] {
+            fs::write(dir.join(SETTINGS), value).unwrap();
+            assert!(read_settings(&dir).is_err());
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn msync_version_three_preferences_survive_portable_copy_and_restore() {
+        let home = fixture();
+        let source = create(&home, "Portable synchronization").unwrap();
+        let dir = bottle_dir(&home, &source.id).unwrap();
+        let original = br#"{"version":3,"backend":"auto","dxmt_frame_rate":45,"dxmt_spatial_scale":100,"msync":true}"#;
+        fs::write(dir.join(SETTINGS), original).unwrap();
+        let expected = Preferences {
+            backend: Backend::Auto,
+            frame_rate: 45,
+            spatial_scale: 100,
+            msync: true,
+        };
+        assert_eq!(read_settings(&dir).unwrap().0, expected);
+        validate_portable_settings(&dir).unwrap();
+        let duplicate = duplicate_bottle_with_runtime(&home, &source.id, None, None).unwrap();
+        let backup = home.join("synchronization.caskrun-bottle");
+        export_bottle_with_runtime(&home, &source.id, &backup, None).unwrap();
+        let restored = import_bottle(&home, &backup, None).unwrap();
+        for id in [&source.id, &duplicate.id, &restored.bottle.id] {
+            let copied = bottle_dir(&home, id).unwrap();
+            assert_eq!(read_settings(&copied).unwrap().0, expected);
+            assert_eq!(fs::read(copied.join(SETTINGS)).unwrap(), original);
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn msync_legacy_claims_and_incomplete_new_records_are_refused() {
+        let dir = fixture();
+        for version in [1, 2] {
+            for claim in [serde_json::Value::Null, true.into(), false.into()] {
+                let mut value =
+                    serde_json::json!({"version":version,"backend":"auto","msync":claim});
+                if version == 2 {
+                    value["dxmt_frame_rate"] = 0.into();
+                    value["dxmt_spatial_scale"] = 100.into();
+                }
+                let original = serde_json::to_vec(&value).unwrap();
+                fs::write(dir.join(SETTINGS), &original).unwrap();
+                assert!(
+                    validate_portable_settings(&dir)
+                        .unwrap_err()
+                        .contains("Legacy")
+                );
+                assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), original);
+            }
+        }
+        for value in [
+            serde_json::json!({"version":3,"backend":"auto","dxmt_frame_rate":0,"dxmt_spatial_scale":100}),
+            serde_json::json!({"version":3,"backend":"auto","dxmt_frame_rate":0,"dxmt_spatial_scale":100,"msync":null}),
+            serde_json::json!({"version":3,"backend":"auto","dxmt_frame_rate":0,"dxmt_spatial_scale":100,"msync":1}),
+            serde_json::json!({"version":4,"backend":"auto","dxmt_frame_rate":0,"dxmt_spatial_scale":100,"msync":true}),
+        ] {
+            fs::write(dir.join(SETTINGS), serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(validate_portable_settings(&dir).is_err());
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn msync_default_overrides_inherited_enable_without_writing_or_launching() {
+        let dir = fixture();
+        let mut command = Command::new("unused-test-command");
+        command.env("WINEMSYNC", "1");
+        configure_launch(&mut command, &dir, &dir.join("engine/bin/wine")).unwrap();
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "WINEMSYNC" && value == Some(OsStr::new("0")))
+        );
+        assert!(!dir.join(SETTINGS).exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn msync_unavailable_engine_refuses_enable_and_launch_without_changing_preferences() {
+        let home = fixture();
+        let bottle = create(&home, "Unreviewed synchronization engine").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let original = br#"{"version":1,"backend":"auto"}"#;
+        fs::write(dir.join(SETTINGS), original).unwrap();
+        let wine = home.join("unused-unreviewed-engine/bin/wine");
+        assert!(set_msync_with_wine(&home, &bottle.id, true, &wine).is_err());
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), original);
+        let enabled = br#"{"version":3,"backend":"wined3d","dxmt_frame_rate":0,"dxmt_spatial_scale":100,"msync":true}"#;
+        fs::write(dir.join(SETTINGS), enabled).unwrap();
+        let mut command = Command::new("unused-test-command");
+        assert!(configure_launch(&mut command, &dir, &wine).is_err());
+        assert!(!command.get_envs().any(|(key, _)| key == "WINEMSYNC"));
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), enabled);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn msync_change_obeys_bottle_lock_then_refuses_active_process_without_a_write() {
+        use std::sync::mpsc;
+        let home = fixture();
+        let bottle = create(&home, "Busy synchronization bottle").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let original = br#"{"version":3,"backend":"auto","dxmt_frame_rate":0,"dxmt_spatial_scale":100,"msync":false}"#;
+        fs::write(dir.join(SETTINGS), original).unwrap();
+        save_json(
+            &dir.join("active-processes.json"),
+            &vec![std::process::id()],
+        )
+        .unwrap();
+        let held_lock = lock_bottle(&home, &bottle.id).unwrap();
+        let (sent, received) = mpsc::channel();
+        let worker_home = home.clone();
+        let worker_id = bottle.id.clone();
+        let worker = std::thread::spawn(move || {
+            let result = set_msync_with_wine(
+                &worker_home,
+                &worker_id,
+                false,
+                &worker_home.join("unused-test-engine"),
+            );
+            sent.send(result.map(|_| ())).unwrap();
+        });
+        assert!(matches!(
+            received.recv_timeout(Duration::from_millis(75)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), original);
+        drop(held_lock);
+        let error = received
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("Close Windows apps"), "{error}");
+        worker.join().unwrap();
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), original);
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
@@ -1264,6 +2000,7 @@ mod tests {
                 backend: Backend::Dxmt,
                 dxmt_frame_rate: None,
                 dxmt_spatial_scale: None,
+                msync: None,
             },
         )
         .unwrap();
@@ -1355,6 +2092,7 @@ mod tests {
                 backend: Backend::Dxmt,
                 frame_rate: 30,
                 spatial_scale: 100,
+                msync: false,
             },
         );
         let values: std::collections::BTreeMap<_, _> = command
@@ -1378,6 +2116,7 @@ mod tests {
                 backend: Backend::Dxmt,
                 frame_rate: 0,
                 spatial_scale: 150,
+                msync: false,
             },
         );
         let values: std::collections::BTreeMap<_, _> = command
@@ -1446,7 +2185,8 @@ mod tests {
             Preferences {
                 backend: Backend::Wined3d,
                 frame_rate: 40,
-                spatial_scale: 100
+                spatial_scale: 100,
+                msync: false,
             }
         );
         let backup = home.join("options.caskrun-bottle");
@@ -1459,7 +2199,8 @@ mod tests {
             Preferences {
                 backend: Backend::Wined3d,
                 frame_rate: 40,
-                spatial_scale: 100
+                spatial_scale: 100,
+                msync: false,
             }
         );
         fs::remove_dir_all(home).unwrap();
@@ -1521,6 +2262,7 @@ mod tests {
                     backend: Backend::Auto,
                     frame_rate: rate,
                     spatial_scale: scale,
+                    msync: false,
                 }
             );
             let mut command = Command::new("unused-test-command");
@@ -1736,6 +2478,7 @@ mod tests {
     fn positive_evidence(_: &Path) -> Result<AutoEvidence, String> {
         Ok(AutoEvidence {
             supported: true,
+            d3d9_supported: false,
             incomplete: false,
         })
     }
@@ -1882,6 +2625,7 @@ mod tests {
         assert_eq!(
             AutoEvidence {
                 supported: true,
+                d3d9_supported: false,
                 incomplete: false
             }
             .decision(true)
@@ -1899,6 +2643,7 @@ mod tests {
             assert_eq!(
                 AutoEvidence {
                     supported,
+                    d3d9_supported: false,
                     incomplete
                 }
                 .decision(available)
@@ -2002,6 +2747,7 @@ mod tests {
                     backend,
                     dxmt_frame_rate: None,
                     dxmt_spatial_scale: None,
+                    msync: None,
                 })
                 .unwrap(),
             )

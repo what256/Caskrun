@@ -1,118 +1,125 @@
 # Graphics backend status
 
-_Source and upstream review: 26 October 2026. This records implementation
-boundaries; it does not declare untested engines or games compatible._
+_26 October 2026. Current source and isolated engine probes are recorded below.
+Local build 57 is packaged and installed; no storefront or game was launched
+in this engine pass._
 
-## Completion-pass validation
+## Current engine work
 
-Build 56 completes tuning for Automatic/DXMT without changing the selected
-Automatic preference or its cached decision. EA's versioned launcher paths now
-retain startup feedback, and packaging refuses replacement while Core or the
-icon helper is in use. The layout and included V14 runtime remain unchanged.
-
-The final serial Rust run passed 639 unit and 7 integration tests; 3 existing
-unit tests remain ignored. Focused coverage includes 35 graphics tests,
-29 Swift preference checks, 128 Swift startup checks and 42 Python checks.
-The full app compiled, its deep signature and development disk image verified,
-and the packaged Core matched the final production source after removing only
-its signature for comparison. Clippy reported no new graphics warnings.
-
-Four initial failures were bounded mock-startup waits that expired before fresh
-shell helpers ran. The fixture waits now allow measured startup latency while
-retaining their exact command, owner and prefix assertions; production waits
-are unchanged. One post-reap ownership check passed repeated unchanged runs
-and the final full run. Its strict refusal remains intact.
-
-No real Wine runtime, storefront or game was launched in this pass. Game and
-publisher acceptance remains for the user's [manual tests](NEXT_MANUAL_TESTS.md).
-
-## Included capabilities
-
-| Capability | Included behavior | Remaining acceptance |
+| Capability | Source and candidate evidence | Remaining acceptance |
 | --- | --- | --- |
-| WineD3D | Existing default/explicit fallback for older graphics paths. The original OpenGL experiment measured feature level 9_3. | Per-title rendering and performance. It is not a modern D3D11 feature-level replacement. |
-| DXMT | Verified optional Direct3D 10/11 Metal view, x86/x64 API fixtures, idle-only selection and saved preferences. | Sustained play, image quality, performance and devices beyond the recorded results. |
-| Automatic | Bounded PE import inspection can select DXMT for supported x64 Direct3D 10/11 evidence at an idle launch. Unknown/mixed evidence retains WineD3D; manual selection remains explicit. | Static imports cannot identify every dynamically loaded graphics API. |
-| DXMT frame target / MetalFX spatial scaling | Typed optional tuning, saved per bottle; original rendering and configuration tests recorded separately. | Real displayed FPS, fullscreen behavior and visual quality. Spatial scaling does not supply DLSS, temporal reconstruction or frame generation. |
-| High Resolution Mode | Optional Retina backing store and 96/192 DPI setting with idle checks and rollback. | DPI-unaware applications can still render at 1x. Existing choices are preserved. |
-| DXVK | Not integrated. The earlier independent MoltenVK experiment enumerated Vulkan devices but failed the Direct3D device gate. | A new complete Vulkan runtime and a verified translator/device/frame path. |
-| D3DMetal | Not integrated or bundled. | Official component, applicable Apple terms, host-interface integration and independent runtime tests. |
-| MSync | Not implemented in the current engine. | A coordinated upstream Wine 11 port and synchronization validation; see [MSync feasibility](MSYNC_FEASIBILITY.md). |
-| Linux ntsync / fsync | No corresponding macOS implementation in the included engine. | Linux kernel interfaces cannot be enabled by a macOS environment toggle. |
-| D3D12 / temporal scaling / frame generation | Not supplied by the reviewed package. | Separate complete implementation, component provenance and API/game tests. |
+| WineD3D | Existing explicit fallback and conservative Automatic default. The historical OpenGL probe reached feature level 9_3. | Per-title rendering and performance; it is not a modern D3D11 feature-level replacement. |
+| DXMT | Existing optional Direct3D 10/11 Metal view, original x86/x64 device/render/lifecycle fixtures and saved frame-target/spatial tuning. Normal launches and read-only Steam control requests now apply the same managed module selection and tuning. | Sustained play, visible image quality, performance and additional devices. |
+| DXVK hybrid | Candidate combines source-built legacy D3D9 with modern DX10/11 and official MoltenVK. The complete x86/x64 D3D9+D3D11 GPU matrix passed with exact mapped-library evidence; see below. | Store/game testing and performance. D3D8 stays on its original Wine implementation; D3D12 is not supplied. |
+| Automatic | Bounded complete PE import evidence can select verified DXMT for supported x64 Direct3D 10/11 or the verified hybrid DXVK view for unmixed x86/x64 Direct3D 9. Mixed, unknown or incomplete evidence retains WineD3D. Manual choices remain explicit. | Static imports cannot identify every dynamically loaded API or determine game compatibility. |
+| MSync | Original Wine 11 port of the public generic implementation, coordinated client/server protocol 932. Both retained WineD3D/DXMT views passed enabled/disabled x86/x64 synchronization probes. Opt-in, off by default. | Real-game behavior and measured performance; unsupported mixed wait objects remain a compatibility limit. |
+| High Resolution Mode | Existing optional Retina backing store and 96/192 DPI settings, with idle checks and rollback. | DPI-unaware apps can remain upscaled. Existing choices and defaults stay unchanged. |
+| D3DMetal | Official Apple input was privately staged after the actual license was accepted. Its native components loaded, but the isolated CreateDXGIFactory1 gate failed before device creation. Not selectable or included in the shared engine. | A compatible Wine host-interface path and successful independent API/render tests; distribution review remains separate. |
+| D3D12 / temporal scaling / frame generation | Not supplied by these validated paths. DXMT spatial scaling and frame targets do not add DLSS, temporal reconstruction or frame generation. | Separate implementation, provenance and API/game tests. |
+| Linux ntsync / fsync | No matching macOS kernel backend is supplied. | Linux kernel interfaces cannot be enabled by an environment toggle on macOS. |
 
-The pinned DXMT source contains an experimental `enable_d3d12` option, but the
-reviewed package disables it and the retained source still has unimplemented
-D3D12 methods. Merely compiling that option or displaying a picker would not
-establish a working DirectX 12 backend. The same package disables NVAPI and
-NVNGX; it has no validated vendor-extension route for temporal reconstruction.
+The existing Collection inspector layout is retained. DXVK appears only with
+the matching reviewed package; MSync gets a small bottle-scoped toggle only
+when supported or already saved. Selection and synchronization changes require
+the bottle lock and idle/owner checks. Version-3 preferences preserve the
+renderer, DXMT tuning and MSync through duplicate and backup/restore without
+carrying runtime paths. Unavailable saved choices fail clearly rather than
+silently choosing a different engine. Diagnostic identities and DXMT capability
+now use the same reviewed package allowlists as runtime selection.
 
-## A newer independent Vulkan route
+## Hybrid DXVK GPU evidence
 
-The older [Vulkan candidate](VULKAN_CANDIDATE.md) measured a MoltenVK device
-below the requirements of current DXVK. Current primary sources now describe
-another candidate:
+The candidate uses two separately pinned Zlib-licensed implementations:
 
-- [Khronos' MoltenVK repository](https://github.com/KhronosGroup/MoltenVK/blob/main/README.md)
-  recommends KosmicKrisp for Apple Silicon and marks MoltenVK community maintained.
-- [Mesa's KosmicKrisp documentation](https://docs.mesa3d.org/drivers/kosmickrisp.html)
-  describes a Vulkan-conformant Metal 4 driver requiring macOS 26 or later.
-- [LunarG's October 2026 overview](https://www.lunarg.com/the-state-of-vulkan-on-apple-oct-2026/)
-  records Vulkan 1.4 conformance and recommends bundling a tested loader and
-  driver instead of relying on a system installation.
+- [Metalsharp DXVK-MacOS](https://github.com/metalsharp/DXVK-MacOS/tree/bd8921a3db6c4928f5b34672791121f7c14e38c2),
+  version 3.1-macos1.0, for D3D10/11.
+- [tairasu D9VK](https://github.com/tairasu/d9vk/tree/7437b616f05bc678d2ff4b4b75832f9cbddeed75),
+  version 1.10.3-20230507-async-macos, built from source for D3D9.
+- Official [MoltenVK 1.4.2](https://github.com/KhronosGroup/MoltenVK/tree/db66022459ffb663aa2b50f6b018bc2e124f5edf),
+  under Apache-2.0, from the pinned official Vulkan SDK. Loader, Wine source,
+  notices and portability patch are recorded by the candidate packager.
 
-Caskrun's Unix Wine modules run as x86_64 under Rosetta, so an ARM64-only driver
-cannot simply be loaded into that process. There is source evidence that an
-x86_64 build is feasible: Mesa documents a
-[Rosetta-specific heap workaround](https://docs.mesa3d.org/drivers/kosmickrisp/workarounds.html#kk-workaround-8),
-and the separate [shadexternals build project](https://github.com/shadexternals/mesa-kosmickrisp)
-publishes an x86_64 cross-file and an ARM-host cross-build recipe. That recipe
-is evidence about building, not proof of a reviewed Caskrun artifact. No driver
-binary was loaded in this phase.
+| Original probe | Per-architecture result, both x64 and x86 WoW64 |
+| --- | --- |
+| D3D11 | 242 checks, 56 readback pixels, 14 Present calls; hardware feature levels 10/11, shader/readback, multiple windows, resize, destroyed-window handling and recreation. |
+| D3D9 | 154 checks, 24 exact pixels, 6 Present calls; hardware fixed-function triangle/readback and Reset/resize. |
 
-Official [SDK metadata](https://vulkan.lunarg.com/sdk/files.json) lists:
+One coherent hybrid view passed all four cells. Each owned process mapped the
+selected PE files, the reviewed MoltenVK and Vulkan loader; no alternate
+renderer was present at the pre-compiler identity gate. All ten graphics DLLs
+inside the probe prefix and all eight selected view PEs remained unchanged.
+Wine's supported builtin DOS-stub marker changes only the reserved marker
+bytes; original and runtime hashes are recorded. No prefix/application graphics
+DLL is replaced. Every renderer view routes to one common wineserver.
 
-| Artifact | Version | Compressed bytes | SHA-256 |
-| --- | --- | ---: | --- |
-| `vulkansdk-macos-1.4.363.0.zip` | 1.4.363.0 | 396088200 | `163431e0203c8215286a17cf393643ce6b951f77d1b4f74ab30821a1f0beb09b` |
+The modern D3D9 fixed-function path failed despite successful device/clear
+checks; that failure is why the candidate uses the separately pinned legacy
+D3D9 implementation. Missing geometry/transform-feedback and robustness
+features still limit titles. The probes do not prove general DXVK, D3D8,
+D3D12, game or performance compatibility. See [Vulkan evidence](VULKAN_CANDIDATE.md).
 
-No separate driver artifact is listed there. Bounded HEAD/range requests to the
-official SDK download endpoints returned HTTP 403 during this review. The full
-installer was not downloaded, installed or run, and no Mach-O slice/signature
-or component-license receipt was established. SDK metadata is a pin for future
-review, not approval to include the package.
+## MSync evidence
 
-### Required integration gates
+The matching client/server port passed 37 synchronization assertions in each
+of eight architecture/mode/view cells: 296 checks across x86/x64, MSync off/on,
+and WineD3D/DXMT. Coverage includes cross-process wakeups, event/semaphore/mutex
+semantics, waits, timeouts, APC cancellation, exit, access checks and handle
+reuse. The ordinary server fallback remains available. These results are API
+evidence, not a gameplay or speed claim. See [MSync implementation and limits](MSYNC_FEASIBILITY.md).
 
-1. Obtain or build an independently pinned x86_64 KosmicKrisp, matching Vulkan
-   loader and headers. Audit actual architectures, deployment targets, linkage,
-   relocation, hashes and licenses. Mesa's driver is MIT licensed; the full
-   dependency set needs its own notices and source records.
-2. Build the complete independent Wine Vulkan modules for the current Wine
-   source and original patches, including x86 and x64 Windows paths. Keep the
-   existing DXMT/WineD3D package intact while preparing the candidate.
-3. Query the actual driver requirements before selecting a translator.
-   [DXVK's driver requirements](https://github.com/doitsujin/dxvk/wiki/Driver-support)
-   include Vulkan 1.4 and specific extensions/features; Vulkan conformance
-   alone does not prove every optional requirement is available.
-4. Pass original x86/x64 Direct3D device, shader/readback, presentation and
-   lifecycle tests with mapped-library evidence, then add exact capabilities
-   and idle-only runtime migration. Games remain a separate user test.
+## D3DMetal boundary
 
-This is a credible new research path, not an included DXVK implementation.
-No store, game, driver service or background Windows process was started for
-this source review.
+[Apple's evaluation component](https://developer.apple.com/games/game-porting-toolkit/)
+is separately licensed. Its local inspection/staging tool records the official
+input and supplied license without copying another app's Wine engine or
+altering Apple's component. The actual Apple signature was retained. The
+factory failure occurs before a working device/frame path; whether the
+independent Wine host ABI can satisfy it is unresolved. The private payload,
+account/download data and raw diagnostics are excluded from source/public
+artifacts. License acceptance for local evaluation is not redistribution
+approval. No D3DMetal capability is advertised from a successful file import.
 
-## D3DMetal component boundary
+## Local build 57 acceptance
 
-[Apple's Game Porting Toolkit page](https://developer.apple.com/games/game-porting-toolkit/)
-describes its Windows-game evaluation environment. Its D3DMetal binary is a
-separate component whose applicable download terms, integrity and integration
-must be reviewed before use. The Apache license on Apple's separate porting
-sample/agent repository does not license that binary.
+The final reviewed V15 package is
+`sha256:2850553486175ba0326c5d4f84ea45f3fb37a5210c6830e77d7bea5ca8f97a0e`.
+The actual Core-selected DXVK four-cell matrix passed through the packaged
+dispatcher. DXMT also passed both architecture lifecycle matrices, return to
+WineD3D/Automatic, busy-switch refusal and owned-session cleanup. The final
+MSync enabled/disabled WineD3D/DXMT matrix passed all 296 assertions. The final
+notice supplement changed only six license files; all tested binaries stayed
+byte-for-byte unchanged.
 
-Caskrun currently has no reviewed D3DMetal payload or host-interface path.
-Neither another app's files nor an unchecked download should be treated as an
-engine update. A future official component import must preserve its supplied
-license and integrity, use an explicit compatible runtime view, and remain
-outside public artifacts until its distribution review is complete.
+The complete serial Rust run passed 659 unit and 7 integration tests, with
+3 existing tests ignored. After enabling upstream ARM hardware SHA-256,
+four focused tamper/cache/relocation tests and an independent complete-package
+identity comparison passed. Full engine verification measured 12.30 seconds
+with software SHA and 4.38 seconds with hardware SHA on the same local input;
+this does not measure game performance or remove any verification step.
+Swift preference contracts passed 35 checks; dispatcher, package boundaries,
+GPU proof parsing, DXMT harness, runtime-package and Apple private-import
+boundaries passed their Python groups. The app compiled, its signatures and
+runtime copy were verified, and the development image passed disk-image
+verification. Only source is eligible for the separately checked Git upload.
+Apple's evaluation payload is absent from the app and development image.
+
+## Historical validation
+
+Build 56/V14 preceded this engine work. It completed Automatic/DXMT tuning,
+publisher startup feedback and idle packaging checks without changing its
+runtime. Its serial run passed 639 Rust unit and 7 integration tests, with
+3 existing unit tests ignored; focused results included 35 graphics,
+29 Swift preference, 128 Swift startup and 42 Python checks. Its app signature,
+development image and packaged Core were checked. These are historical build
+results, not acceptance of the new candidate.
+
+The September independent MoltenVK candidate enumerated devices but did not
+establish a Direct3D path. The earlier stock DXVK/MoltenVK combination failed
+its device requirements. KosmicKrisp remains a separate experimental candidate;
+it is not the driver used for the successful hybrid results above. Earlier
+metadata/download and source-feasibility observations do not override actual
+mapped-library/render evidence.
+
+Real publisher sign-in, install/play/relaunch, fullscreen, input, sound and
+performance remain for the user's [manual checks](NEXT_MANUAL_TESTS.md). No
+claim is made that all graphics work or all launchers are finished.

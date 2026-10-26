@@ -9,7 +9,7 @@ APP="$BUILD_ROOT/Caskrun.app"
 case "${CASKRUN_PACKAGE_RUNTIME_VARIANT:-native-apps}" in
   steam) RUNTIME="$PROJECT_ROOT/.build/steam-wine-runtime-dev" ;;
   native-apps)
-    NATIVE_RUNTIME_NAME="${CASKRUN_PACKAGE_NATIVE_RUNTIME_NAME:-native-text-wine-runtime-dev-v14}"
+    NATIVE_RUNTIME_NAME="${CASKRUN_PACKAGE_NATIVE_RUNTIME_NAME:-native-text-wine-runtime-dev-v15}"
     case "$NATIVE_RUNTIME_NAME" in
       ''|.*|*/*) print -u2 "Invalid native runtime package name."; exit 64 ;;
     esac

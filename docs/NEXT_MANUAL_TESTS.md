@@ -1,6 +1,6 @@
 # Next manual checks
 
-The completion pass leaves store and game launches to the user. Source and
+The 26 October engine pass leaves store and game launches to the user. Source and
 fixture checks do not replace these checks. Keep raw logs and bottle backups
 private; use the allowlisted diagnostic report for sharing.
 
@@ -16,7 +16,16 @@ private; use the allowlisted diagnostic report for sharing.
    MetalFX spatial, reopen details and confirm both saved. Automatic must stay
    selected. Reset tuning; it must still stay Automatic. Repeat with manual
    DXMT. A running bottle must refuse changes without stopping the game.
-4. Play, exit, close/reopen the app window and relaunch. Check image quality,
+4. In a separate DirectX 9 test bottle, check Automatic's explanation at an
+   idle launch. Complete unmixed imports may choose verified hybrid DXVK;
+   unknown/mixed evidence should keep WineD3D. Also test an explicit DXVK choice
+   and reopening the inspector. Keep D3D8/12 titles outside this DXVK check.
+5. With all bottle apps stopped, enable MSync on a supported engine. Confirm it
+   stays saved after closing/reopening details and restarting Caskrun; changing
+   the renderer or DXMT tuning must preserve it. A running bottle must refuse
+   a mode change without stopping the game. Repeat with MSync off. Compare the
+   same game/scene before drawing any performance conclusion; off is default.
+6. Play, exit, close/reopen the app window and relaunch. Check image quality,
    sound, microphone if used, controller input and saves. Frame pacing and
    spatial scaling do not guarantee higher FPS; compare in the same scene.
    High Resolution is independent and can affect DPI-aware apps differently.
@@ -27,6 +36,10 @@ private; use the allowlisted diagnostic report for sharing.
   window and reopen from the Dock. Check one correct Dock identity and native
   copy/paste. Red-close of Caskrun must preserve the session; full Quit must
   stop only its owned apps. Save work before testing full Quit.
+- Repeat Steam's window/Dock/Quit cycle with each renderer being tested, and
+  with MSync off/on only after a full bottle stop. DXMT reopen must retain its
+  selected renderer and saved tuning; a submitted show request alone does not
+  prove the window became usable.
 - EA: after a normal client update, Open should retain Starting/Waiting
   feedback even when its client moved into a numbered folder. An installed
   game's Play request must stay in the selected bottle. Review any agreements
@@ -38,9 +51,13 @@ private; use the allowlisted diagnostic report for sharing.
 
 ## Engine limits
 
-DXVK, D3DMetal, MSync, temporal scaling and frame generation are not enabled by
-this build. Their engine work is listed in [backend status](GRAPHICS_BACKEND_STATUS.md).
-Do not expect those names in the informational list to act as switches.
+DXVK and MSync controls require their exact reviewed engine; source or probe
+results alone do not make them available in an older installed app. D3DMetal
+remains unavailable after its private factory probe failed. D3D12, temporal
+scaling and frame generation have no working path established by this pass.
+See [backend status](GRAPHICS_BACKEND_STATUS.md). MSync's unsupported mixed wait
+objects and Vulkan feature limits can affect individual games; retain a known
+working setting and record the first failing stage when testing alternatives.
 
 Earlier API results and the narrow R.E.P.O. user result remain recorded in
 [launcher validation](LAUNCHER_VALIDATION.md). This checklist does not claim

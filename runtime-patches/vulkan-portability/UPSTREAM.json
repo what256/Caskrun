@@ -1,0 +1,11 @@
+{
+  "upstream": "https://github.com/metalsharp/DXVK-MacOS",
+  "release_tag": "v3.1-macos1.0",
+  "tag_object": "cd8853f5797754cdb101464b472ae90da4585dff",
+  "commit": "bd8921a3db6c4928f5b34672791121f7c14e38c2",
+  "file": "patches/wine-vulkan-portability.patch",
+  "source_archive_sha256": "292764b48fb57fcecdce33606acb3d2c8351b00efc117162a589eceebce8200f",
+  "patch_sha256": "555fad8796196118400e04eeb69fbfd4888fb91d11ab846b5b877d2cd0c76044",
+  "license": "zlib/libpng (upstream notice retained); resulting Wine file remains LGPL-2.1-or-later",
+  "scope": "host Vulkan portability instance enumeration only; does not alter device feature bits or guarantee renderer compatibility"
+}

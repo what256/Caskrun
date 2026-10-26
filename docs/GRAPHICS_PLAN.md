@@ -1,12 +1,31 @@
 # Graphics compatibility path
 
-_Research began 23 September 2026; later gates and app integration are recorded below. Current user-led game results are scoped to the title and setup tested; they do not establish general compatibility._
+_Research began 23 September 2026. Current status is updated 26 October; the
+dated research sections below retain historical observations and plans._
 
-Caskrun's default remains WineD3D in its independently built Wine 11.0 engine. Caskrun additionally exposes verified, optional DXMT and its frame target and MetalFX spatial scaling controls. Original x64/x86 API matrices passed, and a later user-led R.E.P.O. launch worked with DXMT after WineD3D device creation failed. Sustained gameplay, displayed frame rate, controllers and image quality remain separate validation steps. See [app integration](DXMT_APP_INTEGRATION.md) and [optional-control evidence](DXMT_OPTIONS.md). The older Vulkan experiments below remain separate from the bundled path.
+Caskrun retains WineD3D as its conservative fallback and optional verified DXMT
+with frame target/MetalFX spatial controls. The current coordinated candidate
+also supplies a separately pinned hybrid DXVK view and an original MSync port.
+All four D3D9/D3D11 x86/x64 GPU cells passed through the optimized Core, saved
+DXVK selection and packaged dispatcher, with mapped-module identity, readback,
+presentation, lifecycle, immutable prefix DLLs and refused busy edits. MSync's
+off/on WineD3D/DXMT matrix passed 296 checks and remains off by default. Existing
+manual choices and the Collection/Discover layout are preserved.
 
-An [isolated full Wine/Vulkan candidate](VULKAN_CANDIDATE.md) has since passed fresh-bottle x64 and x86 Vulkan device enumeration after relocation and removal of its build tree. It remains outside the app and DMG. Direct3D translation and game rendering remain unverified, so the current bundled WineD3D path is unchanged.
+D3D11's per-architecture result is 242 checks, 56 readback pixels and 14 Present
+calls; D3D9's is 154 checks, 24 readback pixels and 6 Present calls. D3D8 remains
+Wine's implementation, and the hybrid establishes no D3D12 or universal game
+support. D3DMetal's accepted official private input failed its factory gate and
+is unavailable; host-ABI compatibility remains unresolved. No new installed
+artifact or game result is implied. See [backend status](GRAPHICS_BACKEND_STATUS.md),
+[Vulkan evidence](VULKAN_CANDIDATE.md), [app integration](DXMT_APP_INTEGRATION.md)
+and [manual checks](NEXT_MANUAL_TESTS.md).
 
-## Isolated Vulkan and Direct3D probe, 23 September 2026
+The historical sections below explain earlier failures and the path to DXMT.
+Their uses of “current,” “next” or “unavailable” refer to their dated snapshots,
+not the current candidate. Historical tables are preserved as evidence.
+
+## Historical isolated Vulkan and Direct3D probe — 23 September 2026
 
 An ignored, disposable prototype at `.build/graphics-probe/` shows that the missing Vulkan layer can be **built for the existing x86_64 Wine 11 runtime on Apple Silicon**, but does not show that Direct3D works. The packaged `.build/Caskrun.app`, installed applications, source runtime, and build scripts were not changed. The test used an APFS clone of the independent development Wine runtime with only locally built Wine Vulkan modules and upstream Vulkan components overlaid. The clone and test bottle were moved to macOS Trash after preserving evidence; this was not a release package.
 
@@ -22,7 +41,7 @@ Even after a correct portability-enumeration fix, the device's reported Vulkan 1
 
 The traces, executables, self-authored C probes, build logs, wrapper snapshot, and notices are under `.build/graphics-probe/evidence/`. Reusable build artifacts and upstream archives remain under the same ignored probe directory, now about 416 MB rather than 3.8 GB. Pinned official download SHA-256 values are `f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e` (MoltenVK tar) and `40565b4a724aadc4433fa4e010b4b23916d9b1f1baeee64e17186db94f54e608` (DXVK tar). Loader and Headers source commits are `a9e72c66d5cb79911eb9a9063bf4016dd0a3a123` and `8864cdc896bbc2a9b6eb36b3218fc9ef57908d77`. License copies are in `evidence/licenses/`: Wine is LGPL-2.1-or-later; Vulkan Loader mostly Apache-2.0 with permissive exceptions; Headers Apache-2.0/MIT; MoltenVK Apache-2.0; DXVK zlib. Distribution would require a full dependency and notice review.
 
-### Integration contract for the next renderer experiment
+### Historical integration contract for the next renderer experiment
 
 1. Rebuild the **whole** independent Wine runtime against pinned x86_64 Vulkan Loader and MoltenVK development files. Stage matching x86_64 Unix modules and Windows PE DLLs, and preserve Wine's separate 32-bit PE path. Do not graft the prototype's two modules into a shipped Wine build without a full rebuild and smoke suite.
 2. Put `libvulkan.1.dylib`, `libMoltenVK.dylib`, and its unchanged portability ICD JSON inside the runtime. Resolve their absolute paths from the runtime's own location when launching, then set `DYLD_FALLBACK_LIBRARY_PATH` and `VK_DRIVER_FILES` only inside the Wine entrypoint. The successful probe used no caller graphics environment overrides. Verify Mach-O architectures, deployment target, linkage, relocation, signatures, hashes, and license notices after packaging.
@@ -32,7 +51,7 @@ At the initial Vulkan snapshot, initialized bottles were bound to the bundled ru
 
 The separate [DXMT upstream build guide](https://github.com/3Shain/dxmt/blob/main/docs/DEVELOPMENT.md) is a plausible next D3D10/11 experiment because it targets Metal directly and avoids this Vulkan device limit. Its documented Wine cross-build requires **Meson 1.3+**, **LLVM 15 exactly with x86_64 headers and static libraries**, Xcode 16+, Wine 8+ build files, and a Windows cross-compiler. At that initial review, the Meson/Ninja/LLVM toolchain and DXMT probes were not staged; the later gates below record their completed build and API tests. The separately published [DXMT license](https://github.com/3Shain/dxmt/blob/main/LICENSE) is LGPL-2.1-or-later and credits Feifan He **for CodeWeavers**. Review that upstream provenance against the project's no-CrossOver-code requirement before including it. If approved, pin a DXMT source revision and toolchain, build x64 PE DLLs plus its x64 Unix library in ignored `.build/`, and run the same device/frame/visual tests; 32-bit PE DLLs are a separate build and depend on the x64 Unix library.
 
-### DXMT gate 1, measured: the engine hides what it must export — 8 October 2026
+### Historical DXMT gate 1: the engine hides what it must export — 8 October 2026
 
 The compatibility plan recorded that DXMT needs exported Wine `winemac` APIs. That
 is now measured against this project's own engine rather than taken from a
@@ -79,7 +98,7 @@ Building from that public, separately licensed repository is distinct from
 copying anything out of an installed CrossOver, which stays forbidden. This is an
 engineering and documentation judgement, not legal advice.
 
-### DXMT gate 2: initial missing Apple component — resolved
+### Historical DXMT gate 2: initial missing Apple component — resolved
 
 The toolchain is now staged inside the ignored build directory: Meson 1.11.2 and
 Ninja 1.13.2 in a project-local virtual environment, and LLVM 15.0.7 built from
@@ -108,7 +127,7 @@ It was subsequently installed through Apple's `xcodebuild -downloadComponent
 MetalToolchain`, and both x64 and x86 DXMT builds completed. Reusable build
 inputs remain isolated under ignored `.build/`.
 
-### DXMT gate 3: managed Wine 11 surfaces and real Direct3D APIs
+### Historical DXMT gate 3: managed Wine 11 surfaces and real Direct3D APIs
 
 The first candidate passed hardware device creation, clear pixels and the
 original shader triangle before aborting at Metal-view creation for an HWND.
@@ -129,7 +148,7 @@ candidate. Visible screen composition, real games and safe app-facing runtime
 selection/migration remain gates; the current app and user bottles are unchanged.
 High Resolution remains optional and off by default.
 
-### WineD3D OpenGL follow-up
+### Historical WineD3D OpenGL follow-up
 
 The stable independent Wine runtime already loads Apple's OpenGL framework through its x86_64 `winemac.so`; its `SONAME_LIBGL` configure check concerns the X11 GL library and is not the missing macOS graphics path. A fresh disposable bottle using that unchanged runtime reported `GL_VERSION: "4.1 Metal - 90.5"` on Apple M5 Pro. [Apple says OpenGL on Apple Silicon reaches 4.1](https://developer.apple.com/videos/play/wwdc2020/10631/). WineD3D reported a maximum D3D feature level of **9_3 (`0x9300`)**. Its [Wine 11 `feature_level_from_caps()` source](https://gitlab.winehq.org/wine/wine/-/blob/wine-11.0/dlls/wined3d/adapter_gl.c) requires OpenGL 3.2, shader model 4, `ARB_sampler_objects`, and `ARB_polygon_offset_clamp` for level 10_0. The measured extension list contains the sampler extension but not either `ARB_polygon_offset_clamp` or `EXT_polygon_offset_clamp`; Wine's source treats the latter as an alternative spelling. Both supported `WINE_D3D_CONFIG` choices, `shader_backend=glsl` and `shader_backend=glsl-vkd3d`, still reported 9_3 and failed the original 10_0/11_0 device request with `0x80004005`. Thus a clean configure or shader-backend switch cannot raise this Wine/OpenGL combination to D3D 10_0/11_0 on this machine.
 
@@ -137,13 +156,13 @@ A new self-authored x64 D3D11 probe **did create a 9_3 device** (`S_OK`). It cle
 
 The next credible D3D10/11 route remains an independently sourced Metal translator such as DXMT, subject to the build and provenance gates above. WineD3D's 9_3 path can be tested for older titles, but it should not be advertised as modern D3D11 support.
 
-## Candidate upstream components
+## Historical candidate upstream components
 
 1. **Direct3D 8–11 through DXVK and MoltenVK.** [DXVK](https://github.com/doitsujin/dxvk) translates those Direct3D versions to Vulkan; [MoltenVK](https://github.com/KhronosGroup/MoltenVK) provides a Vulkan portability implementation over Metal on macOS. MoltenVK implements a Vulkan subset, so API coverage and game results must be measured. Caskrun first needs a relocatable x86_64 Vulkan loader/MoltenVK package and a Wine build that can see it, followed by separately sourced DXVK DLLs and per-bottle overrides. Pin source, hashes, notices, and matching architectures before any bundle change.
 2. **Direct3D 10/11 through DXMT.** The separately published [DXMT source](https://github.com/3Shain/dxmt) targets Wine on macOS and Metal directly. Its [build guide](https://github.com/3Shain/dxmt/blob/main/docs/DEVELOPMENT.md) currently calls for Meson, LLVM 15, Xcode 16+, Wine 8+, and a Windows cross-compiler for a Wine build. A pinned build with project-local Meson/Ninja and x86_64 LLVM 15 is now packaged separately and passes the original Direct3D API gates described above. App integration and game checks remain separate.
 3. **Direct3D 12 is a separate gate.** [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) is a Vulkan-based candidate, but this Wine/MoltenVK combination has no measured D3D12 support here. Apple's D3DMetal is another possible path only after its distribution terms are reviewed for this open-source project. Do not label either option available in the UI on current evidence.
 
-## Validation order
+## Historical validation order
 
 - Build a relocatable x86_64 Vulkan smoke package in ignored `.build/` and prove a Vulkan device is visible from a fresh Caskrun bottle without caller library overrides. Preserve the present WineD3D package until the new one passes.
 - Install one independently sourced renderer into a disposable bottle, verify that a self-authored Direct3D test actually uses it, and capture output, version, graphics device, and failures. Test 32-bit and 64-bit paths separately.
@@ -152,7 +171,7 @@ The next credible D3D10/11 route remains an independently sourced Metal translat
 
 This graphics work is required before Caskrun can approach CrossOver-style game compatibility. Every renderer and game needs its own evidence and license review; a launcher opening is not a game test.
 
-### Optional app integration, 8 October 2026
+### Historical optional app integration — 8 October 2026
 
 The development app now offers Automatic (WineD3D), WineD3D and verified DXMT
 in the bottle inspector. A switchable package retains the original default
@@ -163,7 +182,7 @@ shutdown proofs and pre-Wine record rollback are bottle-scoped. See
 unvalidated; other backends and synchronization remain unavailable. High
 Resolution remains optional and off by default.
 
-### Optional DXMT presentation controls
+### Historical optional DXMT presentation controls
 
 The bottle inspector also provides an application-controlled/default frame
 target or a bounded FPS target and optional 1.25×, 1.5× or 2× MetalFX spatial

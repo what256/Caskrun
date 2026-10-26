@@ -82,6 +82,17 @@ struct BottlePreferencesTests {
                "manual DXMT cannot silently fall back")
         expect(!BottleGraphicsContract.accepts(selected: "auto", effective: "other", dxmtAvailable: true),
                "unknown engine values are refused")
+        expect(BottleGraphicsContract.accepts(selected: "auto", effective: "dxvk", dxmtAvailable: false, dxvkAvailable: true),
+               "a verified automatic DXVK decision is retained")
+        expect(!BottleGraphicsContract.accepts(selected: "auto", effective: "dxvk", dxmtAvailable: true, dxvkAvailable: false),
+               "DXMT availability cannot authorize automatic DXVK")
+        expect(!BottleGraphicsContract.accepts(selected: "dxvk", effective: "dxmt", dxmtAvailable: true, dxvkAvailable: true),
+               "manual DXVK cannot silently change to DXMT")
+        expect(BottleGraphicsContract.automaticDescription(reason: "d3d9-detected").contains("DXVK"),
+               "DirectX 9 decisions use the correct renderer description")
+        expect(BottleGraphicsContract.rendererName("dxvk") == "DXVK", "DXVK has its own visible name")
+        expect(!BottleGraphicsContract.canTuneDXMT(selected: "auto", effective: "dxvk", dxmtAvailable: true),
+               "DXVK does not expose inactive DXMT tuning")
         expect(BottleGraphicsContract.automaticDescription(reason: "d3d11-detected").contains("DXMT"),
                "automatic evidence is explained without exposing local paths")
         expect(BottleGraphicsContract.canTuneDXMT(selected: "auto", effective: "dxmt", dxmtAvailable: true),

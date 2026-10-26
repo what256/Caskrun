@@ -81,9 +81,15 @@ pub(super) const STEAM_DOCK_REOPEN_WINE_11_IDENTITY: &str =
 pub(super) const GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY: &str =
     "sha256:398d08ea874ad53c8c8f6519e291a990f9d598dde0dfebc88fb149fe6d6c1c54";
 
+// Complete signed package with the retained native controls and independent
+// Vulkan/DXVK/MSync components. Approval requires the final complete-tree
+// attestation; per-component receipts alone cannot grant migration or launch.
+pub(super) const GRAPHICS_COMPONENTS_WINE_11_IDENTITY: &str =
+    "sha256:2850553486175ba0326c5d4f84ea45f3fb37a5210c6830e77d7bea5ca8f97a0e";
+
 // Shared exact-package approval for shutdown. This does not grant switchable
 // graphics capabilities or bypass any migration's launcher and idle gates.
-pub(super) const REVIEWED_RUNTIME_IDENTITIES: [&str; 14] = [
+pub(super) const REVIEWED_RUNTIME_IDENTITIES: [&str; 15] = [
     TLS_WINE_11_IDENTITY,
     STEAM_WINE_11_IDENTITY,
     NATIVE_WINE_11_IDENTITY,
@@ -98,6 +104,7 @@ pub(super) const REVIEWED_RUNTIME_IDENTITIES: [&str; 14] = [
     STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
     STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
     GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
+    GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
 ];
 
 pub(super) fn is_reviewed_runtime(identity: &str) -> bool {
@@ -132,6 +139,7 @@ pub(super) fn is_reviewed_switchable_runtime(identity: &str) -> bool {
             | STEAM_CLIENT_QUIT_WINE_11_IDENTITY
             | STEAM_DOCK_REOPEN_WINE_11_IDENTITY
             | GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY
+            | GRAPHICS_COMPONENTS_WINE_11_IDENTITY
     )
 }
 
@@ -325,7 +333,22 @@ const STEAM_TO_GUARDED_STEAM_DOCK_REOPEN_POLICY: MigrationPolicy<'static> = Migr
     verify_launcher_pe: true,
 };
 
-const STEAM_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 25] = [
+// Direct exact-package transitions retain the predecessor-specific gates.
+const TLS_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: TLS_WINE_11_IDENTITY,
+    approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+    backup_suffix: "tls-to-graphics-components",
+    verify_launcher_pe: true,
+};
+
+const STEAM_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: STEAM_WINE_11_IDENTITY,
+    approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+    backup_suffix: "steam-to-graphics-components",
+    verify_launcher_pe: true,
+};
+
+const STEAM_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 27] = [
     &TLS_TO_STEAM_POLICY,
     &STEAM_TO_NATIVE_POLICY,
     &TLS_TO_NATIVE_POLICY,
@@ -351,6 +374,8 @@ const STEAM_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 25] = [
     &STEAM_TO_STEAM_DOCK_REOPEN_POLICY,
     &TLS_TO_GUARDED_STEAM_DOCK_REOPEN_POLICY,
     &STEAM_TO_GUARDED_STEAM_DOCK_REOPEN_POLICY,
+    &TLS_TO_GRAPHICS_COMPONENTS_POLICY,
+    &STEAM_TO_GRAPHICS_COMPONENTS_POLICY,
 ];
 
 const NATIVE_TO_SWITCHABLE_POLICY: MigrationPolicy<'static> = MigrationPolicy {
@@ -836,7 +861,96 @@ const STEAM_DOCK_REOPEN_TO_GUARDED_STEAM_DOCK_REOPEN_POLICY: MigrationPolicy<'st
         verify_launcher_pe: false,
     };
 
-const BUNDLED_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 66] = [
+// Direct exact-package transitions retain the predecessor-specific gates.
+const NATIVE_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: NATIVE_WINE_11_IDENTITY,
+    approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+    backup_suffix: "native-to-graphics-components",
+    verify_launcher_pe: false,
+};
+
+const SWITCHABLE_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: SWITCHABLE_WINE_11_IDENTITY,
+    approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+    backup_suffix: "switchable-to-graphics-components",
+    verify_launcher_pe: false,
+};
+
+const NATIVE_TEXT_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+    approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+    backup_suffix: "native-text-editing-to-graphics-components",
+    verify_launcher_pe: false,
+};
+
+const REFINED_NATIVE_TEXT_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> =
+    MigrationPolicy {
+        previous: REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+        approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+        backup_suffix: "refined-native-ui-to-graphics-components",
+        verify_launcher_pe: false,
+    };
+
+const BOUNDED_NATIVE_UI_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
+    approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+    backup_suffix: "bounded-native-ui-to-graphics-components",
+    verify_launcher_pe: false,
+};
+
+const BUNDLED_STEAM_UI_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+    approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+    backup_suffix: "bundled-steam-ui-to-graphics-components",
+    verify_launcher_pe: false,
+};
+
+const SINGLE_STEAM_UI_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: SINGLE_STEAM_UI_WINE_11_IDENTITY,
+    approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+    backup_suffix: "single-steam-ui-to-graphics-components",
+    verify_launcher_pe: false,
+};
+
+const CAPTURED_TEXT_CONTEXT_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> =
+    MigrationPolicy {
+        previous: CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY,
+        approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+        backup_suffix: "captured-text-context-to-graphics-components",
+        verify_launcher_pe: false,
+    };
+
+const RECOGNIZED_TEXT_POPUP_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> =
+    MigrationPolicy {
+        previous: RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY,
+        approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+        backup_suffix: "recognized-text-popup-to-graphics-components",
+        verify_launcher_pe: false,
+    };
+
+const STEAM_CLIENT_QUIT_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
+    approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+    backup_suffix: "steam-client-quit-to-graphics-components",
+    verify_launcher_pe: false,
+};
+
+const STEAM_DOCK_REOPEN_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> = MigrationPolicy {
+    previous: STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
+    approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+    backup_suffix: "steam-dock-reopen-to-graphics-components",
+    verify_launcher_pe: false,
+};
+
+const GUARDED_STEAM_DOCK_REOPEN_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'static> =
+    MigrationPolicy {
+        previous: GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
+        approved: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+        backup_suffix: "guarded-steam-dock-reopen-to-graphics-components",
+        verify_launcher_pe: false,
+    };
+
+const BUNDLED_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 78] = [
     &NATIVE_TO_SWITCHABLE_POLICY,
     &NATIVE_TO_NATIVE_TEXT_EDITING_POLICY,
     &SWITCHABLE_TO_NATIVE_TEXT_EDITING_POLICY,
@@ -903,6 +1017,18 @@ const BUNDLED_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 66] = [
     &RECOGNIZED_TEXT_POPUP_TO_GUARDED_STEAM_DOCK_REOPEN_POLICY,
     &STEAM_CLIENT_QUIT_TO_GUARDED_STEAM_DOCK_REOPEN_POLICY,
     &STEAM_DOCK_REOPEN_TO_GUARDED_STEAM_DOCK_REOPEN_POLICY,
+    &NATIVE_TO_GRAPHICS_COMPONENTS_POLICY,
+    &SWITCHABLE_TO_GRAPHICS_COMPONENTS_POLICY,
+    &NATIVE_TEXT_TO_GRAPHICS_COMPONENTS_POLICY,
+    &REFINED_NATIVE_TEXT_TO_GRAPHICS_COMPONENTS_POLICY,
+    &BOUNDED_NATIVE_UI_TO_GRAPHICS_COMPONENTS_POLICY,
+    &BUNDLED_STEAM_UI_TO_GRAPHICS_COMPONENTS_POLICY,
+    &SINGLE_STEAM_UI_TO_GRAPHICS_COMPONENTS_POLICY,
+    &CAPTURED_TEXT_CONTEXT_TO_GRAPHICS_COMPONENTS_POLICY,
+    &RECOGNIZED_TEXT_POPUP_TO_GRAPHICS_COMPONENTS_POLICY,
+    &STEAM_CLIENT_QUIT_TO_GRAPHICS_COMPONENTS_POLICY,
+    &STEAM_DOCK_REOPEN_TO_GRAPHICS_COMPONENTS_POLICY,
+    &GUARDED_STEAM_DOCK_REOPEN_TO_GRAPHICS_COMPONENTS_POLICY,
 ];
 
 /// Returned only after the old record has been backed up and replaced. The
@@ -1731,6 +1857,22 @@ mod tests {
         }
     }
 
+    fn test_graphics_components_policy<'a>(source: &str, approved: &'a str) -> MigrationPolicy<'a> {
+        let policy = STEAM_RUNTIME_POLICIES
+            .iter()
+            .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .find(|edge| {
+                edge.previous == source && edge.approved == GRAPHICS_COMPONENTS_WINE_11_IDENTITY
+            })
+            .expect("unexpected graphics components predecessor");
+        MigrationPolicy {
+            previous: policy.previous,
+            approved,
+            backup_suffix: policy.backup_suffix,
+            verify_launcher_pe: policy.verify_launcher_pe,
+        }
+    }
+
     fn test_guarded_steam_dock_reopen_policy<'a>(
         source: &str,
         approved: &'a str,
@@ -1738,6 +1880,7 @@ mod tests {
         let policy = STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .find(|edge| {
                 edge.previous == source
                     && edge.approved == GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY
@@ -1755,6 +1898,7 @@ mod tests {
         let policy = STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .find(|edge| {
                 edge.previous == source && edge.approved == STEAM_DOCK_REOPEN_WINE_11_IDENTITY
             })
@@ -1771,6 +1915,7 @@ mod tests {
         let policy = STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .find(|edge| {
                 edge.previous == source && edge.approved == STEAM_CLIENT_QUIT_WINE_11_IDENTITY
             })
@@ -3479,6 +3624,7 @@ mod tests {
         let all: Vec<_> = STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .filter(|edge| {
                 edge.approved != CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY
                     && edge.approved != RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY
@@ -3564,6 +3710,7 @@ mod tests {
         let all: Vec<_> = STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .filter(|edge| {
                 edge.approved != CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY
                     && edge.approved != RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY
@@ -3659,6 +3806,7 @@ mod tests {
         let all: Vec<_> = STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .filter(|edge| {
                 edge.approved != CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY
                     && edge.approved != RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY
@@ -3771,6 +3919,7 @@ mod tests {
         let all: Vec<_> = STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .filter(|edge| {
                 edge.approved != CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY
                     && edge.approved != RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY
@@ -3964,6 +4113,7 @@ mod tests {
         for old in STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .filter(|edge| {
                 edge.approved != SINGLE_STEAM_UI_WINE_11_IDENTITY
                     && edge.approved != CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY
@@ -4517,6 +4667,7 @@ mod tests {
             SINGLE_STEAM_UI_WINE_11_IDENTITY,
             CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY,
             RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY,
+            GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
         ] {
             let fixture = Fixture::new();
             prepare_text_editing_fixture(&fixture);
@@ -4539,6 +4690,8 @@ mod tests {
                 test_captured_text_context_policy(previous, &approved)
             } else if previous == CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY {
                 test_recognized_text_popup_policy(previous, &approved)
+            } else if previous == GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY {
+                test_graphics_components_policy(previous, &approved)
             } else {
                 test_steam_client_quit_policy(previous, &approved)
             };
@@ -4634,6 +4787,7 @@ mod tests {
             SINGLE_STEAM_UI_WINE_11_IDENTITY,
             CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY,
             RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY,
+            GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
         ] {
             let fixture = Fixture::new();
             prepare_text_editing_fixture(&fixture);
@@ -4658,6 +4812,8 @@ mod tests {
                 test_captured_text_context_policy(previous, &approved)
             } else if previous == CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY {
                 test_recognized_text_popup_policy(previous, &approved)
+            } else if previous == GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY {
+                test_graphics_components_policy(previous, &approved)
             } else {
                 test_steam_client_quit_policy(previous, &approved)
             };
@@ -4742,6 +4898,7 @@ mod tests {
         let all: Vec<_> = STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .filter(|edge| {
                 edge.approved != STEAM_DOCK_REOPEN_WINE_11_IDENTITY
                     && edge.approved != GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY
@@ -4904,6 +5061,7 @@ mod tests {
         for old in STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .filter(|edge| {
                 edge.approved != CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY
                     && edge.approved != RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY
@@ -5168,6 +5326,7 @@ mod tests {
         assert_eq!(
             STEAM_RUNTIME_POLICIES
                 .iter()
+                .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
                 .filter(|edge| {
                     edge.approved != STEAM_DOCK_REOPEN_WINE_11_IDENTITY
                         && edge.approved != GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY
@@ -5178,6 +5337,7 @@ mod tests {
         assert_eq!(
             BUNDLED_RUNTIME_POLICIES
                 .iter()
+                .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
                 .filter(|edge| {
                     edge.approved != STEAM_DOCK_REOPEN_WINE_11_IDENTITY
                         && edge.approved != GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY
@@ -5213,6 +5373,7 @@ mod tests {
         for old in STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .filter(|edge| {
                 edge.approved != STEAM_CLIENT_QUIT_WINE_11_IDENTITY
                     && edge.approved != STEAM_DOCK_REOPEN_WINE_11_IDENTITY
@@ -5502,13 +5663,17 @@ mod tests {
         assert_eq!(
             REVIEWED_RUNTIME_IDENTITIES
                 .into_iter()
-                .filter(|identity| *identity != GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY)
+                .filter(|identity| {
+                    *identity != GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY
+                        && *identity != GRAPHICS_COMPONENTS_WINE_11_IDENTITY
+                })
                 .count(),
             13
         );
         assert_eq!(
             STEAM_RUNTIME_POLICIES
                 .iter()
+                .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
                 .filter(|edge| edge.approved != GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY)
                 .count(),
             23
@@ -5516,6 +5681,7 @@ mod tests {
         assert_eq!(
             BUNDLED_RUNTIME_POLICIES
                 .iter()
+                .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
                 .filter(|edge| edge.approved != GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY)
                 .count(),
             55
@@ -5526,6 +5692,7 @@ mod tests {
         let all: Vec<_> = STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .filter(|edge| edge.approved != GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY)
             .collect();
         let mut suffixes = std::collections::BTreeSet::new();
@@ -5574,6 +5741,7 @@ mod tests {
         for old in STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .filter(|edge| {
                 edge.approved != STEAM_DOCK_REOPEN_WINE_11_IDENTITY
                     && edge.approved != GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY
@@ -5916,15 +6084,34 @@ mod tests {
                 previous
             ));
         }
-        assert_eq!(REVIEWED_RUNTIME_IDENTITIES.len(), 14);
-        assert_eq!(STEAM_RUNTIME_POLICIES.len(), 25);
-        assert_eq!(BUNDLED_RUNTIME_POLICIES.len(), 66);
+        assert_eq!(
+            REVIEWED_RUNTIME_IDENTITIES
+                .into_iter()
+                .filter(|identity| *identity != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
+                .count(),
+            14
+        );
+        assert_eq!(
+            STEAM_RUNTIME_POLICIES
+                .iter()
+                .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
+                .count(),
+            25
+        );
+        assert_eq!(
+            BUNDLED_RUNTIME_POLICIES
+                .iter()
+                .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
+                .count(),
+            66
+        );
         assert!(is_reviewed_switchable_runtime(
             GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY
         ));
         let all: Vec<_> = STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .collect();
         let mut suffixes = std::collections::BTreeSet::new();
         let mut endpoints = std::collections::BTreeSet::new();
@@ -5973,6 +6160,7 @@ mod tests {
         for old in STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
             .filter(|edge| edge.approved != GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY)
         {
             let fixture = Fixture::new();
@@ -6045,6 +6233,241 @@ mod tests {
                     source,
                     if invalid == "package" {
                         GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY
+                    } else {
+                        &approved
+                    },
+                );
+                let dir = bottle_dir(&fixture.home, &fixture.bottle_id).unwrap();
+                match invalid {
+                    "catalog" => fs::remove_file(dir.join("catalog-attempt.json")).unwrap(),
+                    "launcher" => {
+                        save_json(&dir.join("launchers.json"), &Vec::<Launcher>::new()).unwrap()
+                    }
+                    "pe" => fs::write(&fixture.steam, vec![b'x'; 100 * 1024]).unwrap(),
+                    "package" => {}
+                    _ => unreachable!(),
+                }
+                let original = fs::read(&fixture.record_path).unwrap();
+                let contents = bottle_contents(&fixture);
+                let result = fixture.migrate(&policy);
+                if matches!(invalid, "catalog" | "launcher") {
+                    assert!(result.unwrap().is_none(), "{source} {invalid}");
+                } else {
+                    assert!(result.is_err(), "{source} {invalid}");
+                }
+                assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+                assert_eq!(bottle_contents(&fixture), contents);
+                assert!(!fixture.skipped_switchable_backup(&policy).exists());
+            }
+        }
+    }
+    #[test]
+    fn graphics_components_policies_pin_fourteen_direct_edges_and_preserve_all_older_approvals() {
+        let digest = GRAPHICS_COMPONENTS_WINE_11_IDENTITY
+            .strip_prefix("sha256:")
+            .expect("Graphics components package needs its measured complete-tree identity");
+        assert_eq!(digest.len(), 64);
+        assert!(
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        let expected = [
+            (TLS_WINE_11_IDENTITY, "tls-to-graphics-components"),
+            (STEAM_WINE_11_IDENTITY, "steam-to-graphics-components"),
+            (NATIVE_WINE_11_IDENTITY, "native-to-graphics-components"),
+            (
+                SWITCHABLE_WINE_11_IDENTITY,
+                "switchable-to-graphics-components",
+            ),
+            (
+                NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+                "native-text-editing-to-graphics-components",
+            ),
+            (
+                REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+                "refined-native-ui-to-graphics-components",
+            ),
+            (
+                BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
+                "bounded-native-ui-to-graphics-components",
+            ),
+            (
+                BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+                "bundled-steam-ui-to-graphics-components",
+            ),
+            (
+                SINGLE_STEAM_UI_WINE_11_IDENTITY,
+                "single-steam-ui-to-graphics-components",
+            ),
+            (
+                CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY,
+                "captured-text-context-to-graphics-components",
+            ),
+            (
+                RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY,
+                "recognized-text-popup-to-graphics-components",
+            ),
+            (
+                STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
+                "steam-client-quit-to-graphics-components",
+            ),
+            (
+                STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
+                "steam-dock-reopen-to-graphics-components",
+            ),
+            (
+                GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
+                "guarded-steam-dock-reopen-to-graphics-components",
+            ),
+        ];
+        for (previous, suffix) in expected {
+            let candidates: Vec<_> = STEAM_RUNTIME_POLICIES
+                .iter()
+                .chain(BUNDLED_RUNTIME_POLICIES.iter())
+                .filter(|edge| {
+                    edge.previous == previous
+                        && edge.approved == GRAPHICS_COMPONENTS_WINE_11_IDENTITY
+                })
+                .collect();
+            assert_eq!(candidates.len(), 1);
+            let edge = candidates[0];
+            assert_eq!(edge.backup_suffix, suffix);
+            let steam = matches!(previous, TLS_WINE_11_IDENTITY | STEAM_WINE_11_IDENTITY);
+            assert_eq!(edge.verify_launcher_pe, steam);
+            let policies = if steam {
+                &STEAM_RUNTIME_POLICIES[..]
+            } else {
+                &BUNDLED_RUNTIME_POLICIES[..]
+            };
+            assert!(
+                policies
+                    .iter()
+                    .any(|candidate| std::ptr::eq(*candidate, *edge))
+            );
+            assert!(has_reviewed_direct_transition(
+                previous,
+                GRAPHICS_COMPONENTS_WINE_11_IDENTITY
+            ));
+            assert!(!has_reviewed_direct_transition(
+                GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+                previous
+            ));
+        }
+        assert_eq!(REVIEWED_RUNTIME_IDENTITIES.len(), 15);
+        assert_eq!(STEAM_RUNTIME_POLICIES.len(), 27);
+        assert_eq!(BUNDLED_RUNTIME_POLICIES.len(), 78);
+        assert!(is_reviewed_switchable_runtime(
+            GRAPHICS_COMPONENTS_WINE_11_IDENTITY
+        ));
+        let all: Vec<_> = STEAM_RUNTIME_POLICIES
+            .iter()
+            .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .collect();
+        assert_eq!(all.len(), 105);
+        assert_eq!(
+            all.iter()
+                .filter(|edge| edge.approved == GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
+                .count(),
+            14
+        );
+        let mut suffixes = std::collections::BTreeSet::new();
+        let mut endpoints = std::collections::BTreeSet::new();
+        for edge in all {
+            assert!(suffixes.insert(edge.backup_suffix));
+            assert!(endpoints.insert((edge.previous, edge.approved)));
+        }
+    }
+
+    #[test]
+    fn graphics_components_direct_edges_select_fourteen_predecessors_without_chaining() {
+        let sources: Vec<_> = REVIEWED_RUNTIME_IDENTITIES
+            .into_iter()
+            .filter(|identity| *identity != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
+            .collect();
+        assert_eq!(sources.len(), 14);
+        assert_direct_edges_without_chaining(
+            &sources,
+            GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+            test_graphics_components_policy,
+        );
+    }
+
+    #[test]
+    fn graphics_components_edges_preserve_all_91_historical_destinations() {
+        for old in STEAM_RUNTIME_POLICIES
+            .iter()
+            .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .filter(|edge| edge.approved != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
+        {
+            let fixture = Fixture::new();
+            prepare_text_editing_fixture(&fixture);
+            fixture.set_predecessor(old.previous);
+            let original = fs::read(&fixture.record_path).unwrap();
+            let contents = bottle_contents(&fixture);
+            let approved = fixture.approved_identity();
+            let historical = MigrationPolicy {
+                previous: old.previous,
+                approved: &approved,
+                backup_suffix: old.backup_suffix,
+                verify_launcher_pe: old.verify_launcher_pe,
+            };
+            let successor =
+                test_graphics_components_policy(old.previous, GRAPHICS_COMPONENTS_WINE_11_IDENTITY);
+            let policies = [&successor, &historical];
+            let rollback = {
+                let _lock = lock_bottle(&fixture.home, &fixture.bottle_id).unwrap();
+                if matches!(old.previous, TLS_WINE_11_IDENTITY | STEAM_WINE_11_IDENTITY) {
+                    migrate_with_policies(
+                        &fixture.home,
+                        &fixture.bottle_id,
+                        &fixture.wine,
+                        &fixture.steam.canonicalize().unwrap(),
+                        &policies,
+                        Duration::from_secs(2),
+                    )
+                } else {
+                    migrate_bundled_with_policies(
+                        &fixture.home,
+                        &fixture.bottle_id,
+                        &fixture.wine,
+                        &policies,
+                        Duration::from_secs(2),
+                    )
+                }
+            }
+            .unwrap()
+            .unwrap();
+            assert_eq!(bottle_contents(&fixture), contents);
+            assert_eq!(
+                fs::read(fixture.skipped_switchable_backup(&historical)).unwrap(),
+                original
+            );
+            assert!(!fixture.skipped_switchable_backup(&successor).exists());
+            assert_eq!(
+                fs::read_dir(fixture.home.join("runtime-migration-backups"))
+                    .unwrap()
+                    .count(),
+                1
+            );
+            rollback.restore().unwrap();
+            assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+            assert_eq!(bottle_contents(&fixture), contents);
+        }
+    }
+
+    #[test]
+    fn graphics_components_legacy_edges_require_recipe_pe_and_exact_destination() {
+        for source in [TLS_WINE_11_IDENTITY, STEAM_WINE_11_IDENTITY] {
+            for invalid in ["catalog", "launcher", "pe", "package"] {
+                let fixture = Fixture::new();
+                prepare_text_editing_fixture(&fixture);
+                fixture.set_predecessor(source);
+                let approved = fixture.approved_identity();
+                let policy = test_graphics_components_policy(
+                    source,
+                    if invalid == "package" {
+                        GRAPHICS_COMPONENTS_WINE_11_IDENTITY
                     } else {
                         &approved
                     },

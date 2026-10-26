@@ -11,6 +11,52 @@ The changes in `runtime-patches/wine-*.patch` and `runtime-patches/dxmt-*.patch`
 
 Caskrun's MIT license does not replace these licenses or upstream copyright notices. Original MIT-licensed helpers and plist templates in the same directory are not Wine or DXMT source.
 
+## MSync and Vulkan engine work
+
+The original Wine 11 MSync port starts from the public generic
+[marzent/wine-msync](https://github.com/marzent/wine-msync/tree/be7f3e2ff40670018cd7aa9042bad487fa7a83ec)
+development patch, under **LGPL-2.1-or-later**. Its original author notices,
+pinned input, exact upstream license and local port notes are retained in
+[`runtime-patches/msync/`](runtime-patches/msync/README.md). The complete local
+corresponding change is [`wine-11.0-msync.patch`](runtime-patches/wine-11.0-msync.patch).
+No CX-specific variant or installed application source is used.
+
+The candidate's hybrid DXVK modules retain their separate **Zlib** licenses:
+
+- [Metalsharp DXVK-MacOS](https://github.com/metalsharp/DXVK-MacOS/tree/bd8921a3db6c4928f5b34672791121f7c14e38c2),
+  tag `v3.1-macos1.0`, revision `bd8921a3db6c4928f5b34672791121f7c14e38c2`,
+  supplies D3D10/11. The original Wine Vulkan portability patch records its
+  public source attribution in
+  [`runtime-patches/vulkan-portability/UPSTREAM.json`](runtime-patches/vulkan-portability/UPSTREAM.json)
+  and retains the [upstream license](runtime-patches/vulkan-portability/DXVK-MACOS-LICENSE).
+- [tairasu D9VK](https://github.com/tairasu/d9vk/tree/7437b616f05bc678d2ff4b4b75832f9cbddeed75),
+  version `1.10.3-20230507-async-macos`, revision
+  `7437b616f05bc678d2ff4b4b75832f9cbddeed75`, supplies source-built D3D9.
+  D3D8 remains Wine's original implementation.
+
+Official [MoltenVK 1.4.2](https://github.com/KhronosGroup/MoltenVK/tree/db66022459ffb663aa2b50f6b018bc2e124f5edf)
+and the [Vulkan Loader](https://github.com/KhronosGroup/Vulkan-Loader/tree/fa218055ff4948b159f31d43f800c808a13d51df)
+retain **Apache-2.0** and their supplied component notices. The official SDK
+1.4.363.0 input, architectures, hashes and source provenance are pinned by the
+development tooling. Candidate packages retain each translator's separate
+source/build provenance and notices; binaries/build caches are excluded from
+this Git repository. Wine's builtin DOS-stub marker is the only change made to
+the selected translator PE files; original/runtime hashes are recorded and the
+altered packaging is disclosed. Caskrun's MIT license does not relicense these
+components or approve binary distribution.
+
+The source-built D3D9 component also retains the supplied GCC 16.1 GPLv3 text
+and GCC Runtime Library Exception, MinGW-w64 14.0 ZPL notices/authors, and
+winpthreads notices. Their original texts and public source hashes accompany
+the local runtime under `source/d9vk/`; the translator's own license is Zlib.
+
+Apple's Game Porting Toolkit/D3DMetal evaluation component is **separately
+licensed by Apple**. A privately supplied official image was inspected and
+staged only after the actual local evaluation terms were accepted. Its payload,
+license/download account data and raw diagnostics are not included in this
+source repository or the shared engine. No working D3DMetal capability or
+redistribution permission is implied by staging it.
+
 ## AnyPS5 patches
 
 `runtime-patches/anyps5/` contains modifications to the separately licensed [AnyPS5 project](https://github.com/boykopovar/AnyPS5/tree/8b393b6e9a8ade9188d4f74a0293e0efd9828597), under **GPL-2.0-only**. Its exact upstream license is included as [COPYING](runtime-patches/anyps5/COPYING). The [patch notes](runtime-patches/anyps5/README.md) preserve the source revision, application order and validation limits. No AnyPS5 binaries, console firmware, keys or game files are included in this source repository.

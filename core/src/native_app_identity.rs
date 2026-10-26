@@ -113,7 +113,9 @@ fn runtime_inputs(
     let runtime_root = select_runtime(&root)?
         .canonicalize()
         .map_err(|e| format!("Selected native runtime view is unavailable: {e}"))?;
-    if runtime_root != root.join("runtime") && runtime_root != root.join("components/dxmt/runtime")
+    if runtime_root != root.join("runtime")
+        && runtime_root != root.join("components/dxmt/runtime")
+        && runtime_root != root.join("components/dxvk/runtime")
     {
         return Err("Native app identity requires a direct packaged runtime view".into());
     }
@@ -667,7 +669,8 @@ fn prepare_with_inputs_mode(
     let canonical = image.canonicalize().map_err(|e| e.to_string())?;
     let inside_prefix = canonical.starts_with(&prefix);
     let direct_view = inputs.runtime_root == inputs.root.join("runtime")
-        || inputs.runtime_root == inputs.root.join("components/dxmt/runtime");
+        || inputs.runtime_root == inputs.root.join("components/dxmt/runtime")
+        || inputs.runtime_root == inputs.root.join("components/dxvk/runtime");
     let inside_runtime = direct_view && canonical.starts_with(inputs.runtime_root.join("lib/wine"));
     let selected_initial = initial.is_some_and(|initial| {
         initial.is_absolute() && initial.canonicalize().is_ok_and(|path| path == canonical)
@@ -1420,7 +1423,11 @@ mod tests {
         fs::write(root.join("native-default-icon.png"), &png).unwrap();
         fs::write(root.join("native-default-icon.icns"), &icns).unwrap();
         fs::write(root.join("native-default-rendered.png"), &png).unwrap();
-        for view in ["runtime", "components/dxmt/runtime"] {
+        for view in [
+            "runtime",
+            "components/dxmt/runtime",
+            "components/dxvk/runtime",
+        ] {
             let unix = root.join(view).join("lib/wine/x86_64-unix");
             fs::create_dir_all(&unix).unwrap();
             fs::write(unix.join("WindowsApp"), &fixture.inputs.loader).unwrap();
@@ -1440,28 +1447,31 @@ mod tests {
         let (fixture, wine) = runtime_views_fixture();
         let dir = bottle_dir(&fixture.home, &fixture.bottle.id).unwrap();
         let base = runtime_inputs_for_bottle(&dir, &wine).unwrap().unwrap();
-        let dxmt = runtime_inputs(&wine, |root| Ok(root.join("components/dxmt/runtime")))
-            .unwrap()
-            .unwrap();
         assert_eq!(base.runtime_root, fixture.inputs.root.join("runtime"));
-        assert_eq!(
-            dxmt.runtime_root,
-            fixture.inputs.root.join("components/dxmt/runtime")
-        );
-        assert_eq!(base.loader, dxmt.loader);
-        assert_ne!(
-            fs::metadata(&base.ntdll).unwrap().ino(),
-            fs::metadata(&dxmt.ntdll).unwrap().ino()
-        );
-        let image = fixture.image("Game.exe");
-        let loader =
-            prepare_with_inputs(&fixture.home, &fixture.bottle.id, &image, None, &dxmt).unwrap();
-        let proof = validate_shutdown_alias_with_inputs(&dir, &loader, &dxmt)
-            .unwrap()
-            .unwrap();
-        assert_eq!(proof.ntdll_path, dxmt.ntdll);
-        assert_eq!(proof.ntdll_ino, fs::metadata(&dxmt.ntdll).unwrap().ino());
-        assert_ne!(proof.ntdll_ino, fs::metadata(&base.ntdll).unwrap().ino());
+        for view in ["components/dxmt/runtime", "components/dxvk/runtime"] {
+            let selected = runtime_inputs(&wine, |root| Ok(root.join(view)))
+                .unwrap()
+                .unwrap();
+            assert_eq!(selected.runtime_root, fixture.inputs.root.join(view));
+            assert_eq!(base.loader, selected.loader);
+            assert_ne!(
+                fs::metadata(&base.ntdll).unwrap().ino(),
+                fs::metadata(&selected.ntdll).unwrap().ino()
+            );
+            let image = fixture.image("Game.exe");
+            let loader =
+                prepare_with_inputs(&fixture.home, &fixture.bottle.id, &image, None, &selected)
+                    .unwrap();
+            let proof = validate_shutdown_alias_with_inputs(&dir, &loader, &selected)
+                .unwrap()
+                .unwrap();
+            assert_eq!(proof.ntdll_path, selected.ntdll);
+            assert_eq!(
+                proof.ntdll_ino,
+                fs::metadata(&selected.ntdll).unwrap().ino()
+            );
+            assert_ne!(proof.ntdll_ino, fs::metadata(&base.ntdll).unwrap().ino());
+        }
     }
 
     #[test]

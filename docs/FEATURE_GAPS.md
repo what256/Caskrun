@@ -33,6 +33,21 @@ Forest Green's recurring Steam missing/not-logged-in error remains unresolved:
 its game reports Steam API initialization failure while Steam is signed in
 and connected. See [current results](LAUNCHER_VALIDATION.md).
 
+### Current graphics gates — 26 October 2026
+
+| Area | Current evidence | Remaining gate |
+| --- | --- | --- |
+| DXMT / hybrid DXVK | The existing inspector adds package-gated DXVK without a layout redesign. The coherent hybrid's four x86/x64 D3D9/D3D11 GPU cells also passed through the actual optimized Core, saved selection and packaged dispatcher. Readback, Present/lifecycle, mapped-image identity and unchanged prefix graphics files were checked; busy changes preserved preferences and runtime pin. Automatic can use complete unmixed D3D9 evidence, while existing manual choices remain authoritative. | User store/game testing, image quality and measured performance. D3D8 stays on Wine; D3D12 and missing Vulkan features remain separate limits. |
+| MSync | An original protocol-932 Wine 11 port passed 296 off/on x86/x64 WineD3D/DXMT synchronization checks. Its bottle switch is opt-in and off by default; saved settings are preserved with renderer/tuning and require idle changes. | Real-game behavior/performance and unsupported mixed wait objects. |
+| D3DMetal | Official input was privately staged after its actual evaluation license was accepted, but the factory probe failed before device creation. No capability is enabled from staging alone. | Independent host-interface compatibility and device/render/lifecycle validation; local evaluation does not approve distribution. |
+
+See [backend status](GRAPHICS_BACKEND_STATUS.md), [current integration](DXMT_APP_INTEGRATION.md)
+and [manual checks](NEXT_MANUAL_TESTS.md). The 26 October full Rust run passed
+659 unit and 7 integration tests, with 3 existing unit tests ignored. This
+records candidate/source checks; no storefront/game was launched in the engine
+pass and no new artifact installation is claimed. The older graphics cells
+below retain their original audit date and do not describe these new gates.
+
 ## Historical audit and acceptance backlog
 
 The sections below retain earlier audit wording and unfinished acceptance

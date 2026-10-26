@@ -4,20 +4,31 @@ import Foundation
 /// manual choice must be returned unchanged. Never display an unavailable
 /// automatic DXMT selection as a confirmed result.
 enum BottleGraphicsContract {
-    static func accepts(selected: String, effective: String, dxmtAvailable: Bool) -> Bool {
-        guard ["auto", "wined3d", "dxmt"].contains(selected),
-              ["wined3d", "dxmt"].contains(effective) else { return false }
+    static func accepts(selected: String, effective: String, dxmtAvailable: Bool, dxvkAvailable: Bool = false) -> Bool {
+        guard ["auto", "wined3d", "dxmt", "dxvk"].contains(selected),
+              ["wined3d", "dxmt", "dxvk"].contains(effective) else { return false }
         return (selected == "auto" || selected == effective)
             && (selected != "auto" || effective != "dxmt" || dxmtAvailable)
+            && (selected != "auto" || effective != "dxvk" || dxvkAvailable)
     }
 
     static func automaticDescription(reason: String?) -> String {
         switch reason {
         case "d3d11-detected": "Automatic chose DXMT from the installed apps’ DirectX 10/11 imports."
+        case "d3d9-detected": "Automatic chose DXVK from the installed apps’ DirectX 9 imports."
         case "mixed-or-incomplete-evidence": "Automatic kept WineD3D because graphics requirements are mixed or could not be read completely."
-        case "engine-unavailable": "Automatic kept WineD3D because the verified DXMT engine is unavailable."
-        case "no-supported-evidence": "Automatic kept WineD3D; no supported DirectX 10/11 requirement was detected."
+        case "engine-unavailable": "Automatic kept WineD3D because the required graphics component is unavailable."
+        case "no-supported-evidence": "Automatic kept WineD3D; no supported DirectX requirement was detected."
         default: "Automatic checks installed apps at the next idle launch."
+        }
+    }
+
+    static func rendererName(_ value: String) -> String {
+        switch value {
+        case "dxmt": "DXMT"
+        case "dxvk": "DXVK"
+        case "wined3d": "WineD3D"
+        default: "Automatic"
         }
     }
 

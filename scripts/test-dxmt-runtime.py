@@ -246,9 +246,13 @@ def candidate_receipt(runtime: Path, build: Path) -> dict:
     if len(components) != 1 or components[0].get("status") != "built" or not re.fullmatch(r"[a-f0-9]{40}", components[0].get("revision", "")):
         raise HarnessError("The candidate does not record one independently built DXMT revision")
     switchable = value.get("layout") == "switchable-v1"
-    if switchable and (value.get("default_backend") != "wined3d" or value.get("backend_roots") != {
-            "wined3d": "runtime", "dxmt": "components/dxmt/runtime"}):
-        raise HarnessError("The candidate has an unknown switchable runtime layout")
+    if switchable:
+        roots = value.get("backend_roots")
+        allowed = {"wined3d": "runtime", "dxmt": "components/dxmt/runtime", "dxvk": "components/dxvk/runtime"}
+        if (value.get("default_backend") != "wined3d" or not isinstance(roots, dict)
+                or not {"wined3d", "dxmt"}.issubset(roots)
+                or any(allowed.get(key) != path for key, path in roots.items())):
+            raise HarnessError("The candidate has an unknown switchable runtime layout")
     if value.get("layout") is not None and not switchable:
         raise HarnessError("The candidate has an unknown runtime layout")
     expected, mapped, mapped_hashes, baseline, baseline_mapped = {}, {}, {}, {}, {}

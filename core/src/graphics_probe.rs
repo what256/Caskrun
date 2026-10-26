@@ -37,6 +37,7 @@ pub(crate) struct Probe {
     pub uses_vulkan: bool,
     pub uses_opengl: bool,
     pub uses_d3d9: bool,
+    pub uses_d3d8: bool,
     pub has_64_bit_executable: bool,
     pub has_x86_executable: bool,
     pub has_arm64_executable: bool,
@@ -62,6 +63,23 @@ impl Probe {
             && !self.uses_vulkan
             && !self.uses_opengl
             && !self.uses_d3d9
+            && !self.uses_d3d8
+            && self.malformed_executables == 0
+            && !self.truncated
+            && !self.incomplete
+    }
+
+    /// D3D9 only. D3D8, mixed APIs and incomplete scans never promote a bottle.
+    pub(crate) fn supports_dxvk_d3d9(&self) -> bool {
+        self.uses_d3d9
+            && (self.has_64_bit_executable || self.has_x86_executable)
+            && !self.has_arm64_executable
+            && !self.has_unknown_architecture
+            && !self.uses_d3d11
+            && !self.uses_d3d12
+            && !self.uses_d3d8
+            && !self.uses_vulkan
+            && !self.uses_opengl
             && self.malformed_executables == 0
             && !self.truncated
             && !self.incomplete
@@ -76,7 +94,8 @@ impl Probe {
                 "d3d12.dll" | "d3d12core.dll" => self.uses_d3d12 = true,
                 "vulkan-1.dll" => self.uses_vulkan = true,
                 "opengl32.dll" => self.uses_opengl = true,
-                "d3d9.dll" | "d3d8.dll" => self.uses_d3d9 = true,
+                "d3d9.dll" => self.uses_d3d9 = true,
+                "d3d8.dll" => self.uses_d3d8 = true,
                 _ => {}
             }
         }
@@ -822,6 +841,42 @@ mod tests {
             }
         }
         bytes
+    }
+
+    #[test]
+    fn d3d9_auto_requires_complete_supported_architecture_and_unmixed_imports() {
+        for machine in [0x014c, 0x8664] {
+            for delayed in [false, true] {
+                let f = Fixture::new();
+                let imports = if delayed { vec![] } else { vec!["d3d9.dll"] };
+                let delays = if delayed { vec!["d3d9.dll"] } else { vec![] };
+                let probe =
+                    scan(&f.write("Game.exe", &pe(machine, &imports, &delays, false))).unwrap();
+                assert!(probe.supports_dxvk_d3d9());
+                assert!(!probe.supports_dxmt());
+            }
+        }
+        for imports in [
+            vec!["d3d8.dll"],
+            vec!["kernel32.dll"],
+            vec!["d3d9.dll", "d3d11.dll"],
+            vec!["d3d9.dll", "d3d12.dll"],
+            vec!["d3d9.dll", "vulkan-1.dll"],
+            vec!["d3d9.dll", "opengl32.dll"],
+        ] {
+            let f = Fixture::new();
+            assert!(
+                !scan(&f.write("Game.exe", &pe(0x8664, &imports, &[], false)))
+                    .unwrap()
+                    .supports_dxvk_d3d9()
+            );
+        }
+        let f = Fixture::new();
+        let path = f.write("Game.exe", &pe(0xaa64, &["d3d9.dll"], &[], false));
+        assert!(!scan(&path).unwrap().supports_dxvk_d3d9());
+        fs::write(&path, pe(0x8664, &["d3d9.dll"], &[], false)).unwrap();
+        f.write("Broken.exe", b"not a PE image");
+        assert!(!scan(&f.0).unwrap().supports_dxvk_d3d9());
     }
 
     #[test]

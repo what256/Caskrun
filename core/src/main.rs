@@ -2894,12 +2894,8 @@ fn configure_control_environment(
     ] {
         let _ = open_stable_directory(&path)?;
     }
-    let backend = match bottle_graphics::resolved_backend(dir)? {
-        bottle_graphics::Backend::Dxmt => "dxmt",
-        _ => "wined3d",
-    };
+    bottle_graphics::configure_control_launch(command, dir, wine)?;
     command
-        .env("CASKRUN_GRAPHICS_BACKEND", backend)
         .env("XDG_CONFIG_HOME", dir.join("xdg/config"))
         .env("XDG_DATA_HOME", dir.join("xdg/data"))
         .env("WINEPREFIX", dir.join("prefix"));
@@ -3473,6 +3469,8 @@ fn run() -> Result<(), String> {
             serde_json::to_value(bottle_graphics::bottle_graphics(&home, id)?),
         [command, id, backend] if command == "set-bottle-graphics" =>
             serde_json::to_value(bottle_graphics::set_bottle_graphics(&home, id, bottle_graphics::Backend::parse(backend)?)?),
+        [command, id, mode] if command == "set-bottle-msync" && (mode == "on" || mode == "off") =>
+            serde_json::to_value(bottle_graphics::set_bottle_msync(&home, id, mode == "on")?),
         [command, id, rate, scale] if command == "set-bottle-dxmt-options" =>
             serde_json::to_value(bottle_graphics::set_bottle_dxmt_options(&home, id,
                 rate.parse::<u16>().map_err(|_| "Frame rate must be a number")?,
@@ -3528,7 +3526,7 @@ fn run() -> Result<(), String> {
                 Path::new(path),
                 parse_wait_launch_options(options)?,
             )?),
-        _ => return Err("Usage: caskrun-core overview | status | probe-runtime | list | deleted | catalog-attempts | create <name> | install-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher | retry-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher <bottle-id> | rename <id> <name> | delete <id> | restore-deleted <id> | purge-deleted <id> | duplicate <id> [name] | export <id> <path.caskrun-bottle> | export-archive <id> <path.caskrun-backup> | import <path.caskrun-bottle> [name] | import-archive <path.caskrun-backup> [name] | import-crossover <bottle-folder> [name] | browser-games | add-browser-game <name> <https-url> | remove-browser-game <id> | rename-browser-game <id> <name> | publisher-games <id> | run-publisher-game <id> epic|gog|ea|ubisoft <game-id> | install-steam-game <id> <appid> | set-bottle-dxmt-options <id> <frame-rate> <spatial-scale> | steam-games <id> | run-steam-game <id> <appid> | initialize <id> | prefix-path <id> | apps <id> | installed-programs <id> | diagnostics <id> | rebuild-icons <id> | app-icon <bottle-id> <launcher-id> | bottle-icon <bottle-id> | bottle-notes <id> | set-bottle-notes <id> <text> | bottle-windows-version <id> | set-bottle-windows-version <id> default|win11|win10|win81|win8|win7|vista|winxp | bottle-resolution <id> | set-bottle-resolution <id> on|off | quit-all-bottles | quit-bottle <id> | open-uninstaller <id> | open-winecfg <id> | open-regedit <id> | open-controller-panel <id> | open-taskmgr <id> | open-internet-settings <id> | open-command-prompt <id> | simulate-reboot <id> | discover-apps <id> | logs <id> | read-log <id> <log-file-name> | add-app <id> <name> <file.exe> [--working-directory <drive_c/folder>] [-- <program-args...>] | set-app-visibility <id> <app-id> show|hide | set-app-arguments <id> <app-id> -- [arguments...] | rename-app <id> <app-id> <name> | run-app <id> <app-id> [-- <program-args...>] | launch <id> <file.exe|file.msi> [-- <program-args...>] | launch-wait <id> <file.exe|file.msi> [--quiet-msi] [--timeout-seconds 1..3600] [-- <program-args...>]".into()),
+        _ => return Err("Usage: caskrun-core overview | status | probe-runtime | list | deleted | catalog-attempts | create <name> | install-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher | retry-catalog steam|epic-games-store|gog-galaxy|battle-net|ea-app|ubisoft-connect|itch-io-app|rockstar-games-launcher <bottle-id> | rename <id> <name> | delete <id> | restore-deleted <id> | purge-deleted <id> | duplicate <id> [name] | export <id> <path.caskrun-bottle> | export-archive <id> <path.caskrun-backup> | import <path.caskrun-bottle> [name] | import-archive <path.caskrun-backup> [name] | import-crossover <bottle-folder> [name] | browser-games | add-browser-game <name> <https-url> | remove-browser-game <id> | rename-browser-game <id> <name> | publisher-games <id> | run-publisher-game <id> epic|gog|ea|ubisoft <game-id> | install-steam-game <id> <appid> | bottle-graphics <id> | set-bottle-graphics <id> auto|wined3d|dxmt|dxvk | set-bottle-msync <id> on|off | set-bottle-dxmt-options <id> <frame-rate> <spatial-scale> | steam-games <id> | run-steam-game <id> <appid> | initialize <id> | prefix-path <id> | apps <id> | installed-programs <id> | diagnostics <id> | rebuild-icons <id> | app-icon <bottle-id> <launcher-id> | bottle-icon <bottle-id> | bottle-notes <id> | set-bottle-notes <id> <text> | bottle-windows-version <id> | set-bottle-windows-version <id> default|win11|win10|win81|win8|win7|vista|winxp | bottle-resolution <id> | set-bottle-resolution <id> on|off | quit-all-bottles | quit-bottle <id> | open-uninstaller <id> | open-winecfg <id> | open-regedit <id> | open-controller-panel <id> | open-taskmgr <id> | open-internet-settings <id> | open-command-prompt <id> | simulate-reboot <id> | discover-apps <id> | logs <id> | read-log <id> <log-file-name> | add-app <id> <name> <file.exe> [--working-directory <drive_c/folder>] [-- <program-args...>] | set-app-visibility <id> <app-id> show|hide | set-app-arguments <id> <app-id> -- [arguments...] | rename-app <id> <app-id> <name> | run-app <id> <app-id> [-- <program-args...>] | launch <id> <file.exe|file.msi> [-- <program-args...>] | launch-wait <id> <file.exe|file.msi> [--quiet-msi] [--timeout-seconds 1..3600] [-- <program-args...>]".into()),
     }.map_err(|e| e.to_string())?;
     println!(
         "{}",

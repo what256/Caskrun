@@ -28,14 +28,33 @@ if [ "$command_name" != wineserver ]; then
       selected_backend=dxmt
       wine_root=$runtime_root/components/dxmt/runtime
       ;;
+    dxvk)
+      if [ ! -f "$runtime_root/dxvk-layout.txt" ] ||
+         [ "$(cat "$runtime_root/dxvk-layout.txt")" != caskrun-dxvk-view-v1 ]; then
+        printf 'This Windows engine does not include the DXVK graphics view.\n' >&2
+        exit 65
+      fi
+      selected_backend=dxvk
+      wine_root=$runtime_root/components/dxvk/runtime
+      # Every managed DXVK client uses the driver tested with this package.
+      # Never select an unrelated system ICD through an inherited variable.
+      unset VK_ICD_FILENAMES VK_ADD_DRIVER_FILES
+      VK_DRIVER_FILES=$runtime_root/components/dxvk/vulkan/icd.d/MoltenVK_icd.json
+      if [ ! -f "$VK_DRIVER_FILES" ]; then
+        printf 'The DXVK Vulkan driver configuration is missing.\n' >&2
+        exit 66
+      fi
+      export VK_DRIVER_FILES
+      ;;
     *) printf 'Unsupported Caskrun graphics backend.\n' >&2; exit 64 ;;
   esac
   # Native per-app bundles copy Wine's loader out of the runtime. Keep the
-  # library it loads in the selected view; accept only our two exact paths.
+  # library it loads in the selected view; accept only our exact view paths.
   case "${CASKRUN_NATIVE_NTDLL:-}" in
     '') ;;
     "$runtime_root/runtime/lib/wine/x86_64-unix/ntdll.so"|\
-    "$runtime_root/components/dxmt/runtime/lib/wine/x86_64-unix/ntdll.so")
+    "$runtime_root/components/dxmt/runtime/lib/wine/x86_64-unix/ntdll.so"|\
+    "$runtime_root/components/dxvk/runtime/lib/wine/x86_64-unix/ntdll.so")
       CASKRUN_NATIVE_NTDLL=$wine_root/lib/wine/x86_64-unix/ntdll.so
       export CASKRUN_NATIVE_NTDLL
       ;;
