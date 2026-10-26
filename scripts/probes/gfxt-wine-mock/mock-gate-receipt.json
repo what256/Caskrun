@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "scope": "owned Wine PE-to-Unix mock transport and actual Wine registry value",
+  "fixture_passed": true,
+  "checks": 7,
+  "native_pointers_returned": 0,
+  "apple_framework_present_at_pre_operation_gate": false,
+  "graphics_backend_implemented": false,
+  "game_compatibility_verified": false,
+  "owned_prefix_and_runtime_clone_removed_after_idle_check": true
+}

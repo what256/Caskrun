@@ -69,6 +69,12 @@ and the separately published NT calling-convention declarations identified in
 implementations are original adaptations of upstream Wine 11. No Apple binary,
 CrossOver implementation or private framework modification is included.
 
+The mock-only Wine GFXT transport probe uses partial interface declarations
+from [UTM's d3dmetal-native](https://github.com/utmapp/d3dmetal-native/tree/422df8736de0f371d5ecee71e04b3ed19c4a2183),
+copyright Turing Software LLC, under the included
+[MIT license](scripts/probes/gfxt-wine-mock/UTM-MIT-LICENSE). The probe does
+not include Apple's framework or implement a production graphics backend.
+
 ## AnyPS5 patches
 
 `runtime-patches/anyps5/` contains modifications to the separately licensed [AnyPS5 project](https://github.com/boykopovar/AnyPS5/tree/8b393b6e9a8ade9188d4f74a0293e0efd9828597), under **GPL-2.0-only**. Its exact upstream license is included as [COPYING](runtime-patches/anyps5/COPYING). The [patch notes](runtime-patches/anyps5/README.md) preserve the source revision, application order and validation limits. No AnyPS5 binaries, console firmware, keys or game files are included in this source repository.

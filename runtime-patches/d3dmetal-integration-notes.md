@@ -272,3 +272,17 @@ D3DMetal therefore remains unavailable in the packaged app. Enabling it still
 requires an actual combined factory/device/render/lifecycle pass. A local
 evaluation license acceptance does not authorize redistribution of Apple's
 component; its binaries, local receipts and raw diagnostics remain private.
+
+## Separate mock GFXT transport
+
+The original [Wine GFXT mock probe](../scripts/probes/gfxt-wine-mock/README.md)
+uses its own PE/Unix protocol and partial, attributed MIT-licensed UTM interface
+declarations. In an owned Wine prefix, seven checks passed, including reading a
+real Wine registry value, a negative-value case and releasing its own mock
+factory. The same process mapped the expected Wine and fixture images without
+loading Apple's framework or support library; no native object pointer crossed
+into PE code. The test runtime and prefix were removed after ownership checks.
+
+This verifies only a small transport and registry boundary. It does not
+implement the other host services, Windows graphics exports or COM proxies,
+and it does not establish D3DMetal, presentation or game compatibility.
