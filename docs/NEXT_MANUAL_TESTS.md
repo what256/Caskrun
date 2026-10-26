@@ -53,8 +53,12 @@ private; use the allowlisted diagnostic report for sharing.
 
 DXVK and MSync controls require their exact reviewed engine; source or probe
 results alone do not make them available in an older installed app. D3DMetal
-remains unavailable after its private factory probe failed. D3D12, temporal
-scaling and frame generation have no working path established by this pass.
+remains unavailable in Wine after its private factory probe failed, despite
+the separate native framework control passing. An isolated DXMT D3D12
+development DLL passed hardware clear and shader draw/readback, but is not
+included in the installed app; do not treat that experiment as a game-ready
+setting. Temporal scaling and frame generation remain unimplemented. See the
+[D3D12 experiment](D3D12_EXPERIMENT.md).
 See [backend status](GRAPHICS_BACKEND_STATUS.md). MSync's unsupported mixed wait
 objects and Vulkan feature limits can affect individual games; retain a known
 working setting and record the first failing stage when testing alternatives.

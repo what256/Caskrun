@@ -14,8 +14,9 @@ in this engine pass._
 | Automatic | Bounded complete PE import evidence can select verified DXMT for supported x64 Direct3D 10/11 or the verified hybrid DXVK view for unmixed x86/x64 Direct3D 9. Mixed, unknown or incomplete evidence retains WineD3D. Manual choices remain explicit. | Static imports cannot identify every dynamically loaded API or determine game compatibility. |
 | MSync | Original Wine 11 port of the public generic implementation, coordinated client/server protocol 932. Both retained WineD3D/DXMT views passed enabled/disabled x86/x64 synchronization probes. Opt-in, off by default. | Real-game behavior and measured performance; unsupported mixed wait objects remain a compatibility limit. |
 | High Resolution Mode | Existing optional Retina backing store and 96/192 DPI settings, with idle checks and rollback. | DPI-unaware apps can remain upscaled. Existing choices and defaults stay unchanged. |
-| D3DMetal | Official Apple input was privately staged after the actual license was accepted. Its native components loaded, but the isolated CreateDXGIFactory1 gate failed before device creation. Not selectable or included in the shared engine. | A compatible Wine host-interface path and successful independent API/render tests; distribution review remains separate. |
-| D3D12 / temporal scaling / frame generation | Not supplied by these validated paths. DXMT spatial scaling and frame targets do not add DLSS, temporal reconstruction or frame generation. | Separate implementation, provenance and API/game tests. |
+| D3DMetal | Official input passed a separate native host factory/device/256-pixel clear control. The Wine-host factory gate still fails; it is not selectable or included in the shared engine. | A compatible Wine host-interface path and successful Windows API/lifecycle tests; distribution review remains separate. |
+| D3D12 | Separate pinned DXMT development DLL passed original x64 hardware clear, shader draw/readback and patched presentation/resize/recreation probes. It is not in installed build 57 or Automatic. | Exact package/integration acceptance and title tests; this experimental pin lacks DXIL and many modern D3D12 features. See [experiment](D3D12_EXPERIMENT.md). |
+| Temporal scaling / frame generation | Not supplied by these paths. DXMT spatial scaling and frame targets do not add DLSS, temporal reconstruction or frame generation. | Separate implementation, provenance and API/game tests. |
 | Linux ntsync / fsync | No matching macOS kernel backend is supplied. | Linux kernel interfaces cannot be enabled by an environment toggle on macOS. |
 
 The existing Collection inspector layout is retained. DXVK appears only with
@@ -78,6 +79,13 @@ independent Wine host ABI can satisfy it is unresolved. The private payload,
 account/download data and raw diagnostics are excluded from source/public
 artifacts. License acceptance for local evaluation is not redistribution
 approval. No D3DMetal capability is advertised from a successful file import.
+
+A subsequent basic native host control passed factory/device creation and
+256/256 clear/readback pixels without modifying Apple's component. This
+isolates framework health from the still-unresolved Wine integration. A
+separate DXMT D3D12 development route also passed hardware clear and shader
+draw/readback in Wine. Neither result changes build 57's capabilities. See the
+[D3D12 development record](D3D12_EXPERIMENT.md) for source pins and limits.
 
 ## Local build 57 acceptance
 

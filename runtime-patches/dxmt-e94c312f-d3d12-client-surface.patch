@@ -1,0 +1,63 @@
+Use Caskrun's managed Wine 11 client surface for DXMT D3D12 presentation.
+
+Applies to public DXMT e94c312f5c054263acf261cfa109edf13e757587 after
+ dxmt-e94c312f-wine-11-win-data.patch and
+ dxmt-e94c312f-wine-11-client-surface.patch. Requires the matching original
+wine-11.0-dxmt-client-surface.patch already used by the reviewed runtime.
+
+Borrow the swapchain-owned opaque surface through the private D3D12
+queue method and prepare it while mutex_commit_ serializes presentation,
+immediately before layer synchronization and drawable encoding. This is
+the D3D12 equivalent of the existing D3D11 queued PrepareMetalView call.
+The queue never retains or asynchronously stores the opaque context;
+no public COM method or Wine/Winemetal export changes.
+
+Offered under DXMT's LGPL-2.1-or-later terms.
+
+--- a/src/d3d12/d3d12_device.hpp
++++ b/src/d3d12/d3d12_device.hpp
+@@ -56,7 +56,9 @@
+ 
+ class MTLD3D12CommandQueue : public ID3D12CommandQueue {
+ public:
+-  virtual HRESULT Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable, double after) = 0;
++  virtual HRESULT Present(
++      Presenter *presenter, WMT::Object native_view, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable, double after
++  ) = 0;
+ };
+ 
+ class MTLD3D12Resource : public ID3D12Resource {
+--- a/src/d3d12/d3d12_command_queue.cpp
++++ b/src/d3d12/d3d12_command_queue.cpp
+@@ -394,13 +394,19 @@
+   }
+ 
+   HRESULT
+-  Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable, double after) {
++  Present(
++      Presenter *presenter, WMT::Object native_view, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable, double after
++  ) {
+     auto scope = StartCommitting();
+     auto &cmdbuf = scope.inflight.cmdbuf;
+ 
+     auto g = reinterpret_cast<MTLD3D12Resource *>(backbuffer);
+     auto &view = g->texture->view(g->texture->fullView);
+ 
++    // The queue borrows the swapchain-owned surface for this synchronous call.
++    // Reactivation belongs under mutex_commit_, immediately before encoding,
++    // so another swapchain cannot make its surface current out of queue order.
++    WMT::PrepareMetalView(native_view);
+     auto state = presenter->synchronizeLayerProperties();
+     auto drawable = presenter->encodeCommands(
+         cmdbuf, view.texture, state.metadata,
+--- a/src/d3d12/d3d12_swapchain.cpp
++++ b/src/d3d12/d3d12_swapchain.cpp
+@@ -715,7 +715,7 @@
+     );
+ 
+     auto &backbuffer = backbuffers_[presentation_count_ % backbuffers_.size()];
+-    hr = queue_->Present(this->presenter.ptr(), backbuffer.ptr(), present_semaphore_, vsync_duration);
++    hr = queue_->Present(this->presenter.ptr(), native_view_, backbuffer.ptr(), present_semaphore_, vsync_duration);
+ 
+     presentation_count_ += 1;
+ 
