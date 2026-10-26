@@ -286,3 +286,18 @@ into PE code. The test runtime and prefix were removed after ownership checks.
 This verifies only a small transport and registry boundary. It does not
 implement the other host services, Windows graphics exports or COM proxies,
 and it does not establish D3DMetal, presentation or game compatibility.
+
+## Separate native-host control inside a Wine process
+
+The source-built [offscreen control](../scripts/probes/gfxt-wine-offscreen/README.md)
+uses its own PE/Unix transport and a restricted native host with simulated host
+services. A contained x64 test verified the selected Wine and fixture images
+before the operation. Its native host reported successful initialization,
+factory creation, adapter enumeration and a hardware adapter. The next
+source call was `D3D12CreateDevice`; no device result was recorded within
+60 seconds after the first mapping gate. This result does not identify the
+cause of the timeout, establish that Apple's device function was entered, or
+prove a Wine-hosted Windows graphics backend. No render, presentation or game
+result was obtained. The separately licensed Apple component and the reviewed
+runtime passed integrity checks afterward; the owned test prefix and socket
+were removed after ownership checks.
