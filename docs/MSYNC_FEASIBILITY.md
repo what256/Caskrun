@@ -1,17 +1,70 @@
 # MSync feasibility for Caskrun
 
-_Research snapshot: 23 September 2026. No MSync code was added to Caskrun's source or runtime._
+_Updated 26 October 2026. No MSync implementation is included in Caskrun's
+source, current runtime or installer._
 
 ## Current engine
 
-Caskrun's development engine is built from the independently downloaded [Wine 11.0 source archive](https://dl.winehq.org/wine/source/11.0/wine-11.0.tar.xz), pinned in `scripts/build-wine-steam-dev.sh` by SHA-512 `a2c3db14f8cf0d19927466805c8f17c68ee7e93d1196d1162dd2279af497c21ec611a63f7a9de59953bbdfdb44c87d7bf55373c6533224a5d54e434c29428d1b`. The local source tree has no `WINEMSYNC` switch or MSync implementation. Wine's existing in-process [server synchronization](https://gitlab.winehq.org/wine/wine/-/blob/wine-11.0/server/inproc_sync.c) uses Linux `/dev/ntsync` behind Linux-header and ioctl guards; that path is unavailable to this macOS build. Setting `WINEMSYNC=1` on the current engine would not add MSync.
+Caskrun's retained V14 package uses independently sourced
+[Wine 11.0](https://dl.winehq.org/wine/source/11.0/wine-11.0.tar.xz), with the
+source archive and original patches retained beside the runtime. Its NTDLL has
+no `WINEMSYNC` implementation. Wine 11's in-process synchronization path uses
+Linux `/dev/ntsync` and Linux ioctls; that does not supply a macOS backend.
+Setting `WINEMSYNC=1` cannot add one.
 
-## Public patch and provenance gate
+## Public implementation and provenance
 
-The public [wine-msync project](https://github.com/marzent/wine-msync) describes a Mach-semaphore based synchronization patch and [licenses it under LGPL-2.1](https://github.com/marzent/wine-msync/blob/main/LICENSE), explicitly welcoming open-source integration. The latest observed repository revision is [`be7f3e2ff40670018cd7aa9042bad487fa7a83ec`](https://github.com/marzent/wine-msync/commit/be7f3e2ff40670018cd7aa9042bad487fa7a83ec), dated 13 August 2024; its update labels the staging patch for Wine **9.15**, not 11.0. Its patch author identifies a `codeweavers.com` address, and the repository includes CX-specific variants. The LGPL license permits reuse under its terms, but the available provenance does not establish that importing this implementation meets Caskrun's separate no-CrossOver-code requirement in `AGENTS.md`.
+The independently published [wine-msync project](https://github.com/marzent/wine-msync)
+offers a Mach-semaphore synchronization implementation. It publishes separate
+`msync-devel.patch`, `msync-staging.patch`, `msync-cx22.patch` and
+`msync-cx23.patch` variants. The generic development patch targets upstream
+Wine; the CX-specific variants are distinct files and are not required merely
+to study or port the generic implementation.
 
-For that reason, the public patch was used only for a provenance review. It was **not applied, ported, compiled, bundled, or exposed in the UI**. The research checkout is ignored under `.build/msync-probe/`; no MSync code is tracked or included in the development DMG. We did not run a patch-compatibility test or runtime smoke, so Wine 11.0 compatibility and performance are unknown. The bottle controls correctly label MSync unavailable.
+Reviewed generic source is pinned to revision
+[`be7f3e2ff40670018cd7aa9042bad487fa7a83ec`](https://github.com/marzent/wine-msync/commit/be7f3e2ff40670018cd7aa9042bad487fa7a83ec):
 
-## What would make it shippable
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `msync-devel.patch` | 176111 | `ba20515c8c89b2035f887d2131b22f67222598ea2cd3ffa0219b31df4a67453b` |
+| `LICENSE` | 26526 | `20c17d8b8c48a600800dfd14f95d5cb9ff47066a9641ddeab48dc54aec96e331` |
 
-Use an implementation with independently established provenance, or design and implement a clean-room macOS synchronization path for Wine 11.0. Either route requires coordinated Wine client and wineserver changes, a fresh isolated runtime build, cross-process wait/signal/timeout/cancellation tests, x86 and x64 Windows test programs, and game launch/play/exit and performance regression tests. A verified idle-bottle migration is needed before replacing the engine for existing bottles. Only then can Caskrun consider automatic use or a selectable advanced control.
+The repository supplies LGPL 2.1 and its new source headers permit LGPL 2.1 or
+later. Its public author attribution includes CodeWeavers. That affiliation
+alone is not evidence of proprietary CrossOver code and is not a separate
+licensing barrier: Caskrun already uses independently licensed upstream Wine
+and DXMT contributions. The earlier research note treated that attribution
+too broadly. Any eventual integration must retain the actual source notices,
+license, pinned original patch, local modifications and corresponding source;
+it must not extract code or components from CrossOver's bundle.
+
+## Wine 11 port requirements
+
+The reviewed patch is dated August 2024 and changes 52 files, including NTDLL,
+Wine server objects and the client/server protocol. It adds a `get_msync_idx`
+object operation and new protocol requests. Wine 11 has since changed these
+interfaces: its object operations include `get_sync`, the signal operation has
+a reset argument, and its protocol version is 930. The current Linux
+in-process synchronization implementation is another path that a macOS port
+must preserve. This is a coordinated engine port, not an application setting.
+
+Before exposing an MSync choice:
+
+1. Adapt the generic implementation to the exact Wine 11 source and current
+   protocol/object lifecycle, retaining the ordinary server fallback. Do not
+   substitute a CX patch or claim a successful port from patch application.
+2. Build matching NTDLL, server and affected modules for both runtime views;
+   keep x86 and x64 Windows callers compatible with the same server. A partial
+   overlay would create an unreviewed protocol mixture.
+3. Verify cross-process events, semaphores, mutexes, wait-any/wait-all, timeouts,
+   cancellation, APC wakeups, abandoned mutexes, process exit and handle reuse
+   with original bounded fixtures. Include fallback and separate-prefix tests.
+4. Record a new exact runtime identity and an idle-only migration with rollback.
+   Keep a running bottle on one synchronization mode for its whole session.
+5. Test games and compare measured behavior/performance before assigning an
+   automatic policy or claiming an improvement. The upstream benchmarks are not
+   Caskrun measurements.
+
+This review performed bounded source reads only. It applied no patch, built no
+engine and launched no Windows process. The macOS synchronization controls
+remain unavailable until the engine and its validation exist.

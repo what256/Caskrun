@@ -2122,8 +2122,10 @@ final class CaskrunModel: ObservableObject {
     func setDXMTOptions(in bottle: Bottle, frameRate: UInt16, spatialScale: UInt16) {
         guard !isQuitting, !isLaunching, !isManagingBottle,
               !loadingBottleGraphics.contains(bottle.id),
-              let current = bottleGraphics[bottle.id], current.selected_backend == "dxmt",
-              current.dxmt_available, frameRate <= 240,
+              let current = bottleGraphics[bottle.id],
+              BottleGraphicsContract.canTuneDXMT(selected: current.selected_backend,
+                  effective: current.effective_backend, dxmtAvailable: current.dxmt_available),
+              frameRate <= 240,
               [100, 125, 150, 200].contains(spatialScale),
               spatialScale == 100 || current.dxmt_spatial_available else { return }
         guard sessionState(for: bottle).activity != .running, !isStoppingBottle(bottle.id) else {
@@ -4004,13 +4006,7 @@ struct CaskrunApp: App {
                         "program files/ubisoft/ubisoft game launcher/uplay.exe"].contains(String(program))
             }
             if game.store == "ea" {
-                let parts = program.split(separator: "/").map(String.init)
-                guard parts.count == 5 || parts.count == 6,
-                      ["program files", "program files (x86)"].contains(parts[0]),
-                      parts[1] == "electronic arts", parts[2] == "ea desktop",
-                      parts.suffix(2) == ["ea desktop", "eadesktop.exe"] else { return false }
-                return parts.count == 5 || (parts[3].split(separator: ".").count >= 2
-                    && parts[3].allSatisfy { $0.isASCII && ($0.isNumber || $0 == ".") })
+                return SteamStartup.isEAClientPath(launcher.path)
             }
             return game.store == "gog" && (program == "program files (x86)/gog galaxy/galaxyclient.exe" || program == "program files/gog galaxy/galaxyclient.exe")
         }
@@ -4679,7 +4675,7 @@ struct CaskrunApp: App {
                 }
                 Text("Saved for this bottle. Quit its apps before changing graphics; closing a window can leave them running.")
                     .font(.caption).foregroundStyle(.secondary)
-                if status.selected_backend == "dxmt" {
+                if status.effective_backend == "dxmt" {
                     DXMTOptionsView(status: status,
                         isBusy: model.isQuitting || model.isLaunching || model.isManagingBottle ||
                             model.loadingBottleGraphics.contains(bottle.id) ||

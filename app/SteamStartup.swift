@@ -143,6 +143,7 @@ enum SteamStartup {
 
     static func clientForLauncher(name: String, path: String, registeredSteam: Bool) -> Client? {
         if isSteamLauncher(name: name, path: path, registered: registeredSteam) { return .steam }
+        if isEAClientPath(path) { return .ea }
         let normalized = path.replacingOccurrences(of: "\\", with: "/").lowercased()
         let profileTail = Array(normalized.split(separator: "/").suffix(7))
         if profileTail.count == 7, profileTail[0] == "drive_c", profileTail[1] == "users",
@@ -154,7 +155,6 @@ enum SteamStartup {
                      "epic games/launcher/engine/binaries/win64/epicgameslauncher.exe"]),
             (.gog, ["gog galaxy/galaxyclient.exe"]),
             (.battleNet, ["battle.net/battle.net launcher.exe", "battle.net/battle.net.exe"]),
-            (.ea, ["electronic arts/ea desktop/ea desktop/eadesktop.exe"]),
             (.ubisoft, ["ubisoft/ubisoft game launcher/ubisoftconnect.exe", "ubisoft/ubisoft game launcher/uplay.exe"]),
             (.rockstar, ["rockstar games/launcher/launcher.exe"])
         ]
@@ -164,6 +164,44 @@ enum SteamStartup {
                     normalized.hasSuffix("/drive_c/program files (x86)/" + tail)
             }
         }?.0
+    }
+
+    /// A UI routing hint, not proof of a publisher executable. Core separately
+    /// checks the file, PE and same-bottle ownership before every launch. Keep
+    /// the numbered EA layout in step with publisher_install's version parser,
+    /// so a self-update does not silently remove the existing startup feedback.
+    static func isEAClientPath(_ path: String, prefixPath: String? = nil) -> Bool {
+        func components(_ value: String) -> [String]? {
+            guard value.hasPrefix("/"), value.utf8.count <= 4096,
+                  !value.contains("\\"),
+                  !value.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else { return nil }
+            let parts = value.dropFirst().split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            guard !parts.isEmpty, parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
+            return parts
+        }
+        guard let parts = components(path) else { return false }
+        let program: [String]
+        if let prefixPath {
+            guard let prefix = components(prefixPath), prefix.last == "prefix",
+                  parts.count > prefix.count + 1, Array(parts.prefix(prefix.count)) == prefix,
+                  parts[prefix.count] == "drive_c" else { return false }
+            program = Array(parts.dropFirst(prefix.count + 1)).map { $0.lowercased() }
+        } else {
+            let lower = parts.map { $0.lowercased() }
+            guard let drive = lower.lastIndex(of: "drive_c"), drive > 0,
+                  lower[drive - 1] == "prefix" else { return false }
+            program = Array(lower.dropFirst(drive + 1))
+        }
+        guard program.count == 5 || program.count == 6,
+              ["program files", "program files (x86)"].contains(program[0]),
+              program[1] == "electronic arts", program[2] == "ea desktop",
+              program.suffix(2) == ["ea desktop", "eadesktop.exe"] else { return false }
+        if program.count == 5 { return true }
+        let version = program[3]
+        let numbers = version.split(separator: ".", omittingEmptySubsequences: false)
+        return version.utf8.count <= 64 && (2...6).contains(numbers.count) && numbers.allSatisfy {
+            !$0.isEmpty && $0.utf8.allSatisfy { (48...57).contains($0) } && UInt32($0) != nil
+        }
     }
 
     /// Only the publisher's bootstrap phase vocabulary leaves this parser. No

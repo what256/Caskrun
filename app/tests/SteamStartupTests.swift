@@ -127,6 +127,39 @@ struct SteamStartupTests {
                "the catalog's stable itch bootstrap is recognized inside its Windows profile")
         expect(SteamStartup.clientForLauncher(name: "itch.io", path: "/example/AppData/Local/itch/itch-setup.exe", registeredSteam: false) == nil,
                "an arbitrary itch-like path is not a catalog client")
+        let eaPrefix = "/example/bottles/first/prefix"
+        let eaRoot = eaPrefix + "/drive_c/Program Files/Electronic Arts/EA Desktop/"
+        let eaTail = "/EA Desktop/EADesktop.exe"
+        expect(SteamStartup.isEAClientPath(eaRoot + "EA Desktop/EADesktop.exe", prefixPath: eaPrefix),
+               "the fixed EA client remains recognized in its bottle")
+        expect(SteamStartup.isEAClientPath(eaRoot.replacingOccurrences(of: "Program Files/", with: "Program Files (x86)/") + "13.2" + eaTail),
+               "the numbered EA client is recognized in the alternative reviewed root")
+        expect(SteamStartup.clientForLauncher(name: "My EA", path: eaRoot + "13.408.0.6000" + eaTail, registeredSteam: false) == .ea,
+               "a renamed and updated EA client retains the existing startup monitor")
+        expect(SteamStartup.isEAClientPath(eaRoot + "1.2.3.4.5.6" + eaTail),
+               "the Core version parser permits six unsigned components")
+        expect(SteamStartup.isEAClientPath(eaRoot + "4294967295.0" + eaTail),
+               "the maximum unsigned component matches the Core parser")
+        let version64 = String(repeating: "0", count: 61) + "1.2"
+        expect(SteamStartup.isEAClientPath(eaRoot + version64 + eaTail),
+               "the exact 64-byte version bound matches the Core parser")
+        for version in ["1", "1.2.3.4.5.6.7", "1..2", ".1.2", "1.2.", "4294967296.0",
+                        "-1.2", "+1.2", "1.2beta", "１.2", "1. 2", "0" + version64] {
+            expect(!SteamStartup.isEAClientPath(eaRoot + version + eaTail),
+                   "an unsupported EA version cannot acquire client startup behavior")
+        }
+        expect(!SteamStartup.isEAClientPath(eaRoot + "1.2" + eaTail,
+                                          prefixPath: "/example/bottles/other/prefix"),
+               "an explicitly selected other bottle cannot satisfy the EA path hint")
+        for path in ["relative/prefix/drive_c/Program Files/Electronic Arts/EA Desktop/1.2" + eaTail,
+                     eaRoot + "1.2/EA Desktop/Other.exe", eaRoot + "1.2/EA Desktop/EADesktop.exe.old",
+                     eaRoot + "1.2/../1.2" + eaTail, eaRoot + "./1.2" + eaTail,
+                     eaRoot + "/1.2" + eaTail, eaRoot + "1.2\n" + eaTail,
+                     eaRoot.replacingOccurrences(of: "Electronic Arts", with: "Another Publisher") + "1.2" + eaTail,
+                     eaRoot.replacingOccurrences(of: "/prefix/drive_c/", with: "/outside/") + "1.2" + eaTail] {
+            expect(!SteamStartup.isEAClientPath(path),
+                   "only a complete conventional EA client path receives the monitor")
+        }
         var info: [String: Any] = [kCGWindowOwnerPID as String: 10, kCGWindowLayer as String: 0,
                                   kCGWindowBounds as String: ["Width": 706, "Height": 438], kCGWindowAlpha as String: 1]
         expect(SteamStartup.onScreenWindow(info)?.onScreen == true,

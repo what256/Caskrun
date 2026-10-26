@@ -84,6 +84,16 @@ struct BottlePreferencesTests {
                "unknown engine values are refused")
         expect(BottleGraphicsContract.automaticDescription(reason: "d3d11-detected").contains("DXMT"),
                "automatic evidence is explained without exposing local paths")
+        expect(BottleGraphicsContract.canTuneDXMT(selected: "auto", effective: "dxmt", dxmtAvailable: true),
+               "automatic DXMT exposes its tuning without changing renderer selection")
+        expect(BottleGraphicsContract.canTuneDXMT(selected: "dxmt", effective: "dxmt", dxmtAvailable: true),
+               "manual DXMT keeps the same tuning controls")
+        expect(!BottleGraphicsContract.canTuneDXMT(selected: "auto", effective: "wined3d", dxmtAvailable: true),
+               "automatic WineD3D does not offer inactive DXMT controls")
+        expect(!BottleGraphicsContract.canTuneDXMT(selected: "auto", effective: "dxmt", dxmtAvailable: false),
+               "unavailable automatic DXMT cannot change tuning")
+        expect(!BottleGraphicsContract.canTuneDXMT(selected: "wined3d", effective: "dxmt", dxmtAvailable: true),
+               "inconsistent renderer status cannot enable tuning")
         print("Bottle preferences: \(checks) checks passed")
     }
 }

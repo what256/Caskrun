@@ -661,16 +661,15 @@ fn set_options_with_wine(
     validate_options(frame_rate, spatial_scale)?;
     let _lock = lock_bottle(home, id)?;
     let dir = bottle_dir(home, id)?;
-    let (mut preferences, original) = read_settings(&dir)?;
-    if preferences.backend != Backend::Dxmt {
-        return Err("Choose DXMT before changing its frame pacing or MetalFX options".into());
-    }
+    let OptionsUpdate {
+        preferences,
+        original,
+        automatic,
+    } = option_update(&dir, frame_rate, spatial_scale)?;
     let migration = runtime_migration::maybe_migrate_bundled_runtime(home, id, wine)?;
     let result = (|| {
         dxmt_support(&dir, wine)?;
-        preferences.frame_rate = frame_rate;
-        preferences.spatial_scale = spatial_scale;
-        set_locked(home, id, preferences, original, wine)
+        set_locked_with_automatic(home, id, preferences, original, wine, automatic.as_deref())
     })();
     if result.is_err()
         && let Some(backup) = migration
@@ -680,12 +679,79 @@ fn set_options_with_wine(
     result
 }
 
+/// Tuning follows the resolved renderer without changing the user's Automatic
+/// preference. Pin its local decision too: another editor must not change the
+/// effective renderer while this request is waiting to save.
+struct OptionsUpdate {
+    preferences: Preferences,
+    original: Option<Vec<u8>>,
+    automatic: Option<Vec<u8>>,
+}
+
+fn option_update(dir: &Path, frame_rate: u16, spatial_scale: u16) -> Result<OptionsUpdate, String> {
+    validate_options(frame_rate, spatial_scale)?;
+    let (mut preferences, original) = read_settings(dir)?;
+    let automatic = if preferences.backend == Backend::Auto {
+        let (saved, bytes) = read_auto_settings(dir)?;
+        if saved.is_none_or(|value| value.effective_backend != Backend::Dxmt) {
+            return Err(
+                "DXMT tuning is available when Automatic selects DXMT or you choose DXMT".into(),
+            );
+        }
+        bytes
+    } else if preferences.backend == Backend::Dxmt {
+        None
+    } else {
+        return Err(
+            "DXMT tuning is available when Automatic selects DXMT or you choose DXMT".into(),
+        );
+    };
+    preferences.frame_rate = frame_rate;
+    preferences.spatial_scale = spatial_scale;
+    Ok(OptionsUpdate {
+        preferences,
+        original,
+        automatic,
+    })
+}
+
 fn set_locked(
     home: &Path,
     id: &str,
     preferences: Preferences,
     expected_original: Option<Vec<u8>>,
     wine: &Path,
+) -> Result<GraphicsResult, String> {
+    set_locked_with_automatic(home, id, preferences, expected_original, wine, None)
+}
+
+fn verify_automatic_option_selection(
+    dir: &Path,
+    selected: Backend,
+    expected: Option<&[u8]>,
+) -> Result<(), String> {
+    if let Some(expected) = expected {
+        let (automatic, bytes) = read_auto_settings(dir)?;
+        if selected != Backend::Auto
+            || bytes.as_deref() != Some(expected)
+            || automatic.is_none_or(|value| value.effective_backend != Backend::Dxmt)
+        {
+            return Err(
+                "Automatic graphics changed before saving DXMT options; refresh and try again"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn set_locked_with_automatic(
+    home: &Path,
+    id: &str,
+    preferences: Preferences,
+    expected_original: Option<Vec<u8>>,
+    wine: &Path,
+    expected_automatic: Option<&[u8]>,
 ) -> Result<GraphicsResult, String> {
     let dir = bottle_dir(home, id)?;
     let prefix = dir.join("prefix");
@@ -694,6 +760,7 @@ fn set_locked(
     if original != expected_original {
         return Err("Bottle graphics changed before this update; refresh and try again".into());
     }
+    verify_automatic_option_selection(&dir, preferences.backend, expected_automatic)?;
     if preferences.backend == Backend::Dxmt {
         dxmt_support(&dir, wine)?;
     }
@@ -705,6 +772,7 @@ fn set_locked(
     if read_settings(&dir)?.1 != original {
         return Err("Bottle graphics changed before saving".into());
     }
+    verify_automatic_option_selection(&dir, preferences.backend, expected_automatic)?;
     cancellation::check()?;
     let updated = serde_json::to_vec_pretty(&Settings {
         version: 2,
@@ -714,7 +782,9 @@ fn set_locked(
     })
     .map_err(|e| e.to_string())?;
     write_preference(&dir.join(SETTINGS), &updated)?;
-    if !read_settings(&dir).is_ok_and(|value| value.0 == preferences) {
+    if !read_settings(&dir).is_ok_and(|value| value.0 == preferences)
+        || verify_automatic_option_selection(&dir, preferences.backend, expected_automatic).is_err()
+    {
         // Roll back only our exact write. An independent editor's later write
         // must not be silently replaced by a stale value.
         if fs::read(dir.join(SETTINGS)).is_ok_and(|bytes| bytes == updated) {
@@ -1406,6 +1476,145 @@ mod tests {
         assert!(set_options_with_wine(&home, &bottle.id, 30, 101, &home.join("wine")).is_err());
         assert!(set_options_with_wine(&home, &bottle.id, 30, 100, &home.join("wine")).is_err());
         assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), original);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn automatic_dxmt_tuning_and_reset_keep_selection_cache_and_sibling() {
+        let home = fixture();
+        let bottle = create(&home, "Automatic tuning").unwrap();
+        let sibling = create(&home, "Independent options").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let automatic = save_automatic(
+            &dir,
+            AutoSettings {
+                version: 1,
+                effective_backend: Backend::Dxmt,
+                reason: AutoReason::D3d11Detected,
+            },
+        );
+        let wine = home.join("unused-test-wine");
+        // Exercise the common guarded persistence path after the production
+        // request's separate engine-capability gate, without running Wine.
+        for (rate, scale) in [(60, 150), (0, 100)] {
+            let update = option_update(&dir, rate, scale).unwrap();
+            assert_eq!(update.preferences.backend, Backend::Auto);
+            let result = set_locked_with_automatic(
+                &home,
+                &bottle.id,
+                update.preferences,
+                update.original,
+                &wine,
+                update.automatic.as_deref(),
+            )
+            .unwrap();
+            assert_eq!(result.selected_backend, Backend::Auto);
+            assert_eq!(result.effective_backend, Backend::Dxmt);
+            assert_eq!(
+                (result.dxmt_frame_rate, result.dxmt_spatial_scale),
+                (rate, scale)
+            );
+            assert_eq!(fs::read(dir.join(AUTO_SETTINGS)).unwrap(), automatic);
+            assert_eq!(
+                read_settings(&dir).unwrap().0,
+                Preferences {
+                    backend: Backend::Auto,
+                    frame_rate: rate,
+                    spatial_scale: scale,
+                }
+            );
+            let mut command = Command::new("unused-test-command");
+            command.env("DXMT_CONFIG_FILE", "original-config");
+            configure_dxmt_options(&mut command, read_settings(&dir).unwrap().0);
+            let values: std::collections::BTreeMap<_, _> = command
+                .get_envs()
+                .map(|(key, value)| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.unwrap().to_string_lossy().into_owned(),
+                    )
+                })
+                .collect();
+            if rate == 0 {
+                assert_eq!(values["DXMT_CONFIG_FILE"], "original-config");
+                assert!(!values.contains_key("DXMT_CONFIG"));
+            } else {
+                assert_eq!(values["DXMT_CONFIG_FILE"], "NUL");
+                assert_eq!(
+                    values["DXMT_CONFIG"],
+                    "d3d11.preferredMaxFrameRate=60;d3d11.metalSpatialUpscaleFactor=1.50;"
+                );
+            }
+        }
+        assert_eq!(
+            read_settings(&bottle_dir(&home, &sibling.id).unwrap())
+                .unwrap()
+                .0,
+            Preferences::default()
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn automatic_tuning_still_requires_verified_engine_without_any_write() {
+        let home = fixture();
+        let bottle = create(&home, "Unverified automatic tuning").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let original = br#"{"version":1,"backend":"auto"}"#;
+        fs::write(dir.join(SETTINGS), original).unwrap();
+        let automatic = save_automatic(
+            &dir,
+            AutoSettings {
+                version: 1,
+                effective_backend: Backend::Dxmt,
+                reason: AutoReason::D3d11Detected,
+            },
+        );
+        let error = set_options_with_wine(&home, &bottle.id, 60, 150, &home.join("absent-engine"))
+            .unwrap_err();
+        assert!(
+            !error.contains("tuning is available"),
+            "Automatic DXMT passed request eligibility: {error}"
+        );
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), original);
+        assert_eq!(fs::read(dir.join(AUTO_SETTINGS)).unwrap(), automatic);
+        assert!(!dir.join("prefix-record.json").exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn changed_automatic_view_refuses_pending_options_without_replacing_it() {
+        let home = fixture();
+        let bottle = create(&home, "Changed automatic selection").unwrap();
+        let dir = bottle_dir(&home, &bottle.id).unwrap();
+        let original = br#"{"version":1,"backend":"auto"}"#;
+        fs::write(dir.join(SETTINGS), original).unwrap();
+        save_automatic(
+            &dir,
+            AutoSettings {
+                version: 1,
+                effective_backend: Backend::Dxmt,
+                reason: AutoReason::D3d11Detected,
+            },
+        );
+        let update = option_update(&dir, 60, 150).unwrap();
+        let changed = save_automatic(
+            &dir,
+            AutoSettings::baseline(AutoReason::MixedOrIncompleteEvidence),
+        );
+        let error = set_locked_with_automatic(
+            &home,
+            &bottle.id,
+            update.preferences,
+            update.original,
+            &home.join("absent-engine"),
+            update.automatic.as_deref(),
+        )
+        .unwrap_err();
+        assert!(error.contains("Automatic graphics changed"), "{error}");
+        assert_eq!(fs::read(dir.join(SETTINGS)).unwrap(), original);
+        assert_eq!(fs::read(dir.join(AUTO_SETTINGS)).unwrap(), changed);
+        assert!(option_update(&dir, 60, 150).is_err());
         fs::remove_dir_all(home).unwrap();
     }
 

@@ -529,6 +529,11 @@ mod tests {
         parent.join(format!("caskrun-shutdown-test-{}", Uuid::new_v4()))
     }
 
+    // Fresh shell fixtures can take several seconds to start on macOS. Tests
+    // that need to reach owner/path checks must not time out before the mock
+    // server body runs. Intentional timeout tests retain their short limits.
+    const MOCK_PROCESS_TIMEOUT: Duration = Duration::from_secs(8);
+
     fn fake_runtime(home: &Path) -> PathBuf {
         let runtime = home.join("test-runtime");
         fs::create_dir_all(&runtime).unwrap();
@@ -1525,7 +1530,7 @@ mod tests {
             .read_line(&mut ready)
             .unwrap();
         assert_eq!(ready, "ready\n");
-        let result = quit_all_with_wine(&home, Some(&wine), Duration::from_millis(500)).unwrap();
+        let result = quit_all_with_wine(&home, Some(&wine), MOCK_PROCESS_TIMEOUT).unwrap();
         // Close the fixture's own pipe before any assertion; it exits naturally.
         drop(observer.stdin.take());
         observer.wait().unwrap();
@@ -1539,7 +1544,7 @@ mod tests {
         assert!(dir.is_dir());
         assert!(read_active_processes(&dir).unwrap().is_empty());
         assert!(
-            quit_all_with_wine(&home, Some(&wine), Duration::from_secs(2))
+            quit_all_with_wine(&home, Some(&wine), MOCK_PROCESS_TIMEOUT)
                 .unwrap()
                 .complete
         );
@@ -1554,7 +1559,7 @@ mod tests {
         let dir = bottle_dir(&home, &bottle.id).unwrap();
         let server = wine.parent().unwrap().join("wineserver");
         fs::write(&server, b"#!/bin/sh\ncase \"$1\" in\n-k) exit 1;;\n-w) mv \"$WINEPREFIX\" \"$WINEPREFIX-original\"; mkdir \"$WINEPREFIX\"; touch \"$WINEPREFIX/system.reg\"; exit 0;;\nesac\n").unwrap();
-        let result = quit_all_with_wine(&home, Some(&wine), Duration::from_secs(2)).unwrap();
+        let result = quit_all_with_wine(&home, Some(&wine), MOCK_PROCESS_TIMEOUT).unwrap();
         assert!(!result.complete);
         assert_eq!(result.failures.len(), 1);
         assert!(result.failures[0].error.contains("prefix changed"));

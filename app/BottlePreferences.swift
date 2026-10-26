@@ -20,6 +20,11 @@ enum BottleGraphicsContract {
         default: "Automatic checks installed apps at the next idle launch."
         }
     }
+
+    static func canTuneDXMT(selected: String, effective: String, dxmtAvailable: Bool) -> Bool {
+        dxmtAvailable && effective == "dxmt"
+            && accepts(selected: selected, effective: effective, dxmtAvailable: dxmtAvailable)
+    }
 }
 
 /// Orders a bottle preference's asynchronous reads and writes. Inspector

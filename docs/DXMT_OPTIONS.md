@@ -6,8 +6,10 @@ _Optional graphics controls. Compatibility and performance must be checked per g
 
 The bottle inspector's experimental DXMT controls use the existing reviewed,
 switchable Wine 11/DXMT package. No new runtime bytes are introduced. Automatic
-still selects WineD3D. High Resolution remains independent, optional and off by
-default.
+can select DXMT from supported installed-app evidence; the same tuning controls
+then apply without changing Automatic to a manual renderer choice. Unknown or
+mixed requirements retain WineD3D. High Resolution remains independent,
+optional and off by default.
 
 - **Frame target:** application controlled by default (`0`); bounded integer
   targets from 1 to 240 FPS are accepted by the core. Common UI choices are 30,
@@ -23,12 +25,19 @@ The upstream [customization document](https://raw.githubusercontent.com/3Shain/d
 and [configuration reference](https://github.com/3Shain/dxmt/blob/e94c312f5c054263acf261cfa109edf13e757587/dxmt.conf)
 are pinned to the same source revision as the packaged translator.
 
-Changing these controls requires verified DXMT selection, the bottle lock,
+Changing these controls requires a verified effective DXMT selection (manual or
+Automatic), the bottle lock,
 stopped tracked apps, an idle bottle Wine server and independent zero-file-owner
 checks. A refused change preserves the previous preference and running apps.
 The approved runtime-record migration and pre-Wine rollback boundary are the
 same as renderer changes. Existing application files, DLLs and registry entries
 are not replaced.
+
+Automatic tuning and reset preserve both the portable `auto` preference and its
+local detection result. The request pins that result and rechecks it before
+saving; if an independent editor changes the effective renderer during the
+operation, the update is refused without replacing either setting. Tuning is
+retained but inactive whenever Automatic later resolves to WineD3D.
 
 ## Configuration precedence
 

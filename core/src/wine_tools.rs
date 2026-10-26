@@ -379,12 +379,21 @@ mod tests {
 
     fn wait_for_invocations(prefix: &Path, expected_lines: usize) -> String {
         let path = prefix.join("tool-invocations");
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // The public API intentionally returns immediately after spawning.
+        // Under compilation/load a fresh shell can take over three seconds to
+        // run. Wait for its acknowledgement, not an assumed startup latency,
+        // and do not count a partially appended final line as a whole command.
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let contents = fs::read_to_string(&path).unwrap_or_default();
-            if contents.lines().count() >= expected_lines || Instant::now() >= deadline {
+            let complete_lines = contents.bytes().filter(|byte| *byte == b'\n').count();
+            if complete_lines >= expected_lines {
                 return contents;
             }
+            assert!(
+                Instant::now() < deadline,
+                "Fake tools did not acknowledge {expected_lines} complete commands; received {complete_lines}"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
     }

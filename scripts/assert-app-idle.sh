@@ -12,10 +12,28 @@ if [[ -L "$APP" || ! -d "$APP" ]]; then
   print -u2 "Refusing to inspect an unrecognized app: $APP"
   exit 75
 fi
+if [[ "${APP:A}" != "${APP:a}" ]]; then
+  print -u2 "Refusing to inspect an app through linked directories: $APP"
+  exit 75
+fi
+APP="${APP:a}"
 
 check_open_files() {
   local path="$1" scope="$2" report='' lsof_exit_code=0 pids
+  if [[ -L "$path" || "${path:A}" != "${path:a}" ]]; then
+    print -u2 "Refusing to inspect linked app components: $APP"
+    exit 75
+  fi
   [[ -e "$path" ]] || return 0
+  if [[ "$scope" == tree ]]; then
+    [[ -d "$path" ]] || {
+      print -u2 "Refusing to inspect an unrecognized app component: $APP"
+      exit 75
+    }
+  elif [[ ! -f "$path" ]]; then
+    print -u2 "Refusing to inspect an unrecognized app component: $APP"
+    exit 75
+  fi
 
   if [[ "$scope" == tree ]]; then
     report=$(/usr/sbin/lsof -nP -Fpc +D "$path" 2>&1) || lsof_exit_code=$?
@@ -35,5 +53,7 @@ check_open_files() {
   fi
 }
 
-check_open_files "$APP/Contents/MacOS/Caskrun" file
+for executable in Caskrun caskrun-core caskrun-native-icon; do
+  check_open_files "$APP/Contents/MacOS/$executable" file
+done
 check_open_files "$APP/Contents/Resources/wine-runtime" tree

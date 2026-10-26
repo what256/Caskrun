@@ -6,8 +6,9 @@ personal paths and app names. Record observed stages separately.
 
 ## App and bottle controls
 
-- [ ] Collection shows games/apps directly. A click opens the details panel;
-  double-click opens that item. Closing details or Escape keeps the flat grid.
+- [ ] Collection groups Windows apps/games into bottle folders. A click opens
+  the folder and details panel; double-click opens its app. Closing details or
+  Escape returns to Collection without leaving the folder's contents behind.
 - [ ] Its single filter menu switches All/Windows/PS5/Browser and Games/Apps.
   Search and filter changes clear details for hidden items. + → Manage bottles
   remains reachable with no Windows bottles or when another platform is selected.
@@ -82,9 +83,10 @@ public binary licence/distribution review are release gates.
 
 - Switch between Stores and Browser games using Discover's compact content
   filter row. Confirm Collection and Discover are the only main navigation entries.
-- Search Collection’s saved apps and installed Steam/Epic/GOG games. Confirm
-  Steam opens through its saved client, while Epic/GOG cards say Open store.
-  Bottle controls must stay in details without replacing the flat grid.
+- Find saved apps and installed Steam/Epic/GOG/EA/Ubisoft games inside their
+  Collection bottle folders. Steam uses its saved client; Epic/GOG say Open
+  store; EA/Ubisoft send checked requests to their same-bottle client. Bottle
+  controls stay in the existing details panel.
 - Request a Steam game install in an existing Steam bottle, then in a new one.
   Steam must handle ownership, sign-in, agreements and download confirmation.
 - Add a browser game from Discover or a public HTTPS link. Select the saved game and double-click or use Play in browser to open
@@ -93,10 +95,11 @@ public binary licence/distribution review are release gates.
   A saved known game should reuse its picture on Collection; a custom link must not
   cause an artwork request. Check own-file badges, collection Browse games and
   unverified Visit website labels. Website reachability is not a gameplay test.
-- In an idle DXMT bottle, try the frame target and optional MetalFX spatial
+- In an idle manual-DXMT or Automatic/DXMT bottle, try the frame target and optional MetalFX spatial
   scales with a real game. Compare performance, image quality and UI scaling.
   Reset to application controlled / Off afterwards; existing defaults remain
-  Auto/WineD3D and optional high-resolution mode.
+  Automatic and optional high-resolution mode. Tune/reset must preserve
+  Automatic when it chose DXMT. See [the next-build checks](NEXT_MANUAL_TESTS.md).
 - Check reduced motion, narrow window layout, keyboard focus, menu-bar reopen
   and full Quit with the game running. Full Quit must stop only Caskrun-owned
   Windows processes. Closing the main window keeps the menu-bar app available.
