@@ -301,3 +301,12 @@ prove a Wine-hosted Windows graphics backend. No render, presentation or game
 result was obtained. The separately licensed Apple component and the reviewed
 runtime passed integrity checks afterward; the owned test prefix and socket
 were removed after ownership checks.
+
+A separate native comparison used the same helper, host and write-isolation
+policy without Wine. It likewise reached the hardware-adapter stage without a
+device result; the native process terminated with a segmentation signal before
+the post-operation gate. This does not establish why either control failed.
+The Wine and native runs both left the Apple component unchanged and removed
+their owned temporary environments. The earlier successful native rendering
+control did not use this isolation policy, so these results do not isolate a
+single cause.
