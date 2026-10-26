@@ -40,7 +40,8 @@ class RuntimePackageGuards(unittest.TestCase):
     def test_current_core_policy_parses_from_its_array(self):
         source = (CHECK.REPO / "core/src/runtime_migration.rs").read_text()
         values = CHECK.reviewed_identities(source)
-        self.assertEqual(len(values), 15)
+        self.assertEqual(len(values), 16)
+        self.assertIn("sha256:a235fd32318839ec2aa164befec58a83bad8bd988ec04f7433e9a8faa936d9fa", values)
         self.assertIn("sha256:cae84f3978b2e0820bbdfc95c1e9dd5fa6c79c8d1f1aca825ac86bd2afb77c29", values)
         self.assertIn("sha256:17504e50264389aa7986828fa6e4ff3578ce97d4fc096b6dabdf12c60c4de1fb", values)
         self.assertIn("sha256:398d08ea874ad53c8c8f6519e291a990f9d598dde0dfebc88fb149fe6d6c1c54", values)

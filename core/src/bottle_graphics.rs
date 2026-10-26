@@ -12,6 +12,11 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 const DXVK_ROOT: &str = "components/dxvk/runtime";
 const DXVK_ICD: &str = "components/dxvk/vulkan/icd.d/MoltenVK_icd.json";
 const DXMT_ROOT: &str = "components/dxmt/runtime";
+const DXMT_D3D12_SOURCE: &str = "e94c312f5c054263acf261cfa109edf13e757587";
+const DXMT_D3D12_INPUT_SHA256: &str =
+    "00d496abca27fd91bdef037436f19a7dcbe7a3c7899f6958ef58168fb9436707";
+const DXMT_D3D12_DLL_SHA256: &str =
+    "c22f3717f2ff21b04d4206fe68f1c2f4e0928625d145ca52b1f35cfa9456974c";
 // Original x64/x86 lifecycle and all three spatial-scale gates pass with the
 // exact reviewed package. This does not establish game or image-quality support.
 // See docs/DXMT_OPTIONS.md for the reproducible evidence boundary.
@@ -441,6 +446,7 @@ pub(super) struct GraphicsResult {
     selected_backend: Backend,
     effective_backend: Backend,
     dxmt_available: bool,
+    dxmt_d3d12_available: bool,
     dxvk_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     dxvk_unavailable_reason: Option<String>,
@@ -547,7 +553,7 @@ fn read_settings(dir: &Path) -> Result<(Preferences, Option<Vec<u8>>), String> {
 // The complete reviewed package identity covers both renderer views, the
 // dispatcher, receipts and source notices. A manifest by itself is not proof
 // that a random/custom Wine runtime supports Caskrun's selection protocol.
-fn dxmt_support(dir: &Path, wine: &Path) -> Result<(), String> {
+fn reviewed_dxmt_identity(dir: &Path, wine: &Path) -> Result<String, String> {
     let record = recorded_runtime_for_prefix(dir, Some(wine))?;
     let identity = match record {
         Some(record)
@@ -580,6 +586,15 @@ fn dxmt_support(dir: &Path, wine: &Path) -> Result<(), String> {
     if !runtime_migration::is_reviewed_switchable_runtime(&identity) {
         return Err("DXMT is not included in this Windows engine package".into());
     }
+    Ok(identity)
+}
+
+fn dxmt_support(dir: &Path, wine: &Path) -> Result<(), String> {
+    dxmt_support_with_identity(dir, wine).map(|_| ())
+}
+
+fn dxmt_support_with_identity(dir: &Path, wine: &Path) -> Result<String, String> {
+    let identity = reviewed_dxmt_identity(dir, wine)?;
     let root = wine
         .parent()
         .and_then(Path::parent)
@@ -606,7 +621,7 @@ fn dxmt_support(dir: &Path, wine: &Path) -> Result<(), String> {
             }
         }
     }
-    Ok(())
+    Ok(identity)
 }
 
 fn validate_receipt(receipt: &serde_json::Value) -> Result<(), String> {
@@ -619,6 +634,53 @@ fn validate_receipt(receipt: &serde_json::Value) -> Result<(), String> {
         || receipt["game_validated"] != false
     {
         return Err("This engine does not have the reviewed graphics selection layout".into());
+    }
+    Ok(())
+}
+
+fn validate_dxmt_d3d12_receipt(receipt: &serde_json::Value) -> Result<(), String> {
+    validate_receipt(receipt)?;
+    let component = &receipt["dxmt_d3d12"];
+    if component["implementation"] != "caskrun-dxmt-d3d12-v1"
+        || component["loading_model"] != "wine-builtin-runtime-view-v1"
+        || component["source_revision"] != DXMT_D3D12_SOURCE
+        || component["input_sha256"] != DXMT_D3D12_INPUT_SHA256
+        || component["packaged_dll_sha256"] != DXMT_D3D12_DLL_SHA256
+        || component["windows_architectures"] != serde_json::json!(["x86_64"])
+        || component["experimental"] != true
+        || component["game_validated"] != false
+        || component["api_validation_passed"] != true
+        || component["shader_model"] != "5_1"
+        || component["feature_level"] != "11_1"
+        || component["dxil_supported"] != false
+    {
+        return Err(
+            "Experimental DirectX 12 is not a reviewed DXMT component in this engine".into(),
+        );
+    }
+    Ok(())
+}
+
+// Receipt shape alone cannot add this capability to an older/custom engine.
+// Callers first establish DXMT support, then require this exact complete tree.
+fn dxmt_d3d12_component_support(wine: &Path, verified_identity: &str) -> Result<(), String> {
+    if verified_identity != runtime_migration::DXMT_D3D12_WINE_11_IDENTITY {
+        return Err("Experimental DirectX 12 needs the matching reviewed DXMT engine".into());
+    }
+    let root = wine
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("The Windows engine is unavailable")?;
+    let bytes = read_small_file(&root.join("components.json"), 1024 * 1024)?
+        .ok_or("The Windows engine component receipt is missing")?;
+    let receipt = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    validate_dxmt_d3d12_receipt(&receipt)?;
+    if !path_is_real_file(
+        &root
+            .join(DXMT_ROOT)
+            .join("lib/wine/x86_64-windows/d3d12.dll"),
+    ) {
+        return Err("The experimental DXMT DirectX 12 component is incomplete".into());
     }
     Ok(())
 }
@@ -713,14 +775,18 @@ fn result(dir: &Path, id: &str, preferences: Preferences, wine: Option<&Path>) -
     let selected = preferences.backend;
     let support = wine
         .ok_or_else(|| "The Windows engine is unavailable".to_owned())
-        .and_then(|wine| dxmt_support(dir, wine));
+        .and_then(|wine| dxmt_support_with_identity(dir, wine));
     let available = support.is_ok();
     let dxvk_support_result = match (&support, wine) {
-        (Ok(()), Some(wine)) => dxvk_component_support(wine),
+        (Ok(_), Some(wine)) => dxvk_component_support(wine),
         (Err(reason), _) => Err(reason.clone()),
         _ => Err("The Windows engine is unavailable".into()),
     };
     let dxvk_available = dxvk_support_result.is_ok();
+    let dxmt_d3d12_available = match (&support, wine) {
+        (Ok(identity), Some(wine)) => dxmt_d3d12_component_support(wine, identity).is_ok(),
+        _ => false,
+    };
     let msync_available =
         available && wine.is_some_and(|wine| msync_component_support(wine).is_ok());
     let automatic = if selected == Backend::Auto {
@@ -748,6 +814,7 @@ fn result(dir: &Path, id: &str, preferences: Preferences, wine: Option<&Path>) -
         selected_backend: selected,
         effective_backend: effective,
         dxmt_available: available,
+        dxmt_d3d12_available,
         dxvk_available,
         dxvk_unavailable_reason: dxvk_support_result.err(),
         dxmt_frame_rate: preferences.frame_rate,
@@ -763,7 +830,9 @@ fn result(dir: &Path, id: &str, preferences: Preferences, wine: Option<&Path>) -
         } else if automatic_error.is_some() {
             Some("The automatic graphics decision could not be read. Review this bottle's graphics setting before opening apps.".into())
         } else if effective == Backend::Dxmt {
-            Some(if available {
+            Some(if dxmt_d3d12_available {
+                "DXMT includes experimental 64-bit DirectX 12 (FL11_1 / SM5_1). DXIL and newer shader features are unsupported; test each game."
+            } else if available {
                 "DXMT is experimental. Rendering probes pass; game compatibility still needs testing."
             } else {
                 "This bottle requests DXMT, but it is unavailable. Choose Automatic or restore the matching engine before opening apps."
@@ -1106,11 +1175,12 @@ pub(super) fn configure_launch(
         configure_dxvk_driver(command, wine)?;
     }
     if backend == Backend::Dxmt {
-        dxmt_support(dir, wine)?;
+        let identity = dxmt_support_with_identity(dir, wine)?;
         configure_dxmt_session_environment(
             command,
             preferences,
             &env::var("WINEDLLOVERRIDES").unwrap_or_default(),
+            dxmt_d3d12_component_support(wine, &identity).is_ok(),
         )?;
         let prefix = dir.join("prefix");
         if path_is_real_file(&prefix.join("system.reg"))
@@ -1160,11 +1230,12 @@ pub(super) fn configure_control_launch(
         configure_dxvk_driver(command, wine)?;
     }
     if backend == Backend::Dxmt {
-        dxmt_support(dir, wine)?;
+        let identity = dxmt_support_with_identity(dir, wine)?;
         configure_dxmt_session_environment(
             command,
             preferences,
             &env::var("WINEDLLOVERRIDES").unwrap_or_default(),
+            dxmt_d3d12_component_support(wine, &identity).is_ok(),
         )?;
     }
     Ok(())
@@ -1177,9 +1248,13 @@ fn configure_dxmt_session_environment(
     command: &mut Command,
     preferences: Preferences,
     inherited_overrides: &str,
+    d3d12_available: bool,
 ) -> Result<(), String> {
-    command.env("WINEDLLOVERRIDES", dxmt_overrides(inherited_overrides)?);
-    configure_dxmt_options(command, preferences);
+    command.env(
+        "WINEDLLOVERRIDES",
+        dxmt_overrides(inherited_overrides, d3d12_available)?,
+    );
+    configure_dxmt_options(command, preferences, d3d12_available);
     Ok(())
 }
 
@@ -1199,18 +1274,24 @@ fn configure_dxvk_driver(command: &mut Command, wine: &Path) -> Result<(), Strin
 // accidentally disable managed options. Existing config files stay untouched.
 // Caskrun supplies bounded, typed values; inherited DXMT settings cannot turn a
 // saved Off setting back on or inject extra translation options into this run.
-fn configure_dxmt_options(command: &mut Command, preferences: Preferences) {
+fn configure_dxmt_options(command: &mut Command, preferences: Preferences, d3d12_available: bool) {
     // With both controls off preserve the reviewed baseline, including any
     // explicit user/environment or app-local DXMT configuration.
     if preferences.frame_rate == 0 && preferences.spatial_scale == 100 {
         return;
     }
     command.env("DXMT_CONFIG_FILE", "NUL");
+    let d3d12_frame_target = if d3d12_available {
+        format!("d3d12.preferredMaxFrameRate={};", preferences.frame_rate)
+    } else {
+        String::new()
+    };
     command.env(
         "DXMT_CONFIG",
         format!(
-            "d3d11.preferredMaxFrameRate={};d3d11.metalSpatialUpscaleFactor={}.{:02};",
+            "d3d11.preferredMaxFrameRate={};{}d3d11.metalSpatialUpscaleFactor={}.{:02};",
             preferences.frame_rate,
+            d3d12_frame_target,
             preferences.spatial_scale / 100,
             preferences.spatial_scale % 100
         ),
@@ -1298,7 +1379,14 @@ fn prepare_bridge_placeholders(dir: &Path, wine: &Path) -> Result<(), String> {
     result
 }
 
-fn dxmt_overrides(inherited: &str) -> Result<String, String> {
+fn dxmt_overrides(inherited: &str, d3d12_available: bool) -> Result<String, String> {
+    if d3d12_available {
+        return managed_graphics_overrides(
+            inherited,
+            &["d3d11", "dxgi", "d3d10core", "winemetal", "d3d12"],
+            "d3d11,dxgi,d3d10core,winemetal,d3d12=b",
+        );
+    }
     managed_graphics_overrides(
         inherited,
         &["d3d11", "dxgi", "d3d10core", "winemetal"],
@@ -1368,6 +1456,156 @@ mod tests {
                 "moltenvk_version":"1.4.2","windows_architectures":["x86_64","i386"]}})
     }
 
+    fn valid_dxmt_d3d12_receipt() -> serde_json::Value {
+        let mut receipt = valid_dxvk_receipt();
+        receipt["dxmt_d3d12"] = serde_json::json!({
+            "implementation":"caskrun-dxmt-d3d12-v1",
+            "loading_model":"wine-builtin-runtime-view-v1",
+            "source_revision":DXMT_D3D12_SOURCE,
+            "input_sha256":DXMT_D3D12_INPUT_SHA256,
+            "packaged_dll_sha256":DXMT_D3D12_DLL_SHA256,
+            "windows_architectures":["x86_64"],
+            "experimental":true,"game_validated":false,"api_validation_passed":true,
+            "shader_model":"5_1","feature_level":"11_1","dxil_supported":false
+        });
+        receipt
+    }
+
+    #[test]
+    fn dxmt_d3d12_receipt_requires_the_reviewed_module_and_honest_feature_limits() {
+        let receipt = valid_dxmt_d3d12_receipt();
+        assert!(validate_dxmt_d3d12_receipt(&receipt).is_ok());
+        assert!(validate_dxvk_receipt(&receipt).is_ok());
+        for (field, value) in [
+            ("implementation", "other".into()),
+            ("loading_model", "native-dll".into()),
+            ("source_revision", "unreviewed".into()),
+            ("input_sha256", "0".repeat(64).into()),
+            ("packaged_dll_sha256", "0".repeat(64).into()),
+            (
+                "windows_architectures",
+                serde_json::json!(["x86_64", "i386"]),
+            ),
+            ("experimental", false.into()),
+            ("game_validated", true.into()),
+            ("api_validation_passed", false.into()),
+            ("shader_model", "6_0".into()),
+            ("feature_level", "12_0".into()),
+            ("dxil_supported", true.into()),
+        ] {
+            let mut altered = receipt.clone();
+            altered["dxmt_d3d12"][field] = value;
+            assert!(validate_dxmt_d3d12_receipt(&altered).is_err(), "{field}");
+        }
+        assert!(validate_dxmt_d3d12_receipt(&valid_dxvk_receipt()).is_err());
+    }
+
+    #[test]
+    fn d3d12_receipt_cannot_promote_an_older_or_unreviewed_package() {
+        let dir = fixture();
+        let wine = dir.join("engine/bin/wine");
+        fs::create_dir_all(wine.parent().unwrap()).unwrap();
+        fs::write(
+            dir.join("engine/components.json"),
+            serde_json::to_vec(&valid_dxmt_d3d12_receipt()).unwrap(),
+        )
+        .unwrap();
+        for identity in [
+            runtime_migration::GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+            "sha256:unknown",
+        ] {
+            assert!(dxmt_d3d12_component_support(&wine, identity).is_err());
+        }
+        assert!(!dir.join(SETTINGS).exists());
+        assert!(!dir.join("prefix").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dxmt_d3d12_override_is_explicit_and_other_views_preserve_their_modules() {
+        let inherited = "d3d12,custom=n;*D3D12.dll=n,b;d3d11=n;vcruntime140=n,b";
+        assert_eq!(
+            dxmt_overrides(inherited, true).unwrap(),
+            "custom=n;vcruntime140=n,b;d3d11,dxgi,d3d10core,winemetal,d3d12=b"
+        );
+        assert_eq!(
+            dxmt_overrides(inherited, false).unwrap(),
+            "d3d12,custom=n;*D3D12.dll=n,b;vcruntime140=n,b;d3d11,dxgi,d3d10core,winemetal=b"
+        );
+        assert_eq!(
+            dxvk_overrides(inherited).unwrap(),
+            "d3d12,custom=n;*D3D12.dll=n,b;vcruntime140=n,b;d3d9,d3d10core,d3d11,dxgi=b"
+        );
+    }
+
+    #[test]
+    fn d3d12_client_environment_keeps_saved_preferences_and_same_control_selection() {
+        let preferences = Preferences {
+            backend: Backend::Dxmt,
+            ..Preferences::default()
+        };
+        let mut launch = Command::new("unused-client");
+        let mut control = Command::new("unused-control");
+        for command in [&mut launch, &mut control] {
+            configure_dxmt_session_environment(command, preferences, "custom=n", true).unwrap();
+        }
+        let launch_values: Vec<_> = launch.get_envs().collect();
+        let control_values: Vec<_> = control.get_envs().collect();
+        assert_eq!(launch_values, control_values);
+        assert!(launch_values.contains(&(
+            OsStr::new("WINEDLLOVERRIDES"),
+            Some(OsStr::new(
+                "custom=n;d3d11,dxgi,d3d10core,winemetal,d3d12=b"
+            ))
+        )));
+        assert_eq!(preferences.backend, Backend::Dxmt);
+        assert_eq!(preferences.frame_rate, 0);
+        assert_eq!(preferences.spatial_scale, 100);
+    }
+
+    #[test]
+    fn d3d12_frame_target_uses_its_own_bounded_key_and_preserves_reset_semantics() {
+        for frame_rate in [0, 60, 240] {
+            let mut command = Command::new("unused-client");
+            command.env(
+                "DXMT_CONFIG",
+                "d3d12.preferredMaxFrameRate=999;unexpected=True;",
+            );
+            configure_dxmt_session_environment(
+                &mut command,
+                Preferences {
+                    backend: Backend::Dxmt,
+                    frame_rate,
+                    spatial_scale: 150,
+                    msync: false,
+                },
+                "",
+                true,
+            )
+            .unwrap();
+            let values: std::collections::BTreeMap<_, _> = command
+                .get_envs()
+                .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_owned)))
+                .collect();
+            let expected = format!(
+                "d3d11.preferredMaxFrameRate={frame_rate};d3d12.preferredMaxFrameRate={frame_rate};d3d11.metalSpatialUpscaleFactor=1.50;"
+            );
+            assert_eq!(
+                values[OsStr::new("DXMT_CONFIG")],
+                Some(OsStr::new(&expected).to_owned())
+            );
+            assert_eq!(
+                values[OsStr::new("DXMT_CONFIG_FILE")],
+                Some(OsStr::new("NUL").to_owned())
+            );
+        }
+        let mut command = Command::new("unused-client");
+        command.env("DXMT_CONFIG", "d3d12.preferredMaxFrameRate=45;");
+        configure_dxmt_options(&mut command, Preferences::default(), true);
+        assert!(command.get_envs().any(|(key, value)| key == "DXMT_CONFIG"
+            && value == Some(OsStr::new("d3d12.preferredMaxFrameRate=45;"))));
+    }
+
     #[test]
     fn control_clients_use_saved_sync_mode_without_creating_integration_or_cache_files() {
         let dir = fixture();
@@ -1403,6 +1641,7 @@ mod tests {
             &mut command,
             preferences,
             "mscoree,mshtml=;d3d11,custom=n;*DXGI.dll=n,b;vcruntime140=n,b",
+            false,
         )
         .unwrap();
         let values: std::collections::BTreeMap<_, _> = command
@@ -1813,10 +2052,14 @@ mod tests {
     #[test]
     fn graphics_overrides_preserve_other_modules_and_replace_only_selected_modules() {
         assert_eq!(
-            dxmt_overrides("mscoree,mshtml=;d3d11,foo=n;*DXGI.dll=n,b;vcruntime140=n,b").unwrap(),
+            dxmt_overrides(
+                "mscoree,mshtml=;d3d11,foo=n;*DXGI.dll=n,b;vcruntime140=n,b",
+                false
+            )
+            .unwrap(),
             "mscoree,mshtml=;foo=n;vcruntime140=n,b;d3d11,dxgi,d3d10core,winemetal=b"
         );
-        assert!(dxmt_overrides("malformed").is_err());
+        assert!(dxmt_overrides("malformed", false).is_err());
     }
 
     #[test]
@@ -1831,6 +2074,9 @@ mod tests {
 
     #[test]
     fn graphics_capabilities_require_an_explicitly_reviewed_complete_package() {
+        assert!(runtime_migration::is_reviewed_switchable_runtime(
+            runtime_migration::DXMT_D3D12_WINE_11_IDENTITY
+        ));
         assert!(runtime_migration::is_reviewed_switchable_runtime(
             runtime_migration::SWITCHABLE_WINE_11_IDENTITY
         ));
@@ -1877,6 +2123,7 @@ mod tests {
             assert!(!runtime_migration::is_reviewed_switchable_runtime(identity));
         }
         for approved in [
+            runtime_migration::DXMT_D3D12_WINE_11_IDENTITY,
             runtime_migration::REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
             runtime_migration::BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
             runtime_migration::BUNDLED_STEAM_UI_WINE_11_IDENTITY,
@@ -2094,6 +2341,7 @@ mod tests {
                 spatial_scale: 100,
                 msync: false,
             },
+            false,
         );
         let values: std::collections::BTreeMap<_, _> = command
             .get_envs()
@@ -2118,6 +2366,7 @@ mod tests {
                 spatial_scale: 150,
                 msync: false,
             },
+            false,
         );
         let values: std::collections::BTreeMap<_, _> = command
             .get_envs()
@@ -2151,6 +2400,7 @@ mod tests {
                 backend: Backend::Dxmt,
                 ..Preferences::default()
             },
+            false,
         );
         let after: Vec<_> = command
             .get_envs()
@@ -2267,7 +2517,7 @@ mod tests {
             );
             let mut command = Command::new("unused-test-command");
             command.env("DXMT_CONFIG_FILE", "original-config");
-            configure_dxmt_options(&mut command, read_settings(&dir).unwrap().0);
+            configure_dxmt_options(&mut command, read_settings(&dir).unwrap().0, false);
             let values: std::collections::BTreeMap<_, _> = command
                 .get_envs()
                 .map(|(key, value)| {

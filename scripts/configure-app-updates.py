@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 def configure(info: dict, values: dict[str, str], default_build: str) -> dict:
     result = dict(info)
-    version = values.get("CASKRUN_APP_VERSION", "0.1.0")
+    version = values.get("CASKRUN_APP_VERSION", "0.2.0")
     build = values.get("CASKRUN_APP_BUILD", default_build)
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ValueError("App version must contain three numbers")

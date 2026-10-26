@@ -38,7 +38,11 @@ struct DXMTOptionsView: View {
                             Text("Saved scale · Unavailable here").tag(status.dxmt_spatial_scale).disabled(true)
                         }
                     }.pickerStyle(.menu)
-                    Text(Self.spatialSupported ? "Upscales the presentation surface. Test image quality and performance in your game; this does not enable DLSS or frame generation." : "MetalFX spatial scaling is unavailable on this Mac. Saved settings are preserved; choose Off or reset tuning before playing here.")
+                    Text(Self.spatialSupported
+                         ? (status.dxmt_d3d12_available == true
+                            ? "Upscales DirectX 10/11 presentation only; experimental DirectX 12 does not use this setting. Test image quality and performance; this does not enable DLSS or frame generation."
+                            : "Upscales the presentation surface. Test image quality and performance in your game; this does not enable DLSS or frame generation.")
+                         : "MetalFX spatial scaling is unavailable on this Mac. Saved settings are preserved; choose Off or reset tuning before playing here.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Text("Nondefault tuning takes precedence over a custom dxmt.conf for that launch. Reset both controls to restore the original config behavior. Close this bottle's apps before changing options.")

@@ -1,5 +1,11 @@
 # Feature inventory
 
+**0.2.0 update:** the reviewed V16 engine supplies experimental x64 D3D12 under
+manual DXMT, with actual Core GPU/presentation and idle-upgrade checks. Frame
+target also configures D3D12; MetalFX spatial stays D3D10/11 only. The existing
+interface and saved choices are retained. See [D3D12 integration](D3D12_EXPERIMENT.md)
+for its FL11_1/SM5_1/no-DXIL limits and separate game acceptance.
+
 Caskrun aims to cover the **publicly documented CrossOver Mac workflows** with original code and independently licensed runtimes. This checklist is a requirements map, not a claim of compatibility or parity. It draws on public CodeWeavers documentation only; CrossOver code, assets, installer recipes, and bundled runtime do not belong in this project.
 
 Statuses distinguish source implementation from installer, client, authentication and game validation. **Present in source** means a code path exists. **Partial** means only part of the workflow exists. **Planned** means no implementation exists. The current local candidate contains an ARM64 SwiftUI app/core and independently built Wine 11.0 with GnuTLS, original Steam CEF/Dock changes and general per-executable native identities. Its source and runtime receipts accompany the ignored development package; it remains ad-hoc signed.

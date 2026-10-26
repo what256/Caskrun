@@ -1,5 +1,11 @@
 # Workflow gaps against CrossOver Mac
 
+The 0.2.0 development app adds the reviewed V16 x64 DXMT D3D12 path to the
+existing graphics inspector. Actual Core rendering/presentation, idle migration
+and saved settings passed. It remains limited to FL11_1/SM5_1 without DXIL;
+Automatic, x86 D3D12 and Apple D3DMetal are not enabled by that work. See
+[current D3D12 integration](D3D12_EXPERIMENT.md) for the acceptance scope.
+
 Audited **2026-09-23** against Caskrun's SwiftUI app, Rust core, catalog, and [feature inventory](FEATURES.md). This is a requirements and acceptance checklist, not a claim of CrossOver compatibility. **Implemented** means the Caskrun source has the behavior; **experimental** means only a development or narrow smoke path exists; **missing** means there is no working path. At that audit, the eight catalog entries had experimental automatic installers and the local package used independently built Wine 11.0 with original Steam CEF/Dock patches and source receipts. Those isolated installer tests did not verify account sign-in or gameplay. Current results are recorded below and in the linked validation record.
 
 CodeWeavers' public guide describes the intended user journey: find an app, click **Install**, accept any required component prompts, then launch its icon from Home or its bottle. The [Steam walkthrough](https://support.codeweavers.com/en_US/installing-steam-in-crossover) says its install profile selects the bottle type, dependencies, and download locations; the user signs in **inside Steam**, then selects games in Steam. The [Mac user guide](https://support.codeweavers.com/en_US/crossover-mac-user-guide) makes bottle and install-detail changes optional for listed apps. Caskrun should match that simplicity with original code, assets, and recipes from independently licensed sources. The user should not need to locate Wine or configure a bottle to install a supported app.

@@ -1,21 +1,21 @@
 # Graphics backend status
 
 _26 October 2026. Current source and isolated engine probes are recorded below.
-Local build 57 is packaged and installed; no storefront or game was launched
-in this engine pass._
+The 0.2.0 development app adds the reviewed V16 DXMT D3D12 component; no
+storefront or game was launched in this engine pass._
 
 ## Current engine work
 
 | Capability | Source and candidate evidence | Remaining acceptance |
 | --- | --- | --- |
 | WineD3D | Existing explicit fallback and conservative Automatic default. The historical OpenGL probe reached feature level 9_3. | Per-title rendering and performance; it is not a modern D3D11 feature-level replacement. |
-| DXMT | Existing optional Direct3D 10/11 Metal view, original x86/x64 device/render/lifecycle fixtures and saved frame-target/spatial tuning. Normal launches and read-only Steam control requests now apply the same managed module selection and tuning. | Sustained play, visible image quality, performance and additional devices. |
+| DXMT | Optional Direct3D 10/11 Metal view and experimental x64 Direct3D 12 in V16. Normal launches and read-only Steam controls share saved selection/tuning. Frame target now also forwards D3D12's setting; spatial scaling remains D3D10/11 only. | Sustained play, visible image quality, performance and additional devices. |
 | DXVK hybrid | Candidate combines source-built legacy D3D9 with modern DX10/11 and official MoltenVK. The complete x86/x64 D3D9+D3D11 GPU matrix passed with exact mapped-library evidence; see below. | Store/game testing and performance. D3D8 stays on its original Wine implementation; D3D12 is not supplied. |
 | Automatic | Bounded complete PE import evidence can select verified DXMT for supported x64 Direct3D 10/11 or the verified hybrid DXVK view for unmixed x86/x64 Direct3D 9. Mixed, unknown or incomplete evidence retains WineD3D. Manual choices remain explicit. | Static imports cannot identify every dynamically loaded API or determine game compatibility. |
 | MSync | Original Wine 11 port of the public generic implementation, coordinated client/server protocol 932. Both retained WineD3D/DXMT views passed enabled/disabled x86/x64 synchronization probes. Opt-in, off by default. | Real-game behavior and measured performance; unsupported mixed wait objects remain a compatibility limit. |
 | High Resolution Mode | Existing optional Retina backing store and 96/192 DPI settings, with idle checks and rollback. | DPI-unaware apps can remain upscaled. Existing choices and defaults stay unchanged. |
 | D3DMetal | Official input passed a separate native host factory/device/256-pixel clear control. The Wine-host factory gate still fails; it is not selectable or included in the shared engine. | A compatible Wine host-interface path and successful Windows API/lifecycle tests; distribution review remains separate. |
-| D3D12 | Separate pinned DXMT development DLL passed original x64 hardware clear, shader draw/readback and patched presentation/resize/recreation probes. It is not in installed build 57 or Automatic. | Exact package/integration acceptance and title tests; this experimental pin lacks DXIL and many modern D3D12 features. See [experiment](D3D12_EXPERIMENT.md). |
+| D3D12 | Included in the exact V16 package under manual DXMT. Actual Core/dispatcher passed shader draw/readback, presentation/resize/recreation, idle V15 upgrade with saved 60 FPS preference, busy refusal and switchback. Automatic remains conservative. | Game/image-quality/performance tests; this experimental pin lacks DXIL and many modern D3D12 features. See [integration](D3D12_EXPERIMENT.md). |
 | Temporal scaling / frame generation | Not supplied by these paths. DXMT spatial scaling and frame targets do not add DLSS, temporal reconstruction or frame generation. | Separate implementation, provenance and API/game tests. |
 | Linux ntsync / fsync | No matching macOS kernel backend is supplied. | Linux kernel interfaces cannot be enabled by an environment toggle on macOS. |
 

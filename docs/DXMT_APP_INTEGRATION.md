@@ -6,6 +6,13 @@ recorded in [launcher validation](LAUNCHER_VALIDATION.md)._
 
 ## Behavior
 
+The 0.2.0 development app's reviewed V16 engine also includes **experimental
+x64 Direct3D 12 under the existing DXMT choice**. Actual Core/dispatcher GPU
+tests and an idle V15 upgrade passed with saved preferences preserved. Frame
+target forwards both D3D11 and D3D12 settings; MetalFX spatial remains D3D10/11
+only. D3D12 is not selected by Automatic. Its FL11_1/SM5_1/no-DXIL limits,
+exact package identity and test steps are in [D3D12 integration](D3D12_EXPERIMENT.md).
+
 Collection’s bottle inspector → Display & Graphics offers **Automatic**,
 **WineD3D**, **DXMT · Experimental**, and a package-gated **DXVK · Experimental**.
 Automatic uses bounded static Direct3D 10/11 evidence to select the verified

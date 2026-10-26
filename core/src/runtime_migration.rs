@@ -87,9 +87,15 @@ pub(super) const GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY: &str =
 pub(super) const GRAPHICS_COMPONENTS_WINE_11_IDENTITY: &str =
     "sha256:2850553486175ba0326c5d4f84ea45f3fb37a5210c6830e77d7bea5ca8f97a0e";
 
+// Complete V16 package attested after adding only the reviewed x64 DXMT
+// D3D12 component and its corresponding source/receipts. Existing renderer
+// views, native UI behavior and synchronization binaries are unchanged.
+pub(super) const DXMT_D3D12_WINE_11_IDENTITY: &str =
+    "sha256:a235fd32318839ec2aa164befec58a83bad8bd988ec04f7433e9a8faa936d9fa";
+
 // Shared exact-package approval for shutdown. This does not grant switchable
 // graphics capabilities or bypass any migration's launcher and idle gates.
-pub(super) const REVIEWED_RUNTIME_IDENTITIES: [&str; 15] = [
+pub(super) const REVIEWED_RUNTIME_IDENTITIES: [&str; 16] = [
     TLS_WINE_11_IDENTITY,
     STEAM_WINE_11_IDENTITY,
     NATIVE_WINE_11_IDENTITY,
@@ -105,6 +111,7 @@ pub(super) const REVIEWED_RUNTIME_IDENTITIES: [&str; 15] = [
     STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
     GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
     GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+    DXMT_D3D12_WINE_11_IDENTITY,
 ];
 
 pub(super) fn is_reviewed_runtime(identity: &str) -> bool {
@@ -120,6 +127,8 @@ pub(super) fn has_reviewed_direct_transition(previous: &str, approved: &str) -> 
         && STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .copied()
+            .chain(DXMT_D3D12_RUNTIME_POLICIES.iter())
             .any(|policy| policy.previous == previous && policy.approved == approved)
 }
 
@@ -140,6 +149,7 @@ pub(super) fn is_reviewed_switchable_runtime(identity: &str) -> bool {
             | STEAM_DOCK_REOPEN_WINE_11_IDENTITY
             | GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY
             | GRAPHICS_COMPONENTS_WINE_11_IDENTITY
+            | DXMT_D3D12_WINE_11_IDENTITY
     )
 }
 
@@ -950,6 +960,101 @@ const GUARDED_STEAM_DOCK_REOPEN_TO_GRAPHICS_COMPONENTS_POLICY: MigrationPolicy<'
         verify_launcher_pe: false,
     };
 
+// Direct successors retain every exact predecessor and its legacy Steam gate.
+// No runtime or Windows profile is rewritten; only an idle verified record moves.
+const DXMT_D3D12_RUNTIME_POLICIES: [MigrationPolicy<'static>; 15] = [
+    MigrationPolicy {
+        previous: TLS_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "tls-to-dxmt-d3d12",
+        verify_launcher_pe: true,
+    },
+    MigrationPolicy {
+        previous: STEAM_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "steam-to-dxmt-d3d12",
+        verify_launcher_pe: true,
+    },
+    MigrationPolicy {
+        previous: NATIVE_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "native-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: SWITCHABLE_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "switchable-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "native-text-editing-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: REFINED_NATIVE_TEXT_EDITING_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "refined-native-ui-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: BOUNDED_NATIVE_UI_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "bounded-native-ui-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: BUNDLED_STEAM_UI_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "bundled-steam-ui-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: SINGLE_STEAM_UI_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "single-steam-ui-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: CAPTURED_TEXT_CONTEXT_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "captured-text-context-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "recognized-text-popup-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "steam-client-quit-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "steam-dock-reopen-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "guarded-steam-dock-reopen-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+    MigrationPolicy {
+        previous: GRAPHICS_COMPONENTS_WINE_11_IDENTITY,
+        approved: DXMT_D3D12_WINE_11_IDENTITY,
+        backup_suffix: "graphics-components-to-dxmt-d3d12",
+        verify_launcher_pe: false,
+    },
+];
+
 const BUNDLED_RUNTIME_POLICIES: [&MigrationPolicy<'static>; 78] = [
     &NATIVE_TO_SWITCHABLE_POLICY,
     &NATIVE_TO_NATIVE_TEXT_EDITING_POLICY,
@@ -1068,12 +1173,21 @@ pub(super) fn maybe_migrate_steam_runtime(
     wine: &Path,
     launcher_path: &Path,
 ) -> Result<Option<RecordRollback>, String> {
+    let policies: Vec<_> = STEAM_RUNTIME_POLICIES
+        .iter()
+        .copied()
+        .chain(
+            DXMT_D3D12_RUNTIME_POLICIES
+                .iter()
+                .filter(|policy| policy.verify_launcher_pe),
+        )
+        .collect();
     migrate_with_policies(
         home,
         bottle_id,
         wine,
         launcher_path,
-        &STEAM_RUNTIME_POLICIES,
+        &policies,
         WINE_SERVER_CHECK_TIMEOUT,
     )
 }
@@ -1088,13 +1202,16 @@ pub(super) fn maybe_migrate_bundled_runtime(
     bottle_id: &str,
     wine: &Path,
 ) -> Result<Option<RecordRollback>, String> {
-    migrate_bundled_with_policies(
-        home,
-        bottle_id,
-        wine,
-        &BUNDLED_RUNTIME_POLICIES,
-        WINE_SERVER_CHECK_TIMEOUT,
-    )
+    let policies: Vec<_> = BUNDLED_RUNTIME_POLICIES
+        .iter()
+        .copied()
+        .chain(
+            DXMT_D3D12_RUNTIME_POLICIES
+                .iter()
+                .filter(|policy| !policy.verify_launcher_pe),
+        )
+        .collect();
+    migrate_bundled_with_policies(home, bottle_id, wine, &policies, WINE_SERVER_CHECK_TIMEOUT)
 }
 
 fn migrate_bundled_with_policies(
@@ -1519,6 +1636,8 @@ mod tests {
         for policy in STEAM_RUNTIME_POLICIES
             .iter()
             .chain(BUNDLED_RUNTIME_POLICIES.iter())
+            .copied()
+            .chain(DXMT_D3D12_RUNTIME_POLICIES.iter())
         {
             assert!(is_reviewed_runtime(policy.previous));
             assert!(is_reviewed_runtime(policy.approved));
@@ -1539,6 +1658,78 @@ mod tests {
             STEAM_CLIENT_QUIT_WINE_11_IDENTITY,
             RECOGNIZED_TEXT_POPUP_WINE_11_IDENTITY
         ));
+    }
+
+    #[test]
+    fn dxmt_d3d12_has_exact_direct_predecessors_with_legacy_gates_preserved() {
+        assert!(is_reviewed_switchable_runtime(DXMT_D3D12_WINE_11_IDENTITY));
+        let sources: std::collections::BTreeSet<_> = DXMT_D3D12_RUNTIME_POLICIES
+            .iter()
+            .map(|policy| policy.previous)
+            .collect();
+        assert_eq!(
+            sources,
+            REVIEWED_RUNTIME_IDENTITIES
+                .into_iter()
+                .filter(|identity| *identity != DXMT_D3D12_WINE_11_IDENTITY)
+                .collect()
+        );
+        assert_eq!(DXMT_D3D12_RUNTIME_POLICIES.len(), 15);
+        for policy in DXMT_D3D12_RUNTIME_POLICIES.iter() {
+            assert_eq!(policy.approved, DXMT_D3D12_WINE_11_IDENTITY);
+            assert_eq!(
+                policy.verify_launcher_pe,
+                matches!(
+                    policy.previous,
+                    TLS_WINE_11_IDENTITY | STEAM_WINE_11_IDENTITY
+                )
+            );
+            assert!(has_reviewed_direct_transition(
+                policy.previous,
+                policy.approved
+            ));
+            assert!(!has_reviewed_direct_transition(
+                policy.approved,
+                policy.previous
+            ));
+        }
+        let mut altered = DXMT_D3D12_WINE_11_IDENTITY.to_owned();
+        altered.pop();
+        altered.push('0');
+        assert!(!is_reviewed_runtime(&altered));
+    }
+
+    #[test]
+    fn dxmt_d3d12_migrations_preserve_preferences_profiles_and_rollback() {
+        for production in DXMT_D3D12_RUNTIME_POLICIES.iter() {
+            let fixture = Fixture::new();
+            prepare_text_editing_fixture(&fixture);
+            fixture.set_predecessor(production.previous);
+            let original = fs::read(&fixture.record_path).unwrap();
+            let contents = bottle_contents(&fixture);
+            let approved = fixture.approved_identity();
+            let policy = MigrationPolicy {
+                previous: production.previous,
+                approved: &approved,
+                backup_suffix: production.backup_suffix,
+                verify_launcher_pe: production.verify_launcher_pe,
+            };
+            let rollback = if policy.verify_launcher_pe {
+                fixture.migrate(&policy)
+            } else {
+                fixture.migrate_bundled(&policy)
+            }
+            .unwrap()
+            .unwrap();
+            assert_eq!(bottle_contents(&fixture), contents);
+            assert_eq!(
+                fs::read(fixture.skipped_switchable_backup(&policy)).unwrap(),
+                original
+            );
+            rollback.restore().unwrap();
+            assert_eq!(fs::read(&fixture.record_path).unwrap(), original);
+            assert_eq!(bottle_contents(&fixture), contents);
+        }
     }
 
     struct Fixture {
@@ -5666,6 +5857,7 @@ mod tests {
                 .filter(|identity| {
                     *identity != GUARDED_STEAM_DOCK_REOPEN_WINE_11_IDENTITY
                         && *identity != GRAPHICS_COMPONENTS_WINE_11_IDENTITY
+                        && *identity != DXMT_D3D12_WINE_11_IDENTITY
                 })
                 .count(),
             13
@@ -6087,7 +6279,8 @@ mod tests {
         assert_eq!(
             REVIEWED_RUNTIME_IDENTITIES
                 .into_iter()
-                .filter(|identity| *identity != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
+                .filter(|identity| *identity != GRAPHICS_COMPONENTS_WINE_11_IDENTITY
+                    && *identity != DXMT_D3D12_WINE_11_IDENTITY)
                 .count(),
             14
         );
@@ -6354,7 +6547,7 @@ mod tests {
                 previous
             ));
         }
-        assert_eq!(REVIEWED_RUNTIME_IDENTITIES.len(), 15);
+        assert_eq!(REVIEWED_RUNTIME_IDENTITIES.len(), 16);
         assert_eq!(STEAM_RUNTIME_POLICIES.len(), 27);
         assert_eq!(BUNDLED_RUNTIME_POLICIES.len(), 78);
         assert!(is_reviewed_switchable_runtime(
@@ -6383,7 +6576,10 @@ mod tests {
     fn graphics_components_direct_edges_select_fourteen_predecessors_without_chaining() {
         let sources: Vec<_> = REVIEWED_RUNTIME_IDENTITIES
             .into_iter()
-            .filter(|identity| *identity != GRAPHICS_COMPONENTS_WINE_11_IDENTITY)
+            .filter(|identity| {
+                *identity != GRAPHICS_COMPONENTS_WINE_11_IDENTITY
+                    && *identity != DXMT_D3D12_WINE_11_IDENTITY
+            })
             .collect();
         assert_eq!(sources.len(), 14);
         assert_direct_edges_without_chaining(

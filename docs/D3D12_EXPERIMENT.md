@@ -1,13 +1,13 @@
-# Direct3D 12 development experiment
+# Experimental Direct3D 12 in Caskrun
 
-_26 October 2026. This is a separate source experiment. Installed build 57,
-its reviewed V15 engine, user bottles, saved graphics choices and Automatic
-selection are unchanged._
+_26 October 2026. Integrated in the 0.2.0 development app through the reviewed
+V16 engine and the existing DXMT bottle option. Game acceptance remains a
+separate user test; Automatic does not select Direct3D 12._
 
 ## Working offscreen path
 
 The existing pinned [DXMT source](https://github.com/3Shain/dxmt/tree/e94c312f5c054263acf261cfa109edf13e757587)
-already contains an experimental D3D12 implementation. Its normal Caskrun build
+already contains an experimental D3D12 implementation. Earlier Caskrun builds
 did not enable that component. The development builder compiles its Windows
 DLL against the matching reviewed DXMT DXGI and Winemetal bridge. It needs no
 new LLVM build, Apple payload, CrossOver component or downloaded game.
@@ -29,9 +29,10 @@ result. No Apple or DXVK rendering implementation is accepted by this gate.
 
 The first app-local load failed because the DLL carried Wine's builtin
 classification. The builder now has two explicit source-build modes:
-Wine-builtin output for a future runtime view, and `--app-local` output for
+Wine-builtin output for the reviewed runtime view, and `--app-local` output for
 the isolated native-override experiment. The latter is linked from source
-without applying the builtin marker. The installed runtime is never edited.
+without applying the builtin marker. Packaging creates a new complete engine;
+it never edits an installed engine in place.
 
 ## Presentation bridge
 
@@ -67,7 +68,37 @@ prefix-scoped shutdown. Keep its generated logs and evidence private. Both
 the whole-process watchdog and GPU-fence deadline are bounded. No storefront,
 account or publisher content is needed.
 
-## Limits and shipping gate
+## App integration and test steps
+
+The V16 package identity is
+`sha256:a235fd32318839ec2aa164befec58a83bad8bd988ec04f7433e9a8faa936d9fa`.
+Its x64 DXMT D3D12 DLL is
+`c22f3717f2ff21b04d4206fe68f1c2f4e0928625d145ca52b1f35cfa9456974c`.
+The documented Wine builtin conversion changes only its reserved DOS marker;
+source build provenance, LGPL notices and all original component inputs remain
+in the package. Base WineD3D, x86 and DXVK component bytes are preserved.
+
+The actual ARM64 Core and bundled dispatcher passed the 38-check shader draw
+and 193-check presentation lifecycle again. A real idle V15-to-V16 app-bundle
+migration preserved the saved DXMT preference, nondefault 60 FPS target and an
+original save sentinel. Busy renderer changes were refused, switchback worked,
+prefix graphics files stayed unchanged and owned storage was removed after
+independent process/file-owner checks. Source test harness:
+`scripts/test-dxmt-d3d12-core.py`.
+
+To test a game, quit that bottle's apps, select **DXMT · Experimental** in its
+existing Display & Graphics inspector, then open the game. Keep a known working
+setting for comparison. The package-gated capability appears only with the
+exact reviewed engine. Direct3D 12 stays outside Automatic's decision rules.
+The managed D3D12 DLL override is bottle-wide; x86 children still have the
+original Wine stub and gain no D3D12 support.
+
+Frame target forwards the same saved bounded value to both D3D11 and D3D12.
+MetalFX spatial remains Direct3D 10/11 only and is labelled accordingly. Saved
+settings stay portable through duplicate and backup/restore. Running bottles
+cannot change renderer, synchronization or tuning in place.
+
+## Limits
 
 This pinned implementation advertises at most feature level 11_1 and shader
 model 5_1. DXIL, geometry/tessellation/stream-output pipelines and other paths
@@ -75,10 +106,9 @@ are incomplete. Some unimplemented calls abort. A successful simple DXBC draw
 does not make modern DirectX 12 games supported or supply ray tracing, DLSS,
 temporal reconstruction or frame generation.
 
-The DLL is not in installed build 57, its DMG, Automatic's decision rules or a
-new selectable backend. Packaging would need exact component/probe receipts,
-runtime identity and capability changes, regression checks and a separate
-game-acceptance stage. Existing working graphics choices stay in place.
+There is no separate D3D12 backend or general compatibility guarantee. Use
+manual DXMT for this experiment. Visible screen composition, fullscreen,
+controllers, sustained play and performance remain title-specific tests.
 
 ## Separate Apple D3DMetal control
 

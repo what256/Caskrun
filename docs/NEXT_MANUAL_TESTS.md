@@ -55,9 +55,10 @@ DXVK and MSync controls require their exact reviewed engine; source or probe
 results alone do not make them available in an older installed app. D3DMetal
 remains unavailable in Wine after its private factory probe failed, despite
 the separate native framework control passing. An isolated DXMT D3D12
-development DLL passed hardware clear and shader draw/readback, but is not
-included in the installed app; do not treat that experiment as a game-ready
-setting. Temporal scaling and frame generation remain unimplemented. See the
+path is now in the 0.2.0 app's V16 engine under manual DXMT. Its actual Core
+shader/presentation/migration tests pass; test games in a separate bottle and
+observe the FL11_1/SM5_1/no-DXIL limits. Automatic does not select D3D12.
+Temporal scaling and frame generation remain unimplemented. See the
 [D3D12 experiment](D3D12_EXPERIMENT.md).
 See [backend status](GRAPHICS_BACKEND_STATUS.md). MSync's unsupported mixed wait
 objects and Vulkan feature limits can affect individual games; retain a known

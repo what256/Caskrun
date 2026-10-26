@@ -1,122 +1,94 @@
+<img src="assets/caskrun-icon.png" width="88" height="88" alt="Caskrun icon">
+
 # Caskrun
 
-**Open-source Windows-app launcher for Apple Silicon, in active development.** This repository publishes source and development tools. Compatibility depends on the app, game and graphics engine; there is no public binary release yet.
+**Windows apps, games and browser favorites in one native Mac collection.**
 
-Caskrun is a new, independent Apple Silicon macOS app for collecting games and apps, managing Wine bottles and installing Windows software. It is **not affiliated with CodeWeavers** and contains no CrossOver application code or assets. The name is provisional pending a publication trademark check. Windows x86/x64 apps remain a compatibility target on Apple Silicon; Intel Mac hardware is outside the project scope.
+Caskrun is an independent, open-source launcher for **Apple Silicon Macs**, in active development. It manages Wine bottles, installs Windows stores and keeps their apps together in a native SwiftUI interface. It is not affiliated with CodeWeavers and includes no proprietary CrossOver application code or assets.
 
-The Caskrun app and core compile only for ARM64. The first Wine compatibility experiment uses an x86_64 Wine process through Rosetta **on an Apple Silicon Mac**; this does not add Intel Mac support.
+**Current development version: 0.2.0.** Source is public; the ready-built development app and DMG are local artifacts. There is no public signed binary release or active update feed yet.
 
-## Start here
+## What you can do
 
-| Area | Current scope |
-| --- | --- |
-| Collection and Discover | Native interface for Windows apps, installed-game discoveries and browser bookmarks |
-| Windows compatibility | Experimental Wine launcher; installer completion, sign-in and gameplay are separate validation stages |
-| Graphics | WineD3D by default; optional DXMT and High Resolution controls with the reviewed development runtime |
-| PS5 | An optional local KytyPS5 adapter has fixture validation only. A separate AnyPS5 experiment ran PS5 DOOM homebrew through Wine; it is not integrated into the app and does not establish retail-game compatibility. |
+- **Collect and launch.** Collection groups Windows apps and discovered Steam, Epic and GOG games into bottle folders. Original app icons stay compact; browser games use game pictures. Click to inspect, double-click to open.
+- **Install stores or your own apps.** Discover includes Steam, Epic, GOG Galaxy, Battle.net, Ubisoft Connect, EA, itch.io and Rockstar. You can also run a local EXE/MSI or import an existing bottle. Installer, sign-in and gameplay results are tracked separately.
+- **Keep control of a bottle.** Rename, duplicate, export, restore and recover deleted bottles. Inspect installed programs, open the C: drive, save launch arguments and use Wine's configuration tools. Running bottles offer Quit Apps and an explicit Force Quit when needed.
+- **Choose graphics when needed.** Automatic uses conservative import evidence. The existing bottle inspector provides WineD3D, DXMT, DXVK, High Resolution and supported MSync controls; ordinary installation needs no Wine picker.
+- **Play in your browser.** Discover has 26 reviewed game/collection links with pictures, per-game browser selection and local bookmarks. Some community ports require your own original game files. No commercial game content is bundled.
+- **Use familiar Mac controls.** Native Dock names and artwork, menu-bar access, window reopen and text-editing controls. Closing Caskrun's window keeps its apps running; full Quit stops its owned Windows sessions. Browser tabs remain under your browser's control.
+- **Keep data local.** Bottles, saves, browser preferences, artwork caches and raw logs stay on your Mac. Shareable diagnostics use a bounded allowlist. Git publication checks reject private paths, credentials, user data and build products.
 
-Start with [Build](#build) for a source-only app, [feature gaps](docs/FEATURE_GAPS.md) for remaining work, or [contributing](CONTRIBUTING.md) to help. Use [SECURITY.md](SECURITY.md) for private security reports.
+The optional PS5 adapter accepts a user-provided local KytyPS5 engine and your own game files. Its app integration has fixture validation only. A separate AnyPS5/Wine experiment ran public PS5 DOOM homebrew; it is not retail-game support. See [PS5 scope](docs/EMULATION_RESEARCH.md) and [AnyPS5 results](docs/ANYPS5_WINE.md).
 
-### Current game results
+## Graphics in the current development engine
 
-On 16 October 2026, a user confirmed that **R.E.P.O. launched and worked with DXMT**. This is a result for that tested setup, not a guarantee for other games or devices. Camp Forest Green Launcher worked in an earlier attempt, but its **“Steam missing” / not logged in** error has recurred and remains unresolved. Broader gameplay, graphics and controller testing is still needed.
+| Option | Available scope | Limits |
+| --- | --- | --- |
+| Automatic | Can select verified DXMT for supported x64 Direct3D 10/11 evidence, or hybrid DXVK for unmixed x86/x64 Direct3D 9 imports. | Mixed, unknown or incomplete evidence keeps WineD3D. Direct3D 12 is not selected automatically. |
+| WineD3D | Existing compatibility fallback. | Its measured OpenGL path is not a modern Direct3D 11/12 replacement. |
+| DXMT | Metal-based Direct3D 10/11; **experimental x64 Direct3D 12** with the reviewed V16 engine. | D3D12 is limited to FL11_1 / SM5_1; DXIL and several advanced pipelines are unsupported. Select DXMT explicitly to test it. |
+| DXVK hybrid | Direct3D 9 plus Direct3D 10/11 through the bundled reviewed MoltenVK. | Vulkan feature limits affect individual titles. No Direct3D 12 through this path. |
+| MSync | Bottle-scoped, opt-in synchronization. | Off by default; supported engine required. Game performance remains to be measured. |
+| High Resolution | Optional Retina backing store and DPI controls. | DPI-unaware apps may remain upscaled; independent of renderer choice. |
+| Apple D3DMetal | Native framework control passed; Wine integration is still under development. | Unavailable until the Wine factory/device/render gates pass. Apple's evaluation component is separately licensed and not published here. |
 
-## Current capabilities
+DXMT frame targets and MetalFX **spatial** output scaling are optional controls. They do not add DLSS, temporal reconstruction, ray tracing or frame generation. Existing saved graphics choices are preserved; changes require an idle bottle.
 
-- Native SwiftUI desktop interface.
-- Rust core for bottle storage, Wine runtime selection, prefix initialization with `wineboot`, and launching a chosen `.exe` or `.msi` in a bottle.
-- Searchable, file-backed catalog with eight experimental automatic install actions: Steam, Epic Games Store, GOG Galaxy, Battle.net, Ubisoft Connect, EA app, itch.io app, and Rockstar Games Launcher. Failed setups retain a per-bottle receipt and installer, whose format and SHA-256 are rechecked before a same-bottle retry. Installation, sign-in and gameplay have separate validation results; see [launcher validation](docs/LAUNCHER_VALIDATION.md).
-- Custom installer flow for any local `.exe` or `.msi`. Caskrun creates a bottle automatically; installing into an existing bottle is available from its inspector on Collection. After the direct installer exits successfully, Caskrun suggests newly found Windows Start Menu/Desktop shortcuts or Program Files executables for explicit addition to Collection, with a manual EXE picker fallback. The installer can leave child processes running, and an EXE's presence does not prove that setup or compatibility succeeded.
-- Manual and catalog setups have a Cancel action. It stops the download or direct Wine process owned by that setup, preserves a retryable catalog receipt when one exists, and leaves other bottles alone. Wine-spawned descendants can remain; the packaged Cancel button still needs a live UI check.
-- Bottle renaming, duplication, recoverable deletion/restore, compressed integrity-checked backup/restore with older folder-backup support, C: drive access in Finder, and saved launchers that can be hidden from Collection without uninstalling them. The right inspector on Collection can search for installed programs, run an EXE, open the bottle's drive and logs, quit Windows apps, and open Wine's configuration and diagnostic tools. App Options provides temporary and saved launch arguments, plus Hide/Show on Collection. Manage Bottle contains rename, duplicate, export, and recoverable deletion; New bottle, Import, and Recently Deleted remain available in the inspector. A per-bottle High Resolution Mode switch is available only while its apps are stopped.
-- An included independent Wine 11.0 development engine in the local DMG. The app selects it automatically; there is no Wine picker or Settings screen. A version check does not establish Windows app compatibility.
-- Per-launch logs with bounded Copy/Save Text, privacy-limited local diagnostic reports, installed-program inventory, recoverable app-icon rebuilding, bottle notes and optional Windows-version control. App renaming and literal one-time arguments are available in the inspector. Discovered shortcuts preserve checked C: working folders through launch, duplicate and backup. See [maintenance workflows](docs/DEMO_MAINTENANCE.md) and the [manual checklist](docs/MANUAL_TEST_CHECKLIST.md).
-- Experimental per-app native Dock names and adaptive macOS artwork from checked Windows executable resources, including a fallback that keeps the friendly name. Service and explicit Chromium/Electron helper roles are hidden; generated native bundles stay in disposable bottle caches. A shared adaptive renderer preserves existing publisher backgrounds, normalizes padding and supports bare marks without double tiles; see [icon composition](docs/ICON_COMPOSITION.md). A user-led original test-window check confirmed one named Dock icon and focus. Vendor app validation remains separate; see [launcher validation](docs/LAUNCHER_VALIDATION.md).
-- **Collection / Discover** share the small floating navigation capsule and + menu. Collection groups Windows apps and installed Steam/Epic/GOG games into named bottle folders; browser bookmarks and explicitly imported PS5 games remain separate entries. One filter menu switches All, Windows, PS5 or Browser and Games or Apps. Click a bottle folder to see its apps and games with the existing controls; double-click opens its primary app. Closing the sidebar returns to the root collection. Inside a folder, double-click or Command-O opens the selected item. The right panel keeps Windows graphics, tools and bottle controls. Discover remains the place to add stores and browser games; there is no separate Library, Game reports or Settings screen.
-- Windows apps and games use their original compact icons; browser games use pictures. Installed Steam icons load automatically from checked local icon files or an exact Steam shortcut association, with a hash-bound official Steam CDN icon fallback. Artwork stays in a private bounded cache. Steamworks Common Redistributables remains installed but is hidden from game cards.
-- **Check for Updates…** lives in the macOS app menu. The app includes pinned Sparkle support for signed ready-built GitHub releases, with shutdown and file-owner checks before installation. There is no published signed binary feed; the menu reports that honestly. See [update delivery](docs/APP_UPDATES.md).
-- Read-only Steam, Epic and GOG manifest readers populate Collection automatically while it is visible and when the app becomes active. Discovery is bounded and restricted to each bottle’s real C: drive; it does not sign in or synchronize an account’s full owned library. Steam games launch through their saved Steam client. Epic/GOG game cards open their saved store, rather than claiming a direct game launch. Presence on disk does not establish compatibility. See [library boundaries](docs/GAME_COMPATIBILITY.md).
-- The + menu can request installation using a Steam store link or AppID through an existing saved Steam client or a new Steam bottle. The user signs in, owns the game and completes installation inside Steam; Caskrun does not import credentials or bypass ownership. The reviewed community snapshot remains in source, but the compatibility browser is no longer exposed. See [compatibility evidence](docs/GAME_COMPATIBILITY.md).
-- Discover offers 26 browser-game and collection links, each with a reviewed game picture. Original game covers are used where a community port has no suitable scene preview. Known saved links reuse their pictures on Collection. Picture downloads are shared and retry transient failures; loading or failed requests no longer show coloured title cards. Community ports, own-file requirements and unverified links are labelled. Games open in the default browser or a per-game selected installed browser; custom public HTTPS bookmarks stay local and do not trigger artwork crawling. Caskrun does not bundle commercial game assets or run websites in Wine. Gameplay remains untested. See [browser links and provenance](catalog/BROWSER_GAMES.md) and [future emulator research](docs/EMULATION_RESEARCH.md).
-- **Experimental PS5 adapter:** import your own game folder, ELF or ZAR file without moving it, then explicitly attach a complete local KytyPS5 Mac folder or app. Imports and the engine record stay in private local metadata, separate from Wine bottles. Caskrun checks supported Mach-O architecture, Rosetta prerequisites and a matching local MoltenVK library, then uses the documented argument-array launch. Imported pictures come from local `icon0.png` when available. Focus, bounded logs, Stop and full Quit track only processes Caskrun started. Original fixture checks cover metadata and process behavior; no emulator or PS5 game has been launched through this adapter. The separate AnyPS5/Wine experiment ran public PS5 DOOM homebrew with rendering, keyboard/mouse input, save/load and relaunch verified. Sound, physical controllers and retail games remain unvalidated; AnyPS5 is not integrated into Caskrun. See [PS5 adapter scope](docs/EMULATION_RESEARCH.md) and [AnyPS5 results](docs/ANYPS5_WINE.md).
-- Optional DXMT controls provide an application-controlled or bounded frame target and MetalFX spatial output scaling. The original x64/x86 probe matrix passed on the development Mac, including renderer ownership, drawing, readback, window lifecycle and refused edits while running. Those API checks do not establish displayed game FPS, image quality or a performance advantage. Automatic still selects WineD3D; High Resolution stays optional and off by default. See [DXMT options and remaining tests](docs/DXMT_OPTIONS.md).
-- The bottle inspector places **Quit Apps** next to **Open** while its apps are running. It requests a clean session shutdown and checks for remaining activity. A slow request offers **Force Quit** after four seconds, with an unsaved-work warning; nothing escalates automatically. Idle bottles hide the quit control.
-- Closing the main window keeps Caskrun available in the macOS menu bar. **Quit Caskrun** waits for Caskrun-owned Windows apps and experimental PS5 engine processes to stop, refuses to exit when shutdown cannot be verified, and leaves unrelated processes alone. Browser tabs belong to the browser and stay open. The menu offers saved Windows apps, Open Caskrun, Collection, Discover, bottle controls, file installation, About and Quit. Earlier Wine shutdown and menu checks are recorded separately from the new PS5 fixture checks.
-- The local development engine adds a native **Edit** menu and Command-C/V/X/A, plus a narrowly scoped Steam text context menu. Main-window Close now hides the retained scene before SwiftUI can terminate it; full Quit remains separate. See [editing and lifecycle validation](docs/NATIVE_TEXT_EDITING.md) for scope and current testing limits.
-- Wine's Desktop and native shortcut locations are isolated inside each Caskrun bottle. A fresh real-Wine bottle created a private Desktop mapping, and the packaged app migrated the existing Caskrun Steam bottle's exact legacy Desktop link on launch without creating another host Desktop shortcut. Automatic shortcut conversion still needs a complete test.
+### What has actually been tested
 
-**The local development DMG includes the Windows engine.** Its native app and core are ARM64; its independent x86_64 Wine 11.0 engine runs through Rosetta and includes project-built FreeType/GnuTLS plus pinned Wine Mono/Gecko. Caskrun selects the included engine without asking for a Wine path. The bundled engine passed `wine --version` and fresh-bottle initialization through the ARM64 core; a self-authored MSI installed through the separate development package. Caskrun rejects Wine paths inside CrossOver or CrossOver-Lab.
+- The hybrid DXVK path passed the original x86/x64 Direct3D 9 and 11 GPU matrix, including shaders/readback, Present, resize and recreation.
+- DXMT's original x86/x64 Direct3D 10/11 tests cover rendering, window lifecycle and saved tuning. Its new x64 D3D12 path passed hardware clear, shader draw/readback and six presentation calls with resize and window recreation in an isolated development test.
+- MSync passed 296 assertions across enabled/disabled, x86/x64 and WineD3D/DXMT combinations.
+- A user confirmed that **R.E.P.O. launched and worked with DXMT** on the tested setup. Camp Forest Green's Steam-detection issue remains a recorded launcher-specific limitation.
 
-The Steam recipe downloaded Valve's installer, created a bottle and launcher, and updated to the sign-in stage. An earlier packaged build showed a black sign-in window and two Wine Dock entries. In a disposable test, an independently patched Wine 11.0 runtime rendered the sign-in window and gave its web helper a single Steam Dock identity with working focus. The current local DMG now bundles that source-built runtime. On first launch, Caskrun migrated only the existing verified Steam bottle from the exact previous runtime to the exact new one, retaining its original runtime record. In an earlier packaged build, the Collection icon launched Steam and its web helpers; the intended CEF flags appeared on the helper command line and Steam logged `WaitingForCredentials`. User-led checks then found a usable sign-in window and one Steam Dock icon that restored focus, although other relaunches briefly appeared black and the window looked low-resolution. Later isolated measurements confirmed that High Resolution sharpens DPI-aware Steam and Wine builtin windows, while a DPI-unaware itch.io installer remains upscaled. High Resolution remains optional and off by default; its effect on game performance is untested. See [display measurements](docs/LAUNCHER_VALIDATION.md). Steam's original installer stalled twice in the user-data bottle; guarded same-bottle recovery succeeded from the core, but the SwiftUI retry action has not been tested. See [Steam results](docs/STEAM_SMOKE.md).
+API tests do not establish broad game compatibility, visible image quality or faster gameplay. Store installation, authentication, game launch and sustained play are separate checks. Anti-cheat, DRM, missing graphics features, media and publisher updates can prevent individual titles from working.
 
-The October isolated launcher round found an Epic MSI execute-access fault and a GOG component/service failure after setup returned zero and saved a launcher. GOG's native Dock name and artwork were confirmed, but its reopened window was blank; diagnostics traced its service failure to a loopback socket bind. Battle.net and Ubisoft setup completed and saved launchers, but their client launches produced no usable windows. itch.io setup completed, but its client window was blank. The EA agreement was not accepted; its test was closed. Rockstar setup started, but automatic approval blocked window inspection; the disposable test was canceled and cleaned. **Those isolated tests did not verify store authentication, gameplay, real-game graphics or controller behavior.** The later user-confirmed R.E.P.O. result above covers one game with DXMT; it does not resolve these separate launcher failures. See the stage-by-stage [launcher validation record](docs/LAUNCHER_VALIDATION.md) and [compatibility implementation plan](docs/COMPATIBILITY_PLAN.md). The local DMG is ad-hoc signed and not notarized for public distribution; binary publication still needs a separate privacy and runtime-license review. See [runtime notes](docs/LOCAL_WINE_RUNTIME.md), [Epic results](docs/EPIC_SMOKE.md), and [feature gaps](docs/FEATURE_GAPS.md).
+See [current backend evidence](docs/GRAPHICS_BACKEND_STATUS.md), [Direct3D 12 integration](docs/D3D12_EXPERIMENT.md), [launcher results](docs/LAUNCHER_VALIDATION.md) and [the next manual tests](docs/NEXT_MANUAL_TESTS.md).
 
-New bottle backups use a compressed `.caskrun-backup` archive with a checked entry manifest and per-file SHA-256 integrity. Older inspectable `.caskrun-bottle` folder backups remain supported. Import validates the payload before creating a bottle; export publishes a complete new archive without overwriting an existing file. Duplicate/export require stopped bottle apps and verified prefix ownership. Close all apps before exporting; launchers pointing outside the bottle may need to be selected again after import. Browser bookmarks are separate local app data and are not included in bottle backups.
+## Build from source
 
-The + menu also offers **Import from CrossOver** for an idle, existing **win64 bottle folder** containing `drive_c` and `system.reg`. It copies installed apps and data into a new Caskrun bottle without changing the source, excluding CrossOver metadata and engine files, the Windows tree, builtin programs, source symlinks, and external drive mappings. The conventional `crossover` Windows profile and its app registry settings are preserved; the importing account is connected to that profile when safe, and conflicts are reported. Imported Steam clients receive the same native name/focus and CEF rendering behavior as Caskrun-installed Steam, without inventing an installer receipt. Dependencies may need repair or reinstallation under Caskrun's engine. `.cxarchive` files and 32-bit-only prefixes are unsupported. A real copy passed byte-for-byte app/data verification and source-preservation checks; that copy check did not test gameplay or the import picker. Current game results are recorded above.
-
-Game sound uses normal audio output and needs no microphone permission. **Caskrun → Microphone Access…** requests macOS microphone consent only when selected, without recording audio. Windows apps may request their own access when voice chat is used. Permission status does not establish that a particular game's voice chat works.
-
-Moving a bottle to Recently Deleted keeps its files in Caskrun's own data directory so it can be restored. For an initialized bottle, Caskrun refuses the move if its Wine server is still active or a matching independent runtime cannot be checked. Restore does not require Wine. **+ → Recently Deleted…** opens the deleted-bottle controls. The trash button asks for confirmation before permanently erasing that deleted bottle's apps, games and files. Permanent deletion refuses active bottles, running processes or file holders, unverified ownership and unsafe directory layouts. It never follows payload symlinks. Automatic cleanup is not implemented.
-
-## What is coming
-
-- More reliable store installation, recovery, and launcher updates.
-- Broader app and game validation on Apple Silicon.
-- Real-game tests for DXMT, its optional frame target and spatial scaling; other graphics backends and controller improvements as independent runtimes support them.
-- Better backups, app updates, clean-machine testing, and release packaging.
-
-These are development goals, without a promised release date. See [feature gaps](docs/FEATURE_GAPS.md) for current limits and [the feature inventory](docs/FEATURES.md) for implemented and planned behavior.
-
-## Build
-
-Requires an Apple Silicon Mac, macOS 14 or later, Xcode command-line tools, Python 3, Rust/Cargo with edition-2024 support, and the `aarch64-apple-darwin` Rust target. If using rustup, add the target with `rustup target add aarch64-apple-darwin`.
+Requires an Apple Silicon Mac, macOS 14+, Xcode command-line tools, Python 3 and Rust/Cargo with edition-2024 support. Add the ARM64 target if needed:
 
 ```sh
+rustup target add aarch64-apple-darwin
 ./scripts/build.sh
 open .build/Caskrun.app
 ```
 
-Run these commands from the repository root. The source build opens the interface but **does not bundle Wine**. Windows installation and launching require an independently obtained compatible Wine runtime; the core discovers `wine` on its process `PATH` or accepts `CASKRUN_WINE`. The native app prefers a bundled engine when one exists. Reviewed runtime builds and their prerequisites are documented in [runtime notes](docs/LOCAL_WINE_RUNTIME.md) and [DXMT app integration](docs/DXMT_APP_INTEGRATION.md). Rosetta is required for the x86_64 development engine. A generic Wine installation does not provide the project's reviewed DXMT or native Dock identity behavior.
+The app and Core are ARM64. The independent x86/x64 Windows engine runs through Rosetta on Apple Silicon; Intel Macs are outside the target scope.
 
-The build stays in `.build/`; the script does not install into `/Applications`.
-Builds refuse to replace a Caskrun app while its own process or bundled Wine runtime is in use. To prepare a separate app while Steam keeps running from `.build/Caskrun.app`, set `CASKRUN_BUILD_OUTPUT_DIR="$PWD/.build/candidate"` for `build.sh` or `CASKRUN_PACKAGE_OUTPUT_DIR="$PWD/.build/candidate"` for `package-dmg.sh`.
+A plain source build does **not** bundle Wine. The Core can discover an independently obtained compatible runtime on `PATH`, or use `CASKRUN_WINE`. The reviewed DXMT/DXVK, synchronization and native app integrations require the matching complete Caskrun development runtime. A generic Wine installation does not provide those capabilities. See [runtime preparation](docs/LOCAL_WINE_RUNTIME.md) and [DXMT integration](docs/DXMT_APP_INTEGRATION.md).
 
-For a local development DMG, stage the reviewed runtime at `.build/native-text-wine-runtime-dev-v12/`. The default packager uses this package; `CASKRUN_PACKAGE_NATIVE_RUNTIME_NAME` can select another explicitly prepared package. WineD3D remains the default renderer and DXMT is an optional experimental bottle control. Runtime source and patch instructions are in [DXMT app integration](docs/DXMT_APP_INTEGRATION.md). Package into an isolated build directory, then publish the verified image to `dist/`:
+### Local development app and DMG
+
+Prepare the reviewed engine at `.build/native-text-wine-runtime-dev-v16/`. Runtime provenance, corresponding source and license notices must remain with it. Then:
 
 ```sh
 mkdir -p .build/release-candidate
 CASKRUN_PACKAGE_OUTPUT_DIR="$PWD/.build/release-candidate" ./scripts/package-dmg.sh
 ./scripts/publish-dev-dmg.sh .build/release-candidate
+(cd dist && shasum -a 256 -c Caskrun-0.2.0-arm64-dev.dmg.sha256)
 ```
 
-Packaging rebuilds the ARM64 app, includes the runtime and its source/license notices, and verifies the image. Publishing verifies the candidate and any existing deliverable before replacing the visible DMG and SHA-256 file; it does not replace an app bundle serving a running Wine process. The DMG is ad-hoc signed and **not notarized for public distribution**. `./scripts/build.sh` alone creates a lightweight app without a bundled engine.
+The scripts verify the exact approved runtime, nested signatures and disk image. They refuse to replace an app while its processes or engine files are in use. The local DMG is ad-hoc signed and not notarized for public distribution; `dist/`, runtime binaries and user data are excluded from Git. Binary publication needs its own privacy and runtime-license review.
 
-The published local development image is at `dist/Caskrun-0.1.0-arm64-dev.dmg`, with its SHA-256 file beside it. The `dist/` folder contains local deliverables and is not committed to Git or uploaded as a release.
+Sparkle support is included for signed ready-built GitHub updates. **Check for Updates…** reports the absence of a configured public feed honestly. See [update delivery](docs/APP_UPDATES.md).
+
+### Tests
 
 ```sh
-(cd dist && shasum -a 256 -c Caskrun-0.1.0-arm64-dev.dmg.sha256)
+cargo test --locked --manifest-path core/Cargo.toml -- --test-threads=1
+python3 scripts/test_dxmt_d3d12_dev.py
+python3 scripts/test_dxmt_d3d12_harness.py
+python3 scripts/test_package_dxmt_d3d12.py
 ```
 
-To test the core without affecting your real bottles:
+GPU harnesses require the reviewed runtime and original compiled probe fixtures; they create disposable owned bottles and verify mapped graphics libraries before rendering. They never use your real bottles. Keep raw test logs private. See the individual scripts and [manual checklist](docs/MANUAL_TEST_CHECKLIST.md) for scope.
 
-```sh
-cd core
-cargo test -- --test-threads=1
-CASKRUN_HOME="$(mktemp -d)" cargo run -- list
-```
+## Project status and contributing
 
-An earlier serial core suite passed **440 Rust unit tests and 6 integration tests, with 2 existing tests ignored**. The earlier browser and maintenance validation recorded **125 Python checks** and **104 Swift checks**; the complete SwiftUI app typecheck also passed with microphone authorization support. These cover browser URL privacy and persistence, compatibility evidence, installed-game manifests, Steam installation requests and the existing maintenance workflows. Its original DXMT matrix separately exercises frame targets and spatial scales under both Windows architectures; see the [recorded evidence](docs/DXMT_OPTIONS.md). Source, API and fixture tests do not establish broad publisher-client or real-game compatibility. See [maintenance workflows](docs/DEMO_MAINTENANCE.md), [manual testing](docs/MANUAL_TEST_CHECKLIST.md), and [launcher validation](docs/LAUNCHER_VALIDATION.md).
+Caskrun is usable development software, with compatibility work ongoing. Priorities include more reliable stores, real-game validation, graphics coverage, media/controllers, clean-machine installation and signed releases. No performance advantage over other launchers is claimed.
 
-## Design and scope
+Read [CONTRIBUTING.md](CONTRIBUTING.md), [feature gaps](docs/FEATURE_GAPS.md), [feature inventory](docs/FEATURES.md) and [SECURITY.md](SECURITY.md). The project name remains provisional pending a publication trademark check.
 
-See [docs/FEATURES.md](docs/FEATURES.md) for the feature inventory and validation limits. [assets/caskrun-icon.png](assets/caskrun-icon.png) retains the original Caskrun mark for Finder and Dock; [assets/caskrun-menubar-template.png](assets/caskrun-menubar-template.png) is its monochrome menu-bar cutout. The floating capsule has Collection, Discover and a + menu. Command-F reveals search; Command-3 opens bottle management. [UI validation](docs/UI_SMOKE.md) records each layout and its checks. The build script generates the app’s `.icns` sizes.
-
-Caskrun's original app and core are available under MIT ([LICENSE](LICENSE)). Separately licensed patches, data and runtime components retain their own terms; see [third-party notices](THIRD_PARTY_NOTICES.md). Runtime binaries are excluded from this source repository and are included only in the local development DMG with notices and source references.
-
-
-## Contributing and source license
-
-Caskrun's original app, core, catalog metadata and build tooling are MIT-licensed. The separately attributed Highball compatibility snapshot is CC0-1.0; see [data provenance](docs/GAME_COMPATIBILITY.md) and its bundled licence. Wine and DXMT patches are LGPL-2.1-or-later; the separately attributed AnyPS5 patches are GPL-2.0-only. See [third-party notices](THIRD_PARTY_NOTICES.md) and [AnyPS5 patch terms](runtime-patches/anyps5/README.md). This source repository excludes local builds, runtimes, installers, bottles, logs, and release images. No application binary is distributed through GitHub yet.
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before committing. The local privacy checks protect staged files and outgoing Git history; local author identity and private match terms stay in `.git/`.
+Caskrun's original app, Core and tooling are [MIT licensed](LICENSE). Wine/DXMT patches are LGPL-2.1-or-later; attributed AnyPS5 patches are GPL-2.0-only. Other components, data and artwork retain their own terms: see [third-party notices](THIRD_PARTY_NOTICES.md). No CrossOver application code, recipes, assets or extracted runtime is included.

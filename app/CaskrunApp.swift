@@ -251,6 +251,7 @@ struct BottleGraphicsStatus: Decodable, Sendable {
     let selected_backend: String
     let effective_backend: String
     let dxmt_available: Bool
+    let dxmt_d3d12_available: Bool?
     let dxvk_available: Bool
     let dxvk_unavailable_reason: String?
     let unavailable_reason: String?
@@ -4719,7 +4720,9 @@ struct CaskrunApp: App {
                           model.loadingBottleGraphics.contains(bottle.id) || model.status.wine_path == nil ||
                           model.sessionState(for: bottle).activity == .running || model.isStoppingBottle(bottle.id))
                 Text(status.effective_backend == "dxmt"
-                     ? "DXMT translates DirectX 10/11 to Metal. Game compatibility still needs testing."
+                     ? (status.dxmt_d3d12_available == true
+                        ? "DXMT translates DirectX 10/11 and experimental 64-bit DirectX 12 to Metal. DirectX 12 is limited to FL11_1 / SM5_1; DXIL is unsupported."
+                        : "DXMT translates DirectX 10/11 to Metal. Game compatibility still needs testing.")
                      : status.effective_backend == "dxvk"
                      ? "DXVK translates DirectX 9–11 through Vulkan. Game compatibility still needs testing."
                      : "WineD3D is the default renderer.")
