@@ -6,6 +6,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location(
@@ -49,6 +50,51 @@ class HostResultContract(unittest.TestCase):
             records = copy.deepcopy(self.records)
             records[-1][field] = value
             self.assertFalse(probe.probe_passed(0, records))
+
+
+class HostSourceProof(unittest.TestCase):
+    def proof(self, thread=False):
+        names = (*probe.PATCHES, *((probe.THREAD_PATCH,) if thread else ()))
+        return {"source_patches": {name: "reviewed-" + name for name in names}}
+
+    def digest(self, path):
+        return "reviewed-" + path.name
+
+    def test_original_three_patch_baseline_is_reproducible(self):
+        with patch.object(probe.harness, "digest", side_effect=self.digest):
+            probe.checked_source_patches(self.proof(), require_thread_validation=True)
+
+    def test_unknown_or_missing_patch_is_refused(self):
+        for name in (*probe.PATCHES, "unknown.patch"):
+            proof = self.proof()
+            if name == "unknown.patch":
+                proof["source_patches"][name] = "unreviewed"
+            else:
+                del proof["source_patches"][name]
+            with self.assertRaises(probe.runner.Error):
+                probe.checked_source_patches(proof)
+
+    def test_new_thread_patch_requires_source_review(self):
+        with self.assertRaises(probe.runner.Error):
+            probe.checked_source_patches(self.proof(thread=True))
+
+    def test_thread_test_and_apple_test_have_separate_gates(self):
+        proof = self.proof(thread=True)
+        proof["native_thread_start_source_reviewed"] = True
+        with patch.object(probe.harness, "digest", side_effect=self.digest), \
+             patch.object(probe, "checked_thread_source_provenance"):
+            probe.checked_source_patches(proof, require_thread_validation=False)
+            with self.assertRaises(probe.runner.Error):
+                probe.checked_source_patches(proof, require_thread_validation=True)
+            proof["native_thread_start_validation_passed"] = True
+            probe.checked_source_patches(proof, require_thread_validation=True)
+
+    def test_modified_source_is_refused(self):
+        proof = self.proof()
+        proof["source_patches"][probe.PATCHES[0]] = "different"
+        with patch.object(probe.harness, "digest", side_effect=self.digest):
+            with self.assertRaises(probe.runner.Error):
+                probe.checked_source_patches(proof)
 
 
 if __name__ == "__main__":

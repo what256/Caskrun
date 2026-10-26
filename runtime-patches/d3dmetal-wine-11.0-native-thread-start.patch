@@ -1,0 +1,216 @@
+Original opt-in Wine 11 x64 native-thread start boundary. LGPL-2.1-or-later.
+
+Apply after d3dmetal-wine-11.0-non-native-regions.patch and
+ d3dmetal-wine-11.0-native-import-abi.patch, over the same reviewed Wine 11
+ baseline. This contains original Caskrun code only, with no Apple or
+ CrossOver implementation and no manual GS/TSD/signal changes.
+
+Only starts inside the explicitly opted-in support dylib's already validated
+executable __TEXT range are selected, and WoW64 is excluded. Preserve the
+original start for server_init_thread and in the existing thread_data fields;
+only the entry handed to normal signal_start_thread becomes our own resolved
+PE relay. Missing paired PE relay fails explicitly, never calls NULL or falls
+back to the broken direct native start. Default and outside-range starts keep
+Wine's ordinary route. No additional heap/TLS allocation is used.
+
+The relay returns through unchanged BaseThreadInitThunk/RtlExitUserThread
+semantics. Its appended owned Unix call obtains and rechecks the current
+thread's original start/argument, then invokes the typed Microsoft-ABI native
+callback through Wine's ordinary native transition. The caller cannot supply
+an alternate start pointer. Prior Unix indices are retained; the new WoW64
+entry refuses support. The private x64 PE export is appended at the end of
+ntdll.spec so existing auto-assigned export ordinals remain unchanged.
+
+Build the matching NTDLL PE and native halves together. This experiment is not
+an accepted runtime capability and has no Apple factory or game claim until
+independent ordinary-PE/native-thread and combined graphics gates pass.
+
+--- a/dlls/ntdll/ntdll.spec
++++ b/dlls/ntdll/ntdll.spec
+@@ -1765,3 +1765,6 @@
+ @ cdecl wine_get_version()
+ @ cdecl wine_get_build_id()
+ @ cdecl wine_get_host_version(ptr ptr)
++
++# Original opt-in Caskrun native-thread bridge. Keep at end to preserve ordinals.
++@ stdcall -private -norelay -arch=x86_64 __wine_caskrun_d3dmetal_thread_start(ptr)
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -729,3 +729,19 @@
+         RtlFreeHeap( GetProcessHeap(), 0, fls );
+     }
+ }
++
++#ifdef __x86_64__
++/***********************************************************************
++ * Original opt-in PE relay for a selected native Microsoft-ABI thread start.
++ * BaseThreadInitThunk and the normal Windows thread exit path stay unchanged.
++ */
++NTSTATUS WINAPI __wine_caskrun_d3dmetal_thread_start( void *arg )
++{
++    struct caskrun_native_thread_start_params params = { STATUS_UNSUCCESSFUL };
++    NTSTATUS status;
++
++    (void)arg;
++    status = WINE_UNIX_CALL( unix_caskrun_native_thread_start, &params );
++    return status ? status : params.result;
++}
++#endif
+--- a/dlls/ntdll/unixlib.h
++++ b/dlls/ntdll/unixlib.h
+@@ -72,6 +72,13 @@
+     SIZE_T size;
+ };
+ 
++/* Result of the opt-in native thread callback. No start pointer is supplied
++ * by the PE caller: the Unix side uses its current thread's original state. */
++struct caskrun_native_thread_start_params
++{
++    NTSTATUS result;
++};
++
+ enum ntdll_unix_funcs
+ {
+     unix_load_so_dll,
+@@ -83,6 +90,7 @@
+     unix_wine_spawnvp,
+     unix_system_time_precise,
+     unix_register_non_native_region,
++    unix_caskrun_native_thread_start,
+ };
+ 
+ extern unixlib_handle_t __wine_unixlib_handle;
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1460,6 +1460,7 @@
+  * for the process lifetime, as in Apple's public Homebrew formula. */
+ #if defined(__APPLE__) && defined(__x86_64__)
+ ULONG_PTR caskrun_d3dmetal_text_begin, caskrun_d3dmetal_text_end;
++PRTL_THREAD_START_ROUTINE p__wine_caskrun_d3dmetal_thread_start;
+ static void *d3dmetal_support_library;
+ static void (*d3dmetal_register_region)(void *, void *);
+ 
+@@ -1533,6 +1534,7 @@
+     unixcall_wine_spawnvp,
+     system_time_precise,
+     register_non_native_region,
++    caskrun_d3dmetal_run_native_thread,
+ };
+ 
+ 
+@@ -1541,6 +1543,7 @@
+ static NTSTATUS wow64_load_so_dll( void *args ) { return STATUS_INVALID_IMAGE_FORMAT; }
+ static NTSTATUS wow64_unwind_builtin_dll( void *args ) { return STATUS_UNSUCCESSFUL; }
+ static NTSTATUS wow64_register_non_native_region( void *args ) { return STATUS_NOT_SUPPORTED; }
++static NTSTATUS wow64_caskrun_native_thread_start( void *args ) { return STATUS_NOT_SUPPORTED; }
+ 
+ const unixlib_entry_t unix_call_wow64_funcs[] =
+ {
+@@ -1553,6 +1556,7 @@
+     wow64_wine_spawnvp,
+     system_time_precise,
+     wow64_register_non_native_region,
++    wow64_caskrun_native_thread_start,
+ };
+ 
+ #endif  /* _WIN64 */
+@@ -2023,6 +2027,15 @@
+     GET_FUNC( LdrInitializeThunk );
+     GET_FUNC( LdrSystemDllInitBlock );
+     GET_FUNC( RtlUserThreadStart );
++#if defined(__APPLE__) && defined(__x86_64__)
++    /* Resolve only our own published PE export. A selected opt-in image must
++     * never fall through to a direct native start when the paired relay is
++     * missing. Default and WoW64 startup do not require the optional relay. */
++    p__wine_caskrun_d3dmetal_thread_start = (void *)find_named_export( module, exports,
++                                             "__wine_caskrun_d3dmetal_thread_start" );
++    if (!is_wow64() && caskrun_d3dmetal_text_begin && !p__wine_caskrun_d3dmetal_thread_start)
++        fatal_error( "Caskrun native-thread support requires its matching NTDLL PE relay\n" );
++#endif
+     GET_FUNC( __wine_ctrl_routine );
+     GET_FUNC( __wine_syscall_dispatcher );
+     GET_FUNC( __wine_unix_call_dispatcher );
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1124,9 +1124,35 @@
+  *
+  * Startup routine for a newly created thread.
+  */
++/* Original opt-in callback boundary. Wine's normal Unix transition supplies
++ * native stack/TSD state; no GS/TSD state is changed manually. Thread state
++ * stays in Wine's existing TEB storage, with no allocation for a suspended
++ * thread that is terminated before the callback starts. */
++NTSTATUS caskrun_d3dmetal_run_native_thread( void *args )
++{
++#if defined(__APPLE__) && defined(__x86_64__)
++    struct caskrun_native_thread_start_params *params = args;
++    struct ntdll_thread_data *thread_data = ntdll_get_thread_data();
++    typedef NTSTATUS (__attribute__((ms_abi)) *native_thread_start)(void *);
++
++    if (!params || !p__wine_caskrun_d3dmetal_thread_start ||
++        !caskrun_d3dmetal_is_selected_thread_start( thread_data->start ))
++        return STATUS_INVALID_PARAMETER;
++
++    /* Recheck the explicitly selected support image on the executing thread.
++     * Neither the PE argument nor the Unix-call payload can nominate a target. */
++    params->result = ((native_thread_start)thread_data->start)( thread_data->param );
++    return STATUS_SUCCESS;
++#else
++    (void)args;
++    return STATUS_NOT_SUPPORTED;
++#endif
++}
++
+ static void start_thread( TEB *teb )
+ {
+     struct ntdll_thread_data *thread_data = (struct ntdll_thread_data *)&teb->GdiTebBatch;
++    PRTL_THREAD_START_ROUTINE entry;
+     BOOL suspend;
+ 
+     thread_data->syscall_table = KeServiceDescriptorTable;
+@@ -1134,7 +1160,19 @@
+     thread_data->pthread_id = pthread_self();
+     pthread_setspecific( teb_key, teb );
+     server_init_thread( thread_data->start, &suspend );
+-    signal_start_thread( thread_data->start, thread_data->param, suspend, teb );
++    entry = thread_data->start;
++#if defined(__APPLE__) && defined(__x86_64__)
++    if (caskrun_d3dmetal_is_selected_thread_start( entry ))
++    {
++        if (!p__wine_caskrun_d3dmetal_thread_start)
++        {
++            ERR( "Selected native thread has no matching Caskrun NTDLL PE relay\n" );
++            abort_thread( STATUS_ENTRYPOINT_NOT_FOUND );
++        }
++        entry = p__wine_caskrun_d3dmetal_thread_start;
++    }
++#endif
++    signal_start_thread( entry, thread_data->param, suspend, teb );
+ }
+ 
+ 
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -324,6 +324,7 @@
+ extern NTSTATUS signal_alloc_thread( TEB *teb );
+ extern void signal_free_thread( TEB *teb );
+ extern void signal_init_process(void);
++extern NTSTATUS caskrun_d3dmetal_run_native_thread( void *args );
+ extern void DECLSPEC_NORETURN signal_start_thread( PRTL_THREAD_START_ROUTINE entry, void *arg,
+                                                    BOOL suspend, TEB *teb );
+ extern SYSTEM_SERVICE_TABLE KeServiceDescriptorTable[4];
+@@ -698,6 +699,14 @@
+ #if defined(__APPLE__) && defined(__x86_64__)
+ #include "wine/asm.h"
+ extern ULONG_PTR caskrun_d3dmetal_text_begin, caskrun_d3dmetal_text_end;
++extern PRTL_THREAD_START_ROUTINE p__wine_caskrun_d3dmetal_thread_start;
++static inline BOOL caskrun_d3dmetal_is_selected_thread_start( PRTL_THREAD_START_ROUTINE start )
++{
++    ULONG_PTR address = (ULONG_PTR)start;
++
++    return !is_wow64() && caskrun_d3dmetal_text_begin &&
++           caskrun_d3dmetal_text_begin <= address && address < caskrun_d3dmetal_text_end;
++}
+ #define CASKRUN_D3DMETAL_ABI_EXPORT(api, native_impl, apple_impl) \
+     asm( ".text\n\t.align 4\n\t.globl " __ASM_NAME(#api) "\n" \
+          __ASM_NAME(#api) ":\n\t" \

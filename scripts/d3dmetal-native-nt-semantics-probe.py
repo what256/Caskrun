@@ -5,11 +5,13 @@ The selected module is a clearly named mock support dylib, never Apple code.
 It implements the two published region-support contracts solely to trigger the
 loader boundary. Its callback verifies real Wine event, semaphore, suspended
 thread, termination and close semantics from both calling conventions.
+Candidate images must be staged separately; neither mode copies or signs them.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import argparse
 import json
 import os
 from pathlib import Path
@@ -31,11 +33,17 @@ def module(name, path):
     return result
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--existing-reviewed-candidate", action="store_true",
+                        help="validate and test the reviewed four-patch candidate without replacing any image")
+    args = parser.parse_args(argv)
     abi = module("d3dmetal_abi_contract", ROOT / "scripts/d3dmetal-native-abi-probe.py")
     runner = module("d3dmetal_nt_owned_session", ROOT / "scripts/test-dxmt-d3d12-dev.py")
-    builder = module("d3dmetal_nt_builder", ROOT / "scripts/build-wine-steam-reopen-dev.py")
+    host = module("d3dmetal_nt_candidate_guard", ROOT / "scripts/test-d3dmetal-host-dev.py")
     TEST.mkdir(exist_ok=True)
+    host.local_path(TEST, True)
+    host.require_idle(TEST)
     header = '''#include <stdint.h>
 #include <stdbool.h>
 #include <dlfcn.h>
@@ -135,13 +143,35 @@ void register_non_native_code_region(void *start, void *end) {
                                 capture_output=True, timeout=30)
     runner.require(inspection.returncode == 1 and not inspection.stdout and not inspection.stderr,
                    "Private candidate idleness was not established; no image was replaced")
-    target = package / "runtime/lib/wine/x86_64-unix/ntdll.so"
-    shutil.copyfile(WORK / "engine/base-build/dlls/ntdll/ntdll.so", target)
-    builder.PACKAGE.repair_image(package, target)
+    paired = {name: host.local_path(package / relative) for name, relative in host.HOST_FILES.items()}
+    if args.existing_reviewed_candidate:
+        proof = runner.harness.read_json(host.local_path(WORK / "combined-candidate-proof.json"))
+        runner.require(set(proof.get("source_patches", {})) == set(host.PATCHES) | {host.THREAD_PATCH},
+                       "Existing-candidate mode requires the exact four reviewed source patches")
+        host.checked_source_patches(proof, require_thread_validation=True)
+        for name, path in paired.items():
+            runner.require(runner.harness.digest(path) == proof["host_files"][name],
+                           "A reviewed paired candidate image differs")
+    else:
+        # The original mode accepts only the known, separately staged pair.
+        # Never downgrade the native half under a newer paired PE driver.
+        runner.require(runner.harness.digest(paired["ntdll.dll"]) ==
+                       "7872c52720c1a0fab9bd2c9045905f924e51691cd16a8623736456e2357d9999",
+                       "A newer paired NTDLL needs --existing-reviewed-candidate; no image was replaced")
+        runner.require(runner.harness.digest(paired["ntdll.so"]) ==
+                       "7ec6a352ae10ff7f08871933d4d1702237d06b4aa6cb76d5f5b522bd00efd59d",
+                       "Stage the exact matching legacy native image separately; no image was replaced")
+    for relative, wanted in host.EXECUTABLES.items():
+        runner.require(runner.harness.digest(host.local_path(package / relative)) == wanted,
+                       "A reviewed common execution input differs")
+    selected = {name: runner.harness.digest(path) for name, path in paired.items()}
+    common = {relative: runner.harness.digest(host.local_path(package / relative))
+              for relative in host.EXECUTABLES}
     runner.EXPERIMENT = TEST
     session = runner.Session(package)
     (TEST / "active-session.json").write_text(json.dumps({"root": str(session.root), "prefix": str(session.prefix)}) + "\n")
-    result = {"passed": False, "mock_support_only": True}
+    result = {"passed": False, "mock_support_only": True,
+              "existing_reviewed_candidate": args.existing_reviewed_candidate}
     try:
         wine = package / "bin/wine"
         env = session.environment("wined3d")
@@ -161,6 +191,7 @@ void register_non_native_code_region(void *start, void *end) {
         code, data = session.invoke([wine, fixture], env, "nt-semantics", 30)
         runner.require(output.is_file(), "Mock region callback did not finish its NT test")
         result = json.loads(output.read_text())
+        result["existing_reviewed_candidate"] = args.existing_reviewed_candidate
         result["exit_code"] = code
         result["fixture_main_reached"] = b'"fixture_main_reached":true' in data
         result["passed"] = result["passed"] and code == 0 and result["fixture_main_reached"]
@@ -170,6 +201,13 @@ void register_non_native_code_region(void *start, void *end) {
         try:
             session.stop_and_check_idle()
             session._validate_owner()
+            for name, path in paired.items():
+                runner.require(runner.harness.digest(path) == selected[name], "A paired candidate image changed during NT tests")
+            for relative, wanted in common.items():
+                runner.require(runner.harness.digest(host.local_path(package / relative)) == wanted,
+                               "A common execution input changed during NT tests")
+            result["candidate_images_unchanged"] = True
+            result["paired_sha256"] = selected
             runner.require(shutil.rmtree.avoids_symlink_attacks, "Safe fixture removal is unavailable")
             shutil.rmtree(session.root)
             result["cleanup"] = "removed_after_no_owners_verified"

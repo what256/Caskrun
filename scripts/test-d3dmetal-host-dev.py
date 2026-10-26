@@ -31,6 +31,7 @@ PATCHES = (
     "d3dmetal-wine-11.0-native-import-abi.patch",
     "d3dmetal-wine-11.0-macdrv-host.patch",
 )
+THREAD_PATCH = "d3dmetal-wine-11.0-native-thread-start.patch"
 PROBE_SOURCES = ("d3dmetal-smoke.c", "d3d12-smoke.c")
 HOST_FILES = {
     "ntdll.dll": "runtime/lib/wine/x86_64-windows/ntdll.dll",
@@ -114,6 +115,45 @@ def verify_official_component(package):
     return framework / "Versions/A/D3DMetal", package / "runtime/lib/external/libd3dshared.dylib"
 
 
+def checked_thread_source_provenance(proof):
+    path = local_path(PROJECT / ".build/d3dmetal-native-thread-integration/full-source-provenance.json")
+    require(harness.digest(path) == proof.get("wine_source_provenance_record_sha256"),
+            "The reviewed complete Wine source audit changed")
+    record = harness.read_json(path)
+    inventory = proof.get("wine_source_inventory_sha256")
+    require(record.get("schema") == 1 and record.get("patches_applied_zero_fuzz") is True
+            and record.get("full_tree_byte_mode_link_equal") is True
+            and record.get("reconstructed_entry_count") == record.get("candidate_entry_count") == 12430
+            and record.get("ignored_entries") == [] and record.get("differences") == {}
+            and isinstance(inventory, str) and len(inventory) == 64
+            and record.get("reconstructed_source_inventory_sha256") == inventory
+            and record.get("candidate_source_inventory_sha256") == inventory,
+            "The candidate lacks its exact complete source reconstruction")
+    patches = record.get("ordered_patches", [])
+    require(len(patches) == 13 and len({item.get("name") for item in patches}) == 13,
+            "The Wine source reconstruction patch list changed")
+    inputs = {item["name"]: item["sha256"] for item in patches}
+    for name in (PATCHES[0], PATCHES[1], THREAD_PATCH):
+        require(inputs.get(name) == proof["source_patches"][name],
+                "The audited native host source differs from the selected patches")
+
+
+def checked_source_patches(proof, require_thread_validation=False):
+    names = set(proof.get("source_patches", {}))
+    require(names in (set(PATCHES), set(PATCHES) | {THREAD_PATCH}),
+            "Candidate host patch expectations are incomplete or unknown")
+    if THREAD_PATCH in names:
+        require(proof.get("native_thread_start_source_reviewed") is True,
+                "The selected-range native thread source has not been reviewed")
+        checked_thread_source_provenance(proof)
+        if require_thread_validation:
+            require(proof.get("native_thread_start_validation_passed") is True,
+                    "The selected-range native thread functional gate has not passed")
+    for name in names:
+        require(harness.digest(PROJECT / "runtime-patches" / name) == proof["source_patches"][name],
+                "A reviewed host adapter patch changed")
+
+
 def checked_inputs(package, probe, proof):
     require(package == WORK / "private-runtime", "Use the separate owned host candidate")
     require_idle(package)
@@ -123,11 +163,7 @@ def checked_inputs(package, probe, proof):
     require(type(proof.get("schema")) is int and proof.get("schema") == 1
             and proof.get("adapter_validation_passed") is True,
             "Candidate host adapters need their reviewed functional-test receipt")
-    require(set(proof.get("source_patches", {})) == set(PATCHES),
-            "Candidate host patch expectations are incomplete")
-    for name in PATCHES:
-        require(harness.digest(PROJECT / "runtime-patches" / name) == proof["source_patches"][name],
-                "A reviewed host adapter patch changed")
+    checked_source_patches(proof, require_thread_validation=True)
     require(set(proof.get("host_files", {})) == set(HOST_FILES),
             "The paired PE/native host expectations are incomplete")
     artifacts = {}

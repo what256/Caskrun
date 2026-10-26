@@ -34,6 +34,16 @@ support dylib's executable `__TEXT` range receives the MSABI route. Bounds
 come from public `dladdr`/`getsegmentdata` metadata, are checked for overflow
 and stay fixed for the process lifetime. With no opt-in, all calls use SysV.
 
+The separate native-thread patch handles a selected support-library thread
+start through an original PE relay and an appended NTDLL Unix call. Wine's
+normal PE/native transition supplies the thread's native state before the
+typed callback runs. Wine keeps the original thread entry and argument for
+the server and retains its normal thread initialization and exit behavior.
+The relay applies only to x64 starts inside the validated selected library;
+ordinary Windows starts and WoW64 keep their existing route. It allocates no
+extra context for a suspended thread. The NTDLL PE and native halves must be
+built and staged together.
+
 The macdrv patch implements the 24-slot `macdrv_functions` contract declared
 in the same pinned Apple formula. Its ten native-ABI slots use actual Wine
 windows, views and Metal devices; its fourteen Microsoft-ABI slots dispatch
@@ -86,10 +96,11 @@ Manual preparation must preserve these source and pairing dependencies:
    not an equivalent input.
 2. Apply `wine-11.0-winemac-metal-exports.patch`, then
    `wine-11.0-dxmt-client-surface.patch`, before the macdrv host adapter.
-3. Apply `d3dmetal-wine-11.0-non-native-regions.patch`, then
+3. For NTDLL, apply `d3dmetal-wine-11.0-non-native-regions.patch`, then
    `d3dmetal-wine-11.0-native-import-abi.patch`, then
-   `d3dmetal-wine-11.0-macdrv-host.patch`. Verify the resulting source against
-   the reviewed patch set before building.
+   `d3dmetal-wine-11.0-native-thread-start.patch`. Apply
+   `d3dmetal-wine-11.0-macdrv-host.patch` to the separately prepared driver
+   source. Verify the resulting sources against the reviewed patch set.
 4. Build matching NTDLL PE/native components and both driver PE architectures
    with their native driver. Stage them together only in a fresh, owned
    private candidate. Mixing an older PE half with the new native half is
@@ -108,6 +119,35 @@ This is dependency/order guidance, not a verified stand-alone command recipe.
 Toolchain configuration, dependency preparation, candidate staging and receipt
 creation still need manual work. The failed combined result below remains the
 acceptance status even when all preparation and adapter checks succeed.
+An independent reconstruction of the NTDLL source tree from the pinned Wine
+archive and 13 ordered patches matched all 12,430 entries, including file
+contents, modes and symbolic links. This source check does not itself build or
+validate the complete runtime or Apple integration.
+
+The exact audited **NTDLL** patch order is:
+
+```text
+wine-11.0-steam-cef-commandline.patch
+wine-11.0-steam-dock.patch
+wine-11.0-native-app-identity.patch
+wine-11.0-native-text-editing.patch
+wine-11.0-steam-native-window.patch
+wine-11.0-steam-native-bundle.patch
+wine-11.0-steam-quit.patch
+wine-11.0-steam-reopen.patch
+wine-11.0-msync.patch
+wine-11.0-vulkan-portability.patch
+d3dmetal-wine-11.0-non-native-regions.patch
+d3dmetal-wine-11.0-native-import-abi.patch
+d3dmetal-wine-11.0-native-thread-start.patch
+```
+
+The separate driver's Metal-export, client-surface and macdrv-host adaptations
+are not part of that 13-patch NTDLL source tree. Its complete reconstructed and
+candidate inventories both matched
+`c332fefcd13a08130dd280a240ec95582fe2500896e1dbe3a3b374a767b904c0`,
+with no excluded entries. The final private candidate receipt binds the audit
+record and inventory hashes alongside the actual paired-image identities.
 
 ## Validation
 
@@ -124,9 +164,30 @@ and an owned suspended thread's creation, termination and wait all passed for
 both callers. The fixture reached its PE main and exited zero. The common
 server was stopped only for its owned prefix and independent checks confirmed
 no remaining owners. This fixture never loads the Apple framework.
-The supervisor refuses to replace a candidate image with live process or
-mapped-file owners. A failed assertion or incomplete cleanup returns nonzero;
-successful cleanup requires verified removal of its owned prefix.
+Both supervisor modes are nonmutating: candidate images must be staged
+separately. The default accepts only the exact original PE/native NTDLL pair;
+`--existing-reviewed-candidate` validates the four-patch source proof and exact
+current NTDLL/driver/common-executable hashes without copying or signing an
+image. Live owners are refused. A failed assertion or incomplete cleanup
+returns nonzero; successful cleanup requires verified removal of its owned
+prefix and unchanged candidate image hashes.
+
+`scripts/d3dmetal-native-thread-probe.py` separately exercises a real native
+thread callback using an original mock support library. Before the thread
+relay, an ordinary Windows thread passed. The native callback entered,
+completed `getpid` and its initial `pthread_getspecific`, then did not return
+from its own `pthread_setspecific`; the process exited with code 5. Fixed
+progress markers were ordinary output written solely by the fixture, not
+private-process memory or TLS inspection. With the relay, both a selected
+Microsoft-ABI caller and an unrelated SysV caller created, resumed and joined
+the same selected native callback. Public pthread key set/get and per-thread
+separation, owned event signaling and exact thread exit status passed, as did
+the ordinary Windows thread control. All four generated C contracts were
+identical to the failing baseline. The nine-NT-API fixture was then rerun in
+nonmutating existing-candidate mode against the unchanged reviewed paired
+candidate and passed again under both calling conventions.
+Both owned prefixes were removed after no-owner checks. These are mock-host
+results; they do not establish that the thread issue caused Apple's failure.
 
 `scripts/d3dmetal-macdrv-host-probe.py` passed 38 sequential assertions through
 the actual source-built x64 driver and its real PE callback dispatcher. The
@@ -176,25 +237,36 @@ sources. The supervisor verifies the separately licensed, unmodified Apple
 input and framework signature, the selected images in the same live owned
 Windows process, region support and main-PE registration. It verifies image
 integrity again afterward and stops/removes only the fresh owned prefix.
-Bounded API/mapping evidence remains private. Six parser acceptance tests
+Bounded API/mapping evidence remains private. Eleven parser and source-proof tests
 reject missing/duplicate API checks, failed assertions and nonzero exits;
 those parser tests do not execute Wine or Apple code.
 
-The combined test was executed with all three reviewed adapters, including
-macdrv patch SHA-256
+One combined test used the three initial reviewed adapters, including macdrv
+patch SHA-256
 `347ce55b13449293b7c836410b614c65ebe08367f3ceafe3840b62f7befb5d8e`.
-Its strict MinGW build passed. The actual owned hidden HWND/HDC, USER32/macOS
-driver initialization, logical DLL hashes, same-process mapped-image gate and
-factory export lookup all passed. Non-native-region support was enabled and
-the main application PE was registered.
+After the independent native-thread defect was fixed and its unchanged
+functional fixture and nine-NT regression passed, a further combined test used
+all four reviewed adaptations. The additional native-thread patch was
+`c2b7b40f5f776aabd07efed913283cf662dfd39a858b5bb49c5e29d9a789b6ce`.
+The final candidate was bound to the complete 12,430-entry source audit above.
 
-However, the process exited with code 5 before `CreateDXGIFactory1` returned.
+The strict MinGW probe build passed. In both combined attempts, the actual
+owned hidden HWND/HDC, USER32/macOS driver initialization, logical DLL hashes,
+same-process mapped-image gate and factory export lookup passed. The gate
+included the exact paired NTDLL/window driver and the unmodified Apple PE,
+support library and framework. Non-native-region support was enabled and the
+main application PE was registered.
+
+Both processes exited with code 5 before `CreateDXGIFactory1` returned.
 No successful factory HRESULT, Wine-hosted device, render/readback, swapchain
 or game result was established. The adapters are verified interface work but
 are insufficient to resolve this factory failure; its cause remains
-undetermined. The unmodified Apple images passed the post-probe integrity
-check, and the fresh owned prefix was removed after independent ownership
-checks. Installed apps and user bottles were unchanged.
+undetermined. The native-thread fix does not establish that its separate TLS
+defect caused this Apple failure. In both attempts, Apple's original signature
+and all checked Apple/paired-host fingerprints passed post-probe integrity;
+the fresh owned prefixes were removed after independent ownership checks.
+Installed apps and user bottles were unchanged. These x64 API experiments do
+not establish x86 application or graphics compatibility.
 
 D3DMetal therefore remains unavailable in the packaged app. Enabling it still
 requires an actual combined factory/device/render/lifecycle pass. A local
