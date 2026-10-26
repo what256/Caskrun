@@ -1,0 +1,146 @@
+--- a/src/dmn_init.cpp
++++ b/src/dmn_init.cpp
+@@ -140,7 +140,7 @@
+ 
+     /* Install the Metal swizzles BEFORE D3DMetal loads, so no heap class it
+      * creates during GFXT_Initialize is missed. */
+-    dmn_share_install_swizzles();
++    /* Caskrun basic-host control: no Metal swizzles or sharing hooks. */
+ 
+     DMN_INFO("loading D3DMetal: %s", binary.c_str());
+     void* handle = dlopen(binary.c_str(), RTLD_NOW | RTLD_LOCAL);
+@@ -185,21 +185,7 @@
+     load_sym(handle, g_dmn_api.D3DCompileFromFile, "D3DCompileFromFile", nullptr);
+     load_sym(handle, g_dmn_api.D3D10CreateBlob, "D3D10CreateBlob", nullptr);
+ 
+-    /* Not an entry point: a static bool inside D3DMetal that gates
+-     * WriteBufferImmediate. Resolved here so the D3D12 fence path can
+-     * re-assert it after each device creation (see
+-     * dmn_force_write_buffer_immediate). Absent on no shipped version so far,
+-     * but treat it as optional. */
+-    g_dmn_api.EnableWriteBufferImmediate = reinterpret_cast<unsigned char*>(
+-        dlsym(handle, "_ZN10D3DMDevice26EnableWriteBufferImmediateE"));
+-    if (!g_dmn_api.EnableWriteBufferImmediate)
+-        DMN_WARN("D3DMetal does not export EnableWriteBufferImmediate; if this "
+-                 "build defaults it off, shared D3D12 fences will not signal");
+-
+-    /* Absent before GPTk 4.0b1 — nothing suballocated resources then, so a
+-     * missing symbol needs no warning. */
+-    g_dmn_api.UseInternalHeaps = reinterpret_cast<unsigned char*>(
+-        dlsym(handle, "_ZN10D3DMDevice16UseInternalHeapsE"));
++    /* Caskrun basic-host control: no private-global lookup or changes. */
+ 
+     g_framework_binary = binary;
+     {
+@@ -282,55 +268,6 @@
+     return dmn_init(nullptr);
+ }
+ 
+-/* GPTk 4.0b1 turns WriteBufferImmediate off for every executable its per-app
+- * profile table does not recognise, and the D3D12 shared-fence value store is a
+- * WriteBufferImmediate — with the flag clear the GPU write is dropped, the
+- * companion slot never advances, and every consumer of the fence waits forever.
+- * The encode path itself is intact (forcing the flag makes the store land), so
+- * re-assert it, restoring the pre-4.0 default. The D3DMDevice constructor writes
+- * the flag from the profile, so this has to run after each device creation. */
+-void dmn_force_write_buffer_immediate() {
+-    unsigned char* flag = g_dmn_api.EnableWriteBufferImmediate;
+-    if (!flag || *flag)
+-        return;
+-    *flag = 1;
+-    DMN_INFO("forced D3DMetal EnableWriteBufferImmediate on (this build's "
+-             "per-app profile left it off)");
+-}
+-
+-/* The substitution mechanism swaps the single Metal allocation a D3D resource
+- * create makes. GPTk 4.0b1 broke that assumption for buffers: with
+- * UseInternalHeaps set (its default for any executable the per-app profile
+- * table does not recognise), a 4 KiB shared D3D11 buffer is an offset into a
+- * 256 MiB pooled MTLBuffer, and the armed create substitutes — and then exports
+- * — that entire pool. Clearing the flag for the duration of the armed create
+- * gets a dedicated allocation, the pre-4.0 shape, without giving up pooling for
+- * the resources that do not need it.
+- *
+- * The flag is process-global, so overlapping armed creates on other threads are
+- * reference-counted here; a create on an unrelated thread landing inside the
+- * window merely gets a dedicated allocation too, which is a supported
+- * configuration (it is what every earlier GPTk did). */
+-namespace {
+-std::atomic<int> g_dedicated_depth{0};
+-}
+-
+-void dmn_dedicated_metal_alloc_begin() {
+-    if (!g_dmn_api.UseInternalHeaps)
+-        return;
+-    if (g_dedicated_depth.fetch_add(1, std::memory_order_acq_rel) != 0)
+-        return;
+-    *g_dmn_api.UseInternalHeaps = 0;
+-}
+-
+-void dmn_dedicated_metal_alloc_end() {
+-    if (!g_dmn_api.UseInternalHeaps)
+-        return;
+-    if (g_dedicated_depth.fetch_sub(1, std::memory_order_acq_rel) != 1)
+-        return;
+-    *g_dmn_api.UseInternalHeaps = 1;
+-}
+-
+ /* == Exported D3D entry points =========================================== */
+ 
+ namespace {
+@@ -356,8 +293,6 @@
+     int32_t hr = g_dmn_api.D3D11CreateDevice(adapter, driverType, software, flags,
+                                              featureLevels, numLevels, sdkVersion,
+                                              outDevice, outLevel, outContext);
+-    if (hr >= 0 && outDevice && *outDevice)
+-        dmn_hooks_after_d3d11_device(*outDevice);
+     return hr;
+ }
+ 
+@@ -372,8 +307,6 @@
+     int32_t hr = g_dmn_api.D3D11CreateDeviceAndSwapChain(
+         adapter, driverType, software, flags, featureLevels, numLevels,
+         sdkVersion, swapChainDesc, outSwapChain, outDevice, outLevel, outContext);
+-    if (hr >= 0 && outDevice && *outDevice)
+-        dmn_hooks_after_d3d11_device(*outDevice);
+     return hr;
+ }
+ 
+@@ -394,8 +327,6 @@
+     if (dmn_ensure_init() != DMN_SUCCESS || !g_dmn_api.D3D12CreateDevice)
+         return kEFail;
+     int32_t hr = g_dmn_api.D3D12CreateDevice(adapter, minFeatureLevel, riid, device);
+-    if (hr >= 0 && device && *device)
+-        dmn_hooks_after_d3d12_device(*device);
+     return hr;
+ }
+ 
+--- a/meson.build
++++ b/meson.build
+@@ -69,15 +69,6 @@
+   'src/dmn_gfxt_adapter.mm',
+   'src/dmn_window.mm',
+   'src/dmn_gfxt_swapchain.mm',
+-  'src/dmn_share_metal.mm',
+-  'src/dmn_sparse.mm',
+-  'src/dmn_formats.mm',
+-  'src/dmn_fence.cpp',
+-  'src/dmn_fence_d3d.cpp',
+-  'src/dmn_kmtx.cpp',
+-  'src/dmn_com_hooks.cpp',
+-  'src/dmn_dxil_reflect.cpp',
+-  'src/dmn_import_shims.mm',
+ )
+ 
+ exports_list = meson.current_source_dir() / 'src/exports.symbols'
+--- a/src/exports.symbols
++++ b/src/exports.symbols
+@@ -18,8 +18,3 @@
+ _D3DCompile
+ _D3DCompileFromFile
+ _D3D10CreateBlob
+-# Public-API replacements for D3DMetal's private imports (dmn_import_shims.mm).
+-# The dmn_* functions are covered above; the class is bound by name from a
+-# D3DMetal patched with scripts/patch_d3dmetal_imports.py.
+-_OBJC_CLASS_$_DMNAccelerationStructureAllocationDescriptor
+-_OBJC_METACLASS_$_DMNAccelerationStructureAllocationDescriptor
