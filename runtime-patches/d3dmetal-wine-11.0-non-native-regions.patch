@@ -1,0 +1,153 @@
+Opt-in Wine 11 support for Apple's published non-native PE-region API.
+
+Original Caskrun adaptation of public API contracts in Apple's LGPL-2.1-or-later
+Homebrew formula, revision 2bc44284e24d39ed64d6f492a0e1f4c47a5ced08,
+Formula/game-porting-toolkit.rb. No CrossOver source is imported. The official
+formula uses the same bool query and void(start,end) registration exports;
+it provides no unregister contract and retains its library for process lifetime.
+
+Append an owned Unix-call entry without changing existing indices. Only x64
+application (non-builtin) PE mappings are registered, after import resolution
+and before entrypoints can execute. Preload/query happens during native startup,
+before PE ntdll initialization. This patch does not alter GS/TSD switching,
+signal handlers, private Apple objects, code bytes, or security settings.
+
+Off by default; requires an absolute independently validated local library path
+in CASKRUN_D3DMETAL_SHARED_LIBRARY. Not an accepted graphics capability until
+independent factory/device/render/lifecycle probes pass. LGPL-2.1-or-later.
+
+--- a/dlls/ntdll/unixlib.h
++++ b/dlls/ntdll/unixlib.h
+@@ -66,6 +66,12 @@
+     CONTEXT                    *context;
+ };
+ 
++struct register_non_native_region_params
++{
++    void *start;
++    SIZE_T size;
++};
++
+ enum ntdll_unix_funcs
+ {
+     unix_load_so_dll,
+@@ -76,6 +82,7 @@
+     unix_wine_server_handle_to_fd,
+     unix_wine_spawnvp,
+     unix_system_time_precise,
++    unix_register_non_native_region,
+ };
+ 
+ extern unixlib_handle_t __wine_unixlib_handle;
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -2325,6 +2325,16 @@
+     TRACE_(loaddll)( "Loaded %s at %p: %s\n", debugstr_w(wm->ldr.FullDllName.Buffer), *module,
+                      is_builtin ? "builtin" : "native" );
+ 
++#ifdef __x86_64__
++    /* Apple's published Rosetta support API classifies application PE code.
++     * Builtins remain on Wine's normal PE/native transition path. */
++    if (!is_builtin)
++    {
++        struct register_non_native_region_params params = {*module, map_size};
++        WINE_UNIX_CALL( unix_register_non_native_region, &params );
++    }
++#endif
++
+     wm->ldr.LoadCount = 1;
+     *pwm = wm;
+     *module = NULL;
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1129,6 +1129,58 @@
+ #endif /* SO_DLLS_SUPPORTED */
+ 
+ 
++/* Original Wine 11 adaptation of Apple's published non-native region API.
++ * The opt-in path is validated by the owning launcher. The library stays open
++ * for the process lifetime, as in Apple's public Homebrew formula. */
++#if defined(__APPLE__) && defined(__x86_64__)
++static void *d3dmetal_support_library;
++static void (*d3dmetal_register_region)(void *, void *);
++
++static void init_d3dmetal_support(void)
++{
++    const char *path = getenv( "CASKRUN_D3DMETAL_SHARED_LIBRARY" );
++    _Bool (*supports_regions)(void);
++    void (*register_region)(void *, void *);
++
++    if (!path || !path[0]) return;
++    if (path[0] != '/')
++    {
++        ERR( "D3DMetal support needs an absolute private library path\n" );
++        return;
++    }
++    d3dmetal_support_library = dlopen( path, RTLD_NOW | RTLD_LOCAL );
++    if (!d3dmetal_support_library)
++    {
++        ERR( "Could not load the private D3DMetal support library\n" );
++        return;
++    }
++    supports_regions = dlsym( d3dmetal_support_library, "supports_non_native_code_regions" );
++    register_region = dlsym( d3dmetal_support_library, "register_non_native_code_region" );
++    if (supports_regions && register_region && supports_regions())
++    {
++        d3dmetal_register_region = register_region;
++        TRACE( "Apple non-native region support enabled\n" );
++    }
++    else WARN( "Apple non-native region support is unavailable\n" );
++}
++#else
++static void init_d3dmetal_support(void) {}
++#endif
++
++static NTSTATUS register_non_native_region( void *args )
++{
++#if defined(__APPLE__) && defined(__x86_64__)
++    const struct register_non_native_region_params *params = args;
++    if (d3dmetal_register_region && params->start && params->size &&
++        (ULONG_PTR)params->start <= ~(ULONG_PTR)0 - params->size)
++    {
++        d3dmetal_register_region( params->start, (char *)params->start + params->size );
++        TRACE( "Application PE region registered with Apple support\n" );
++    }
++#endif
++    return STATUS_SUCCESS;
++}
++
+ static const unixlib_entry_t unix_call_funcs[] =
+ {
+     load_so_dll,
+@@ -1139,6 +1191,7 @@
+     unixcall_wine_server_handle_to_fd,
+     unixcall_wine_spawnvp,
+     system_time_precise,
++    register_non_native_region,
+ };
+ 
+ 
+@@ -1146,6 +1199,7 @@
+ 
+ static NTSTATUS wow64_load_so_dll( void *args ) { return STATUS_INVALID_IMAGE_FORMAT; }
+ static NTSTATUS wow64_unwind_builtin_dll( void *args ) { return STATUS_UNSUCCESSFUL; }
++static NTSTATUS wow64_register_non_native_region( void *args ) { return STATUS_NOT_SUPPORTED; }
+ 
+ const unixlib_entry_t unix_call_wow64_funcs[] =
+ {
+@@ -1157,6 +1211,7 @@
+     wow64_wine_server_handle_to_fd,
+     wow64_wine_spawnvp,
+     system_time_precise,
++    wow64_register_non_native_region,
+ };
+ 
+ #endif  /* _WIN64 */
+@@ -1920,6 +1975,7 @@
+     set_load_order_app_name( main_wargv[0] );
+     init_thread_stack( teb, 0, 0, 0 );
+     NtCreateKeyedEvent( &keyed_event, GENERIC_READ | GENERIC_WRITE, NULL, 0 );
++    init_d3dmetal_support();
+     load_ntdll();
+     load_wow64_ntdll( main_image_info.Machine );
+     load_apiset_dll();

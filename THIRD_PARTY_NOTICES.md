@@ -4,7 +4,12 @@ Caskrun is an independent project. Its original app, Rust core, catalog metadata
 
 ## Wine and DXMT patches
 
-The changes in `runtime-patches/wine-*.patch` and `runtime-patches/dxmt-*.patch` are offered under **LGPL-2.1-or-later**, matching their respective upstream projects. The complete [LGPL 2.1 text](runtime-patches/licenses/COPYING.LIB) is included. See [the patch directory notice](runtime-patches/README.md) for the pinned source revisions and patch order.
+The changes in `runtime-patches/wine-*.patch`, `runtime-patches/dxmt-*.patch`
+and the original `runtime-patches/d3dmetal-wine-*.patch` experiments are offered
+under **LGPL-2.1-or-later**, matching their respective upstream projects. The
+complete [LGPL 2.1 text](runtime-patches/licenses/COPYING.LIB) is included. See
+[the patch directory notice](runtime-patches/README.md) for the pinned source
+revisions and patch order.
 
 - [Wine 11.0](https://gitlab.winehq.org/wine/wine/-/tree/wine-11.0): Copyright (c) 1993–2026 the Wine project authors; its source contains the individual author notices.
 - [DXMT at the reviewed revision](https://github.com/3Shain/dxmt/tree/e94c312f5c054263acf261cfa109edf13e757587): Copyright (c) 2023–2026 Feifan He for CodeWeavers. This is separately licensed public source, not code taken from an installed CrossOver application.
@@ -56,6 +61,13 @@ staged only after the actual local evaluation terms were accepted. Its payload,
 license/download account data and raw diagnostics are not included in this
 source repository or the shared engine. No working D3DMetal capability or
 redistribution permission is implied by staging it.
+
+The independent Wine host adapters use public interface declarations from
+[Apple's published toolkit formula](https://github.com/apple/homebrew-apple/blob/2bc44284e24d39ed64d6f492a0e1f4c47a5ced08/Formula/game-porting-toolkit.rb)
+and the separately published NT calling-convention declarations identified in
+[the integration notes](runtime-patches/d3dmetal-integration-notes.md). Their
+implementations are original adaptations of upstream Wine 11. No Apple binary,
+CrossOver implementation or private framework modification is included.
 
 ## AnyPS5 patches
 

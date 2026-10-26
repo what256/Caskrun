@@ -84,10 +84,29 @@ A subsequent basic native host control passed factory/device creation and
 256/256 clear/readback pixels without modifying Apple's component. This
 isolates framework health from the still-unresolved Wine integration. A
 separate DXMT D3D12 development route also passed hardware clear and shader
-draw/readback in Wine. Neither result changes build 57's capabilities. See the
+draw/readback in Wine. Build 57 did not include that route; build 59 adds it
+under the existing manual DXMT option. See the
 [D3D12 development record](D3D12_EXPERIMENT.md) for source pins and limits.
 
-## Local build 57 acceptance
+## Local build 59 / version 0.2.0 acceptance
+
+The installed app and current local development image carry the exact V16
+runtime, including the experimental x64 DXMT D3D12 component. The actual
+packaged Core and dispatcher passed the shader and presentation lifecycle
+probes, idle V15 migration with saved preferences, busy-change refusal and
+switchback. Prefix graphics DLLs and an original save sentinel were preserved.
+Owned fixtures were stopped and removed after independent ownership checks.
+
+Across partitioned Rust runs, 666 unit tests and all 7 integration tests passed;
+3 existing unit tests remain ignored. One existing five-second shutdown test
+failed under concurrent build load, then passed alone without changing its
+deadline. Runtime-package, D3D12 builder/harness/package, dispatcher and update
+SDK Python tests passed. The SwiftUI app compiled; nested signatures, installed
+app equality, the exact runtime copy and final disk image were verified. The
+Apple evaluation payload is absent from the installed app and development image.
+No storefront or game was launched for these checks.
+
+## Historical local build 57 acceptance
 
 The final reviewed V15 package is
 `sha256:2850553486175ba0326c5d4f84ea45f3fb37a5210c6830e77d7bea5ca8f97a0e`.

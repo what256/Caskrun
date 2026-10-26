@@ -45,6 +45,11 @@ API tests do not establish broad game compatibility, visible image quality or fa
 
 See [current backend evidence](docs/GRAPHICS_BACKEND_STATUS.md), [Direct3D 12 integration](docs/D3D12_EXPERIMENT.md), [launcher results](docs/LAUNCHER_VALIDATION.md) and [the next manual tests](docs/NEXT_MANUAL_TESTS.md).
 
+The original [D3DMetal host-bridge experiments](runtime-patches/d3dmetal-integration-notes.md)
+are kept as source and API probes. Preparing their private Wine candidate is a
+manual development step. A successful adapter test does not enable Apple's
+renderer in the installed engine.
+
 ## Build from source
 
 Requires an Apple Silicon Mac, macOS 14+, Xcode command-line tools, Python 3 and Rust/Cargo with edition-2024 support. Add the ARM64 target if needed:

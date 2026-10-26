@@ -1,0 +1,810 @@
+Original Wine 11 macdrv adapter for the publicly declared Apple host contract.
+
+Interface facts are documented in Apple's public game-porting-toolkit formula,
+revision 2bc44284e24d39ed64d6f492a0e1f4c47a5ced08 (macdrv_functions declarations).
+No Apple or CrossOver implementation is copied. This original implementation
+is offered under Wine's LGPL-2.1-or-later terms.
+
+Build the PE driver and native driver together. Their private init transport is
+extended; mixing either half with an older driver is unsupported. WoW64 transport
+is updated as well; the Apple host table itself is exported only on x86_64.
+Apply after wine-11.0-winemac-metal-exports.patch and
+wine-11.0-dxmt-client-surface.patch. Existing DXMT opaque exports are unchanged.
+
+The 14 explicitly Microsoft-ABI functions dispatch synchronously through Wine's
+KeUserDispatchCallback into real PE ADVAPI32/USER32 operations. Return values,
+ANSI/registry semantics and LastError are supplied by those APIs. The other ten
+slots use native ABI and real upstream managed Wine windows, views and devices.
+The historical 120-byte window ABI is an independently allocated snapshot, never
+Wine 11's differently laid out private structure.
+
+Monitor enumeration uses a typed PE callback relay, then an appended owned
+Unix-call entry to invoke the native Microsoft-ABI callback through the
+standard Wine Unix-call boundary. This retains native stack/TSD semantics,
+original lparam, early-stop BOOL and LastError, without GS patches. Existing
+Unix indices stay unchanged; the WoW64 table receives the same new entry.
+
+Snapshot and Metal-view ownership are separate references. A process-local map
+accepts only our managed client view and our returned Metal view. Unknown/stale
+views return NULL; release never disposes of foreign objects. No map lock spans
+Wine locks, PE callbacks or synchronous Cocoa work. A snapshot retains its actual
+Cocoa window and matching current client view under Wine's lock solely
+to acquire lifetime references; all Cocoa
+view operations happen after unlocking. View release clears its surface pointer and releases only the owned Metal
+view after in-flight layer calls finish; a still-owned snapshot can create
+a replacement. Final context release delegates the surface to Wine's destructor. Window destruction
+uses Wine's normal surface detach path; no fake window/view objects are created.
+
+This source adapter has not established Apple D3DMetal game compatibility.
+
+--- a/dlls/winemac.drv/Makefile.in
++++ b/dlls/winemac.drv/Makefile.in
+@@ -1,6 +1,6 @@
+ MODULE    = winemac.drv
+ UNIXLIB   = winemac.so
+-IMPORTS   = uuid rpcrt4 user32 gdi32 win32u
++IMPORTS   = uuid rpcrt4 user32 gdi32 win32u advapi32
+ DELAYIMPORTS = ole32 shell32 imm32
+ UNIX_LIBS    = \
+ 	-lwin32u \
+@@ -26,6 +26,9 @@
+ 	cocoa_status_item.m \
+ 	cocoa_window.m \
+ 	display.c \
++	d3dmetal-macdrv-host.c \
++	d3dmetal-macdrv-cocoa.m \
++	d3dmetal-macdrv-pe.c \
+ 	dllmain.c \
+ 	event.c \
+ 	gdi.c \
+--- /dev/null
++++ b/dlls/winemac.drv/d3dmetal-macdrv-cocoa.m
+@@ -0,0 +1,34 @@
++/* Original Caskrun Wine 11 host adapter. LGPL-2.1-or-later. */
++#include "config.h"
++#import <AppKit/AppKit.h>
++#import "cocoa_event.h"
++
++/* Retaining while holding the window-data lock is solely a lifetime operation;
++ * it never dispatches to the main thread. All view access and release happen
++ * after that lock has been released. */
++macdrv_window d3dmetal_macdrv_retain_window(macdrv_window window)
++{
++    return (macdrv_window)[(NSWindow *)window retain];
++}
++
++macdrv_view d3dmetal_macdrv_retain_view(macdrv_view view)
++{
++    return (macdrv_view)[(NSView *)view retain];
++}
++
++macdrv_view d3dmetal_macdrv_content_view(macdrv_window window)
++{
++    __block NSView *view = nil;
++    OnMainThread(^{ view = [[(NSWindow *)window contentView] retain]; });
++    return (macdrv_view)view;
++}
++
++void d3dmetal_macdrv_release_objects(macdrv_window window, macdrv_view view, macdrv_view client)
++{
++    OnMainThread(^{ [(NSView *)client release]; [(NSView *)view release]; [(NSWindow *)window release]; });
++}
++
++void d3dmetal_macdrv_main_thread(dispatch_block_t block)
++{
++    if (block) OnMainThread(block);
++}
+--- /dev/null
++++ b/dlls/winemac.drv/d3dmetal-macdrv-host.c
+@@ -0,0 +1,443 @@
++/* Original Caskrun Wine 11 host adapter. LGPL-2.1-or-later.
++ * Public interface facts: Apple's game-porting-toolkit formula, revision
++ * 2bc44284e24d39ed64d6f492a0e1f4c47a5ced08, macdrv_functions declarations.
++ * This is an independent implementation against upstream Wine 11 APIs. */
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++#include <stddef.h>
++#include <stdlib.h>
++#include <string.h>
++#include <dispatch/dispatch.h>
++#include "macdrv.h"
++#include "winreg.h"
++#include "winerror.h"
++#include "d3dmetal-macdrv.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
++
++#ifdef __x86_64__
++#define D3DM_MSABI __attribute__((ms_abi))
++#define ARG(value) ((UINT64)(UINT_PTR)(value))
++
++extern macdrv_window d3dmetal_macdrv_retain_window(macdrv_window window);
++extern macdrv_view d3dmetal_macdrv_retain_view(macdrv_view view);
++extern macdrv_view d3dmetal_macdrv_content_view(macdrv_window window);
++extern void d3dmetal_macdrv_release_objects(macdrv_window window, macdrv_view view, macdrv_view client);
++extern void d3dmetal_macdrv_main_thread(dispatch_block_t block);
++extern UINT64 d3dmetal_macdrv_callback;
++
++/* A published historical ABI, never an alias for Wine 11's private structure.
++ * Deliberately explicit bit positions and padding make the wire layout stable. */
++struct d3dmetal_macdrv_window
++{
++    HWND hwnd;
++    macdrv_window cocoa_window;
++    macdrv_view cocoa_view;
++    macdrv_view client_cocoa_view;
++    RECT window_rect;
++    RECT whole_rect;
++    RECT client_rect;
++    int pixel_format;
++    COLORREF color_key;
++    HANDLE drag_event;
++    unsigned int flags;
++    unsigned int reserved;
++    void *padding[2];
++};
++
++C_ASSERT(sizeof(struct d3dmetal_macdrv_window) == 120);
++C_ASSERT(offsetof(struct d3dmetal_macdrv_window, client_cocoa_view) == 24);
++C_ASSERT(offsetof(struct d3dmetal_macdrv_window, window_rect) == 32);
++C_ASSERT(offsetof(struct d3dmetal_macdrv_window, pixel_format) == 80);
++C_ASSERT(offsetof(struct d3dmetal_macdrv_window, drag_event) == 88);
++C_ASSERT(offsetof(struct d3dmetal_macdrv_window, flags) == 96);
++C_ASSERT(offsetof(struct d3dmetal_macdrv_window, padding) == 104);
++
++struct d3dmetal_macdrv_context
++{
++    struct d3dmetal_macdrv_window snapshot;
++    struct d3dmetal_macdrv_context *next;
++    struct macdrv_client_surface *surface;
++    macdrv_metal_view metal_view;
++    unsigned int refs;
++    BOOL snapshot_owned;
++    BOOL view_owned;
++    unsigned int view_calls;
++    BOOL creating_view;
++};
++
++/* This lock protects only our adapter contexts and reference counts. Never
++ * hold it across a Wine window lock, a PE callback or a synchronous Cocoa call. */
++static pthread_mutex_t context_mutex = PTHREAD_MUTEX_INITIALIZER;
++static struct d3dmetal_macdrv_context *contexts;
++
++static void context_release(struct d3dmetal_macdrv_context *context)
++{
++    struct d3dmetal_macdrv_context **cursor;
++    BOOL destroy;
++
++    pthread_mutex_lock(&context_mutex);
++    destroy = !--context->refs;
++    if (destroy)
++    {
++        for (cursor = &contexts; *cursor != context; cursor = &(*cursor)->next) {}
++        *cursor = context->next;
++    }
++    pthread_mutex_unlock(&context_mutex);
++    if (!destroy) return;
++
++    /* Only this adapter's surface is released. Its existing Wine destructor
++     * owns the Metal view; releasing a view again here would double-free it. */
++    client_surface_release(&context->surface->client);
++    d3dmetal_macdrv_release_objects(context->snapshot.cocoa_window, context->snapshot.cocoa_view,
++                                     context->snapshot.client_cocoa_view);
++    free(context);
++}
++
++static struct d3dmetal_macdrv_window *host_get_window(HWND hwnd)
++{
++    struct d3dmetal_macdrv_context *context;
++    struct macdrv_win_data *data;
++
++    if (!hwnd || !(data = get_win_data(hwnd))) return NULL;
++    release_win_data(data);
++    if (!(context = calloc(1, sizeof(*context)))) return NULL;
++    if (!(context->surface = macdrv_client_surface_create(hwnd))) goto failed;
++    if (!(data = get_win_data(hwnd))) goto failed_surface;
++    if (!data->cocoa_window || !data->client_view || data->client_view != context->surface->cocoa_view)
++    {
++        release_win_data(data);
++        goto failed_surface;
++    }
++
++    context->snapshot.hwnd = data->hwnd;
++    context->snapshot.cocoa_window = d3dmetal_macdrv_retain_window(data->cocoa_window);
++    /* detach clears client_view under this same driver lock before disposing
++     * it. Matching and retaining that guarded pointer makes acquisition atomic
++     * with detach; never retain the surface's unguarded raw pointer. */
++    context->snapshot.client_cocoa_view = d3dmetal_macdrv_retain_view(data->client_view);
++    context->snapshot.window_rect = data->rects.window;
++    context->snapshot.whole_rect = data->rects.visible;
++    context->snapshot.client_rect = data->rects.client;
++    context->snapshot.pixel_format = data->pixel_format;
++    context->snapshot.drag_event = data->drag_event; /* Borrowed; never closed by this adapter. */
++    context->snapshot.flags = data->on_screen | data->shaped << 1 | data->layered << 2 |
++                              data->ulw_layered << 3 | data->per_pixel_alpha << 4 | data->minimized << 5;
++    release_win_data(data);
++
++    /* Read layered-window attributes through Wine rather than inventing a key.
++     * A non-layered window has no colour key and retains the zero initializer. */
++    NtUserGetLayeredWindowAttributes(hwnd, &context->snapshot.color_key, NULL, NULL);
++
++    /* No driver lock is held while Cocoa synchronizes with its main thread. */
++    context->snapshot.cocoa_view = d3dmetal_macdrv_content_view(context->snapshot.cocoa_window);
++    if (!context->snapshot.cocoa_view)
++    {
++        d3dmetal_macdrv_release_objects(context->snapshot.cocoa_window, NULL, context->snapshot.client_cocoa_view);
++        goto failed_surface;
++    }
++    context->refs = 1;
++    context->snapshot_owned = TRUE;
++    pthread_mutex_lock(&context_mutex);
++    context->next = contexts;
++    contexts = context;
++    pthread_mutex_unlock(&context_mutex);
++    return &context->snapshot;
++
++failed_surface:
++    client_surface_release(&context->surface->client);
++failed:
++    free(context);
++    return NULL;
++}
++
++static void host_release_window(struct d3dmetal_macdrv_window *snapshot)
++{
++    struct d3dmetal_macdrv_context *context;
++
++    pthread_mutex_lock(&context_mutex);
++    for (context = contexts; context; context = context->next)
++        if (&context->snapshot == snapshot && context->snapshot_owned) break;
++    if (context) context->snapshot_owned = FALSE;
++    pthread_mutex_unlock(&context_mutex);
++    if (context) context_release(context);
++}
++
++static BOOL context_is_attached(struct d3dmetal_macdrv_context *context)
++{
++    struct macdrv_win_data *data = get_win_data(context->snapshot.hwnd);
++    BOOL attached = data && data->client_view == context->snapshot.client_cocoa_view;
++    release_win_data(data);
++    return attached;
++}
++
++static macdrv_metal_view host_create_view(macdrv_view parent, macdrv_metal_device device)
++{
++    struct d3dmetal_macdrv_context *context;
++    macdrv_metal_view view;
++
++    if (!parent || !device) return NULL;
++    pthread_mutex_lock(&context_mutex);
++    for (context = contexts; context; context = context->next)
++        if (context->snapshot_owned && context->snapshot.client_cocoa_view == parent &&
++            !context->creating_view && !context->metal_view) break;
++    if (context)
++    {
++        context->refs++;
++        context->creating_view = TRUE;
++    }
++    pthread_mutex_unlock(&context_mutex);
++    /* Unknown or stale views are not ours and must never be attached/released. */
++    if (!context) return NULL;
++
++    if (!context_is_attached(context))
++    {
++        pthread_mutex_lock(&context_mutex);
++        context->creating_view = FALSE;
++        pthread_mutex_unlock(&context_mutex);
++        context_release(context);
++        return NULL;
++    }
++    view = macdrv_view_create_metal_view(parent, device);
++    if (view && !context_is_attached(context))
++    {
++        macdrv_view_release_metal_view(view);
++        view = NULL;
++    }
++    if (view)
++    {
++        context->surface->metal_view = view;
++        client_surface_update(&context->surface->client);
++        client_surface_present(&context->surface->client);
++    }
++    pthread_mutex_lock(&context_mutex);
++    context->creating_view = FALSE;
++    context->metal_view = view;
++    context->view_owned = !!view;
++    pthread_mutex_unlock(&context_mutex);
++    /* The successful create reference belongs to release_metal_view. */
++    if (!view) context_release(context);
++    return view;
++}
++
++/* Called only with our context mutex held. A release waits for any in-flight
++ * get_layer call before removing its actual view; the surface destructor must
++ * never release that view a second time. Clearing it also permits safe reuse
++ * of a still-owned snapshot after its previous view has been released. */
++static macdrv_metal_view take_released_view(struct d3dmetal_macdrv_context *context)
++{
++    macdrv_metal_view view;
++
++    if (context->view_owned || context->view_calls || !(view = context->metal_view)) return NULL;
++    context->metal_view = NULL;
++    context->surface->metal_view = NULL;
++    return view;
++}
++
++static macdrv_metal_layer host_get_layer(macdrv_metal_view view)
++{
++    struct d3dmetal_macdrv_context *context;
++    macdrv_metal_layer layer;
++    macdrv_metal_view released;
++
++    pthread_mutex_lock(&context_mutex);
++    for (context = contexts; context; context = context->next)
++        if (context->metal_view == view && context->view_owned) break;
++    if (context)
++    {
++        context->refs++;
++        context->view_calls++;
++    }
++    pthread_mutex_unlock(&context_mutex);
++    if (!context) return NULL;
++    layer = macdrv_view_get_metal_layer(view);
++    pthread_mutex_lock(&context_mutex);
++    context->view_calls--;
++    released = take_released_view(context);
++    pthread_mutex_unlock(&context_mutex);
++    if (released) macdrv_view_release_metal_view(released);
++    context_release(context);
++    return layer;
++}
++
++static void host_release_view(macdrv_metal_view view)
++{
++    struct d3dmetal_macdrv_context *context;
++    macdrv_metal_view released = NULL;
++
++    pthread_mutex_lock(&context_mutex);
++    for (context = contexts; context; context = context->next)
++        if (context->metal_view == view && context->view_owned) break;
++    if (context)
++    {
++        context->view_owned = FALSE;
++        released = take_released_view(context);
++    }
++    pthread_mutex_unlock(&context_mutex);
++    if (released) macdrv_view_release_metal_view(released);
++    if (context) context_release(context);
++}
++
++static UINT64 call_pe(UINT operation, const UINT64 args[9], UINT64 failure)
++{
++    struct d3dmetal_macdrv_request request = {.dispatch.callback = d3dmetal_macdrv_callback,
++                                             .operation = operation,
++                                             .initial_error = NtCurrentTeb()->LastErrorValue};
++    struct d3dmetal_macdrv_result result;
++    NTSTATUS status;
++    void *reply;
++    ULONG reply_size;
++
++    if (!request.dispatch.callback)
++    {
++        NtCurrentTeb()->LastErrorValue = ERROR_CALL_NOT_IMPLEMENTED;
++        return failure;
++    }
++    memcpy(request.args, args, sizeof(request.args));
++    status = KeUserDispatchCallback(&request.dispatch, sizeof(request), &reply, &reply_size);
++    if (status || reply_size != sizeof(result))
++    {
++        WARN("D3DMetal PE callback %u failed, status %#x\n", operation, status);
++        NtCurrentTeb()->LastErrorValue = ERROR_CALL_NOT_IMPLEMENTED;
++        return failure;
++    }
++    memcpy(&result, reply, sizeof(result));
++    NtCurrentTeb()->LastErrorValue = result.last_error;
++    return result.value;
++}
++
++static LSTATUS D3DM_MSABI host_reg_query(HKEY key, LPCSTR name, LPDWORD reserved, LPDWORD type, BYTE *data, LPDWORD size)
++{
++    return call_pe(D3DM_REG_QUERY, (UINT64[9]){ARG(key),ARG(name),ARG(reserved),ARG(type),ARG(data),ARG(size)}, ERROR_CALL_NOT_IMPLEMENTED);
++}
++static LSTATUS D3DM_MSABI host_reg_set(HKEY key, LPCSTR name, DWORD reserved, DWORD type, const BYTE *data, DWORD size)
++{
++    return call_pe(D3DM_REG_SET, (UINT64[9]){ARG(key),ARG(name),ARG(reserved),ARG(type),ARG(data),ARG(size)}, ERROR_CALL_NOT_IMPLEMENTED);
++}
++static LSTATUS D3DM_MSABI host_reg_open(HKEY key, LPCSTR name, DWORD options, DWORD access, HKEY *result)
++{
++    return call_pe(D3DM_REG_OPEN, (UINT64[9]){ARG(key),ARG(name),ARG(options),ARG(access),ARG(result)}, ERROR_CALL_NOT_IMPLEMENTED);
++}
++static LSTATUS D3DM_MSABI host_reg_create(HKEY key, LPCSTR name, DWORD reserved, LPSTR class, DWORD options, DWORD access,
++                                        LPSECURITY_ATTRIBUTES attributes, HKEY *result, LPDWORD disposition)
++{
++    return call_pe(D3DM_REG_CREATE, (UINT64[9]){ARG(key),ARG(name),ARG(reserved),ARG(class),ARG(options),ARG(access),ARG(attributes),ARG(result),ARG(disposition)}, ERROR_CALL_NOT_IMPLEMENTED);
++}
++static LSTATUS D3DM_MSABI host_reg_close(HKEY key)
++{
++    return call_pe(D3DM_REG_CLOSE, (UINT64[9]){ARG(key)}, ERROR_CALL_NOT_IMPLEMENTED);
++}
++typedef BOOL (D3DM_MSABI *host_monitor_callback)(HMONITOR, HDC, LPRECT, LPARAM);
++/* Entered only through Wine's normal Unix-call dispatcher from the PE relay.
++ * The callback therefore runs with native stack/TSD state and the published
++ * Microsoft ABI, and can call other host APIs synchronously. */
++NTSTATUS d3dmetal_macdrv_enum_callback(void *arg)
++{
++    struct d3dmetal_monitor_callback_params *params = arg;
++    host_monitor_callback callback = (void *)(UINT_PTR)params->callback;
++
++    if (!callback) return STATUS_INVALID_PARAMETER;
++    NtCurrentTeb()->LastErrorValue = params->last_error;
++    params->result = callback((HMONITOR)(UINT_PTR)params->monitor, (HDC)(UINT_PTR)params->dc,
++                              (LPRECT)(UINT_PTR)params->rect, (LPARAM)params->data);
++    params->last_error = NtCurrentTeb()->LastErrorValue;
++    return STATUS_SUCCESS;
++}
++
++static BOOL D3DM_MSABI host_enum_monitors(HDC dc, LPRECT rect, host_monitor_callback callback, LPARAM data)
++{
++    return call_pe(D3DM_ENUM_MONITORS, (UINT64[9]){ARG(dc),ARG(rect),ARG(callback),ARG(data)}, FALSE);
++}
++static BOOL D3DM_MSABI host_monitor_info(HMONITOR monitor, LPMONITORINFO info)
++{
++    return call_pe(D3DM_MONITOR_INFO, (UINT64[9]){ARG(monitor),ARG(info)}, FALSE);
++}
++static BOOL D3DM_MSABI host_adjust_rect(LPRECT rect, DWORD style, BOOL menu, DWORD extended)
++{
++    return call_pe(D3DM_ADJUST_RECT, (UINT64[9]){ARG(rect),ARG(style),ARG(menu),ARG(extended)}, FALSE);
++}
++static LONG_PTR D3DM_MSABI host_get_window_long(HWND window, int index)
++{
++    return call_pe(D3DM_GET_WINDOW_LONG, (UINT64[9]){ARG(window),ARG(index)}, 0);
++}
++static BOOL D3DM_MSABI host_window_rect(HWND window, LPRECT rect)
++{
++    return call_pe(D3DM_GET_WINDOW_RECT, (UINT64[9]){ARG(window),ARG(rect)}, FALSE);
++}
++static BOOL D3DM_MSABI host_move_window(HWND window, int x, int y, int width, int height, BOOL repaint)
++{
++    return call_pe(D3DM_MOVE_WINDOW, (UINT64[9]){ARG(window),ARG(x),ARG(y),ARG(width),ARG(height),ARG(repaint)}, FALSE);
++}
++static BOOL D3DM_MSABI host_set_window_pos(HWND window, HWND after, int x, int y, int width, int height, UINT flags)
++{
++    return call_pe(D3DM_SET_WINDOW_POS, (UINT64[9]){ARG(window),ARG(after),ARG(x),ARG(y),ARG(width),ARG(height),ARG(flags)}, FALSE);
++}
++static INT D3DM_MSABI host_get_metric(INT index)
++{
++    return call_pe(D3DM_GET_METRIC, (UINT64[9]){ARG(index)}, 0);
++}
++static LONG_PTR D3DM_MSABI host_set_window_long(HWND window, INT index, LONG_PTR value)
++{
++    return call_pe(D3DM_SET_WINDOW_LONG, (UINT64[9]){ARG(window),ARG(index),ARG(value)}, 0);
++}
++
++static void host_init_displays(BOOL force)
++{
++    /* Use Wine's normal display invalidation path when explicitly requested,
++     * then materialize its existing device list through a real USER32 query. */
++    if (force) NtUserCallNoParam(NtUserCallNoParam_DisplayModeChanged);
++    host_get_metric(SM_CMONITORS);
++}
++
++struct d3dmetal_macdrv_functions
++{
++    void (*init_displays)(BOOL);
++    struct d3dmetal_macdrv_window *(*get_window)(HWND);
++    void (*release_window)(struct d3dmetal_macdrv_window *);
++    macdrv_window (*get_cocoa_window)(HWND, BOOL);
++    macdrv_metal_device (*create_device)(void);
++    void (*release_device)(macdrv_metal_device);
++    macdrv_metal_view (*create_view)(macdrv_view, macdrv_metal_device);
++    macdrv_metal_layer (*get_layer)(macdrv_metal_view);
++    void (*release_view)(macdrv_metal_view);
++    void (*main_thread)(dispatch_block_t);
++    LSTATUS (D3DM_MSABI *reg_query)(HKEY,LPCSTR,LPDWORD,LPDWORD,BYTE *,LPDWORD);
++    LSTATUS (D3DM_MSABI *reg_set)(HKEY,LPCSTR,DWORD,DWORD,const BYTE *,DWORD);
++    LSTATUS (D3DM_MSABI *reg_open)(HKEY,LPCSTR,DWORD,DWORD,HKEY *);
++    LSTATUS (D3DM_MSABI *reg_create)(HKEY,LPCSTR,DWORD,LPSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,HKEY *,LPDWORD);
++    LSTATUS (D3DM_MSABI *reg_close)(HKEY);
++    BOOL (D3DM_MSABI *enum_monitors)(HDC,LPRECT,host_monitor_callback,LPARAM);
++    BOOL (D3DM_MSABI *monitor_info)(HMONITOR,LPMONITORINFO);
++    BOOL (D3DM_MSABI *adjust_rect)(LPRECT,DWORD,BOOL,DWORD);
++    LONG_PTR (D3DM_MSABI *get_window_long)(HWND,int);
++    BOOL (D3DM_MSABI *window_rect)(HWND,LPRECT);
++    BOOL (D3DM_MSABI *move_window)(HWND,int,int,int,int,BOOL);
++    BOOL (D3DM_MSABI *set_window_pos)(HWND,HWND,int,int,int,int,UINT);
++    INT (D3DM_MSABI *get_metric)(INT);
++    LONG_PTR (D3DM_MSABI *set_window_long)(HWND,INT,LONG_PTR);
++};
++C_ASSERT(sizeof(struct d3dmetal_macdrv_functions) == 192);
++C_ASSERT(offsetof(struct d3dmetal_macdrv_functions, reg_query) == 80);
++C_ASSERT(offsetof(struct d3dmetal_macdrv_functions, set_window_long) == 184);
++
++/* Export data, not a function. No private Apple entrypoint is looked up or
++ * patched; this driver exposes only this published, typed host contract. */
++__attribute__((visibility("default"))) struct d3dmetal_macdrv_functions macdrv_functions =
++{
++    host_init_displays, host_get_window, host_release_window, macdrv_get_cocoa_window,
++    macdrv_create_metal_device, macdrv_release_metal_device, host_create_view, host_get_layer,
++    host_release_view, d3dmetal_macdrv_main_thread,
++    host_reg_query, host_reg_set, host_reg_open, host_reg_create, host_reg_close,
++    host_enum_monitors, host_monitor_info, host_adjust_rect, host_get_window_long,
++    host_window_rect, host_move_window, host_set_window_pos, host_get_metric, host_set_window_long
++};
++#else
++NTSTATUS d3dmetal_macdrv_enum_callback(void *arg)
++{
++    (void)arg;
++    return STATUS_NOT_SUPPORTED;
++}
++#endif
+--- /dev/null
++++ b/dlls/winemac.drv/d3dmetal-macdrv-pe.c
+@@ -0,0 +1,110 @@
++/* Original Caskrun Wine 11 host adapter. LGPL-2.1-or-later. */
++#include <stdarg.h>
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++#include "windef.h"
++#include "winbase.h"
++#include "winreg.h"
++#include "winuser.h"
++#include "unixlib.h"
++#include "d3dmetal-macdrv.h"
++
++#define PTR(type, n) ((type)(UINT_PTR)request->args[n])
++#define NUM(type, n) ((type)request->args[n])
++
++/* Kernel callback dispatch must always target Wine PE code. Native support
++ * callbacks use the published WINAPI signature and are invoked synchronously
++ * from this typed relay, preserving the original lparam and early-stop BOOL. */
++struct d3dmetal_monitor_context
++{
++    MONITORENUMPROC callback;
++    LPARAM data;
++};
++
++static BOOL CALLBACK d3dmetal_monitor_relay(HMONITOR monitor, HDC dc, LPRECT rect, LPARAM data)
++{
++    struct d3dmetal_monitor_context *context = (void *)data;
++    struct d3dmetal_monitor_callback_params params =
++    {
++        .callback = (UINT_PTR)context->callback, .monitor = (UINT_PTR)monitor,
++        .dc = (UINT_PTR)dc, .rect = (UINT_PTR)rect, .data = context->data,
++        .last_error = GetLastError()
++    };
++
++    if (MACDRV_CALL(d3dmetal_enum_callback, &params))
++    {
++        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
++        return FALSE;
++    }
++    SetLastError(params.last_error);
++    return params.result;
++}
++
++/* Keep Windows ANSI conversion, predefined HKEY handling, monitor callbacks,
++ * HWND validation and LastError semantics in Wine's actual PE APIs. The Unix
++ * half only adapts calling conventions; it does not emulate these APIs. */
++NTSTATUS WINAPI d3dmetal_macdrv_dispatch(void *arg, ULONG size)
++{
++    const struct d3dmetal_macdrv_request *request = arg;
++    struct d3dmetal_macdrv_result result = {0};
++
++    if (size != sizeof(*request) || request->operation >= D3DM_OPERATION_COUNT)
++        return NtCallbackReturn(NULL, 0, STATUS_INVALID_PARAMETER);
++
++    SetLastError(request->initial_error);
++    switch (request->operation)
++    {
++    case D3DM_REG_QUERY:
++        result.value = RegQueryValueExA(PTR(HKEY,0), PTR(LPCSTR,1), PTR(LPDWORD,2),
++                                       PTR(LPDWORD,3), PTR(BYTE *,4), PTR(LPDWORD,5));
++        break;
++    case D3DM_REG_SET:
++        result.value = RegSetValueExA(PTR(HKEY,0), PTR(LPCSTR,1), NUM(DWORD,2),
++                                     NUM(DWORD,3), PTR(const BYTE *,4), NUM(DWORD,5));
++        break;
++    case D3DM_REG_OPEN:
++        result.value = RegOpenKeyExA(PTR(HKEY,0), PTR(LPCSTR,1), NUM(DWORD,2), NUM(REGSAM,3), PTR(HKEY *,4));
++        break;
++    case D3DM_REG_CREATE:
++        result.value = RegCreateKeyExA(PTR(HKEY,0), PTR(LPCSTR,1), NUM(DWORD,2), PTR(LPSTR,3),
++                                      NUM(DWORD,4), NUM(REGSAM,5), PTR(LPSECURITY_ATTRIBUTES,6),
++                                      PTR(HKEY *,7), PTR(LPDWORD,8));
++        break;
++    case D3DM_REG_CLOSE:
++        result.value = RegCloseKey(PTR(HKEY,0));
++        break;
++    case D3DM_ENUM_MONITORS:
++    {
++        struct d3dmetal_monitor_context context = {PTR(MONITORENUMPROC,2), NUM(LPARAM,3)};
++        result.value = EnumDisplayMonitors(PTR(HDC,0), PTR(LPRECT,1), d3dmetal_monitor_relay, (LPARAM)&context);
++        break;
++    }
++    case D3DM_MONITOR_INFO:
++        result.value = GetMonitorInfoA(PTR(HMONITOR,0), PTR(LPMONITORINFO,1));
++        break;
++    case D3DM_ADJUST_RECT:
++        result.value = AdjustWindowRectEx(PTR(LPRECT,0), NUM(DWORD,1), NUM(BOOL,2), NUM(DWORD,3));
++        break;
++    case D3DM_GET_WINDOW_LONG:
++        result.value = GetWindowLongPtrW(PTR(HWND,0), NUM(INT,1));
++        break;
++    case D3DM_GET_WINDOW_RECT:
++        result.value = GetWindowRect(PTR(HWND,0), PTR(LPRECT,1));
++        break;
++    case D3DM_MOVE_WINDOW:
++        result.value = MoveWindow(PTR(HWND,0), NUM(INT,1), NUM(INT,2), NUM(INT,3), NUM(INT,4), NUM(BOOL,5));
++        break;
++    case D3DM_SET_WINDOW_POS:
++        result.value = SetWindowPos(PTR(HWND,0), PTR(HWND,1), NUM(INT,2), NUM(INT,3), NUM(INT,4), NUM(INT,5), NUM(UINT,6));
++        break;
++    case D3DM_GET_METRIC:
++        result.value = GetSystemMetrics(NUM(INT,0));
++        break;
++    case D3DM_SET_WINDOW_LONG:
++        result.value = SetWindowLongPtrW(PTR(HWND,0), NUM(INT,1), NUM(LONG_PTR,2));
++        break;
++    }
++
++    result.last_error = GetLastError();
++    return NtCallbackReturn(&result, sizeof(result), STATUS_SUCCESS);
++}
+--- /dev/null
++++ b/dlls/winemac.drv/d3dmetal-macdrv.h
+@@ -0,0 +1,59 @@
++/* Original Caskrun Wine 11 host adapter. LGPL-2.1-or-later. */
++#ifndef __CASKRUN_D3DMETAL_MACDRV_H
++#define __CASKRUN_D3DMETAL_MACDRV_H
++
++enum d3dmetal_macdrv_operation
++{
++    D3DM_REG_QUERY,
++    D3DM_REG_SET,
++    D3DM_REG_OPEN,
++    D3DM_REG_CREATE,
++    D3DM_REG_CLOSE,
++    D3DM_ENUM_MONITORS,
++    D3DM_MONITOR_INFO,
++    D3DM_ADJUST_RECT,
++    D3DM_GET_WINDOW_LONG,
++    D3DM_GET_WINDOW_RECT,
++    D3DM_MOVE_WINDOW,
++    D3DM_SET_WINDOW_POS,
++    D3DM_GET_METRIC,
++    D3DM_SET_WINDOW_LONG,
++    D3DM_OPERATION_COUNT
++};
++
++/* Fixed-width transport, shared by the PE and Unix halves of this driver.
++ * All pointees belong to the calling process and are used synchronously. */
++struct d3dmetal_macdrv_request
++{
++    struct dispatch_callback_params dispatch;
++    UINT operation;
++    DWORD initial_error;
++    UINT64 args[9];
++};
++
++struct d3dmetal_macdrv_result
++{
++    UINT64 value;
++    DWORD last_error;
++    DWORD reserved;
++};
++
++/* Fixed-width synchronous PE/native callback transport, also valid under
++ * WoW64. Keep Wine's ordinary Unix transition responsible for GS/TSD/stack
++ * state rather than calling native code directly from a PE kernel callback. */
++struct d3dmetal_monitor_callback_params
++{
++    UINT64 callback;
++    UINT64 monitor;
++    UINT64 dc;
++    UINT64 rect;
++    UINT64 data;
++    DWORD result;
++    DWORD last_error;
++};
++C_ASSERT(sizeof(struct d3dmetal_monitor_callback_params) == 48);
++extern NTSTATUS d3dmetal_macdrv_enum_callback(void *arg);
++
++extern NTSTATUS WINAPI d3dmetal_macdrv_dispatch(void *arg, ULONG size);
++
++#endif
+--- a/dlls/winemac.drv/dllmain.c
++++ b/dlls/winemac.drv/dllmain.c
+@@ -27,6 +27,7 @@
+ #include "macdrv_res.h"
+ #include "shellapi.h"
+ #include "unixlib.h"
++#include "d3dmetal-macdrv.h"
+ #include "wine/debug.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
+@@ -403,6 +404,7 @@
+     params.strings = strings;
+     params.app_icon_callback = (UINT_PTR)macdrv_app_icon;
+     params.app_quit_request_callback = (UINT_PTR)macdrv_app_quit_request;
++    params.d3dmetal_macdrv_callback = (UINT_PTR)d3dmetal_macdrv_dispatch;
+ 
+     if (MACDRV_CALL(init, &params)) return FALSE;
+ 
+--- a/dlls/winemac.drv/macdrv_main.c
++++ b/dlls/winemac.drv/macdrv_main.c
+@@ -32,6 +32,7 @@
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+ #include "macdrv.h"
++#include "d3dmetal-macdrv.h"
+ #include "shellapi.h"
+ #include "wine/server.h"
+ 
+@@ -61,6 +62,7 @@
+ 
+ UINT64 app_icon_callback = 0;
+ UINT64 app_quit_request_callback = 0;
++UINT64 d3dmetal_macdrv_callback = 0;
+ 
+ CFDictionaryRef localized_strings;
+ 
+@@ -431,6 +433,7 @@
+ 
+     app_icon_callback = params->app_icon_callback;
+     app_quit_request_callback = params->app_quit_request_callback;
++    d3dmetal_macdrv_callback = params->d3dmetal_macdrv_callback;
+ 
+     status = SessionGetInfo(callerSecuritySession, NULL, &attributes);
+     if (status != noErr || !(attributes & sessionHasGraphicAccess))
+@@ -607,6 +610,7 @@
+ {
+     macdrv_init,
+     macdrv_quit_result,
++    d3dmetal_macdrv_enum_callback,
+ };
+ 
+ C_ASSERT( ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count );
+@@ -620,12 +624,14 @@
+         ULONG strings;
+         UINT64 app_icon_callback;
+         UINT64 app_quit_request_callback;
++        UINT64 d3dmetal_macdrv_callback;
+     } *params32 = arg;
+     struct init_params params;
+ 
+     params.strings = UlongToPtr(params32->strings);
+     params.app_icon_callback = params32->app_icon_callback;
+     params.app_quit_request_callback = params32->app_quit_request_callback;
++    params.d3dmetal_macdrv_callback = params32->d3dmetal_macdrv_callback;
+     return macdrv_init(&params);
+ }
+ 
+@@ -633,6 +639,7 @@
+ {
+     wow64_init,
+     macdrv_quit_result,
++    d3dmetal_macdrv_enum_callback,
+ };
+ 
+ C_ASSERT( ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count );
+--- a/dlls/winemac.drv/unixlib.h
++++ b/dlls/winemac.drv/unixlib.h
+@@ -23,6 +23,7 @@
+ {
+     unix_init,
+     unix_quit_result,
++    unix_d3dmetal_enum_callback,
+     unix_funcs_count
+ };
+ 
+@@ -41,6 +42,7 @@
+     struct localized_string *strings;
+     UINT64 app_icon_callback;
+     UINT64 app_quit_request_callback;
++    UINT64 d3dmetal_macdrv_callback;
+ };
+ 
+ /* macdrv_quit_result params */

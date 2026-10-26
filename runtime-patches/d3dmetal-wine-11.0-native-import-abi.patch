@@ -1,0 +1,227 @@
+Original dual-ABI native imports for the opt-in Apple support boundary.
+
+Interface facts: public LGPL Wine-derived host declarations identify nine NT
+imports used with Microsoft x64 ABI by libd3dshared. Implementations here are
+original adapters over upstream Wine 11 signatures/bodies; no CrossOver code
+is imported. Existing internal SysV calls retain their implementations. The
+only ABI selector is the return address inside the explicitly selected dylib's
+executable __TEXT span obtained via public dladdr/getsegmentdata metadata.
+No Apple code, imports, objects or private globals are modified.
+
+Interface reference (declarations and calling-convention facts only):
+https://github.com/Alien4042x/WineForge/blob/df3d347fd59ebe932affeb83c6a39fe34abf39e8/dlls/ntdll/unix/unix_private.h
+SHA-256: 9b811058545eb74fc933e994e8b4408cfef5fe11e95e8dcc1f42081b70c87036
+
+Apply after d3dmetal-wine-11.0-non-native-regions.patch. Off by default.
+This source is LGPL-2.1-or-later, matching Wine. Capability remains unaccepted
+until both ABI argument tests and actual API/render/lifecycle tests pass.
+
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -23,6 +23,18 @@
+ 
+ #if 0
+ #pragma makedep unix
++#endif
++
++
++/* Keep internal Wine calls on their original SysV implementations. */
++#if defined(__APPLE__) && defined(__x86_64__)
++#define NtCreateSemaphore caskrun_sysv_NtCreateSemaphore
++#define NtReleaseSemaphore caskrun_sysv_NtReleaseSemaphore
++#define NtCreateEvent caskrun_sysv_NtCreateEvent
++#define NtSetEvent caskrun_sysv_NtSetEvent
++#define NtResetEvent caskrun_sysv_NtResetEvent
++#define NtClearEvent caskrun_sysv_NtClearEvent
++#define NtPulseEvent caskrun_sysv_NtPulseEvent
+ #endif
+ 
+ #include "config.h"
+@@ -3764,3 +3776,55 @@
+ 
+     return STATUS_NOT_SUPPORTED;
+ }
++
++#if defined(__APPLE__) && defined(__x86_64__)
++#undef NtCreateSemaphore
++NTSTATUS __attribute__((ms_abi)) caskrun_ms_NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr, LONG initial, LONG max )
++{
++    return caskrun_sysv_NtCreateSemaphore( handle, access, attr, initial, max );
++}
++CASKRUN_D3DMETAL_ABI_EXPORT( NtCreateSemaphore, caskrun_sysv_NtCreateSemaphore, caskrun_ms_NtCreateSemaphore )
++
++#undef NtReleaseSemaphore
++NTSTATUS __attribute__((ms_abi)) caskrun_ms_NtReleaseSemaphore( HANDLE handle, ULONG count, ULONG *previous )
++{
++    return caskrun_sysv_NtReleaseSemaphore( handle, count, previous );
++}
++CASKRUN_D3DMETAL_ABI_EXPORT( NtReleaseSemaphore, caskrun_sysv_NtReleaseSemaphore, caskrun_ms_NtReleaseSemaphore )
++
++#undef NtCreateEvent
++NTSTATUS __attribute__((ms_abi)) caskrun_ms_NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr, EVENT_TYPE type, BOOLEAN state )
++{
++    return caskrun_sysv_NtCreateEvent( handle, access, attr, type, state );
++}
++CASKRUN_D3DMETAL_ABI_EXPORT( NtCreateEvent, caskrun_sysv_NtCreateEvent, caskrun_ms_NtCreateEvent )
++
++#undef NtSetEvent
++NTSTATUS __attribute__((ms_abi)) caskrun_ms_NtSetEvent( HANDLE handle, LONG *prev_state )
++{
++    return caskrun_sysv_NtSetEvent( handle, prev_state );
++}
++CASKRUN_D3DMETAL_ABI_EXPORT( NtSetEvent, caskrun_sysv_NtSetEvent, caskrun_ms_NtSetEvent )
++
++#undef NtResetEvent
++NTSTATUS __attribute__((ms_abi)) caskrun_ms_NtResetEvent( HANDLE handle, LONG *prev_state )
++{
++    return caskrun_sysv_NtResetEvent( handle, prev_state );
++}
++CASKRUN_D3DMETAL_ABI_EXPORT( NtResetEvent, caskrun_sysv_NtResetEvent, caskrun_ms_NtResetEvent )
++
++#undef NtClearEvent
++NTSTATUS __attribute__((ms_abi)) caskrun_ms_NtClearEvent( HANDLE handle )
++{
++    return caskrun_sysv_NtClearEvent( handle );
++}
++CASKRUN_D3DMETAL_ABI_EXPORT( NtClearEvent, caskrun_sysv_NtClearEvent, caskrun_ms_NtClearEvent )
++
++#undef NtPulseEvent
++NTSTATUS __attribute__((ms_abi)) caskrun_ms_NtPulseEvent( HANDLE handle, LONG *prev_state )
++{
++    return caskrun_sysv_NtPulseEvent( handle, prev_state );
++}
++CASKRUN_D3DMETAL_ABI_EXPORT( NtPulseEvent, caskrun_sysv_NtPulseEvent, caskrun_ms_NtPulseEvent )
++
++#endif
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -20,6 +20,12 @@
+ 
+ #if 0
+ #pragma makedep unix
++#endif
++
++
++/* Keep internal Wine calls on their original SysV implementations. */
++#if defined(__APPLE__) && defined(__x86_64__)
++#define NtClose caskrun_sysv_NtClose
+ #endif
+ 
+ #include "config.h"
+@@ -2042,3 +2048,13 @@
+ }
+ 
+ #endif /* _WIN64 */
++
++#if defined(__APPLE__) && defined(__x86_64__)
++#undef NtClose
++NTSTATUS __attribute__((ms_abi)) caskrun_ms_NtClose( HANDLE handle )
++{
++    return caskrun_sysv_NtClose( handle );
++}
++CASKRUN_D3DMETAL_ABI_EXPORT( NtClose, caskrun_sysv_NtClose, caskrun_ms_NtClose )
++
++#endif
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -20,6 +20,12 @@
+ 
+ #if 0
+ #pragma makedep unix
++#endif
++
++
++/* Keep internal Wine calls on their original SysV implementations. */
++#if defined(__APPLE__) && defined(__x86_64__)
++#define NtCreateThreadEx caskrun_sysv_NtCreateThreadEx
+ #endif
+ 
+ #include "config.h"
+@@ -2743,3 +2749,13 @@
+     *handle = ret_handle;
+     return ret;
+ }
++
++#if defined(__APPLE__) && defined(__x86_64__)
++#undef NtCreateThreadEx
++NTSTATUS __attribute__((ms_abi)) caskrun_ms_NtCreateThreadEx( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUTES *attr, HANDLE process, PRTL_THREAD_START_ROUTINE start, void *param, ULONG flags, ULONG_PTR zero_bits, SIZE_T stack_commit, SIZE_T stack_reserve, PS_ATTRIBUTE_LIST *attr_list )
++{
++    return caskrun_sysv_NtCreateThreadEx( handle, access, attr, process, start, param, flags, zero_bits, stack_commit, stack_reserve, attr_list );
++}
++CASKRUN_D3DMETAL_ABI_EXPORT( NtCreateThreadEx, caskrun_sysv_NtCreateThreadEx, caskrun_ms_NtCreateThreadEx )
++
++#endif
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -692,4 +692,25 @@
+ 
+ #endif  /* defined(__i386__) || defined(__x86_64__) */
+ 
++/* Original Caskrun dual-ABI native import boundary. R10/R11 are volatile in
++ * both x64 ABIs and carry no NT API arguments. Tail jumps preserve the entire
++ * caller stack, integer/vector argument registers and nonvolatile state. */
++#if defined(__APPLE__) && defined(__x86_64__)
++#include "wine/asm.h"
++extern ULONG_PTR caskrun_d3dmetal_text_begin, caskrun_d3dmetal_text_end;
++#define CASKRUN_D3DMETAL_ABI_EXPORT(api, native_impl, apple_impl) \
++    asm( ".text\n\t.align 4\n\t.globl " __ASM_NAME(#api) "\n" \
++         __ASM_NAME(#api) ":\n\t" \
++         "movq " __ASM_NAME("caskrun_d3dmetal_text_begin") "(%rip), %r11\n\t" \
++         "testq %r11, %r11\n\t" \
++         "jz 1f\n\t" \
++         "movq (%rsp), %r10\n\t" \
++         "cmpq %r11, %r10\n\t" \
++         "jb 1f\n\t" \
++         "cmpq " __ASM_NAME("caskrun_d3dmetal_text_end") "(%rip), %r10\n\t" \
++         "jae 1f\n\t" \
++         "jmp " __ASM_NAME(#apple_impl) "\n" \
++         "1:\n\tjmp " __ASM_NAME(#native_impl) "\n" );
++#endif
++
+ #endif /* __NTDLL_UNIX_PRIVATE_H */
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -62,6 +62,7 @@
+ # include <sys/sysctl.h>
+ #endif
+ #ifdef __APPLE__
++# include <mach-o/getsect.h>
+ # include <CoreFoundation/CoreFoundation.h>
+ # define LoadResource MacLoadResource
+ # define GetCurrentThread MacGetCurrentThread
+@@ -1458,6 +1459,7 @@
+  * The opt-in path is validated by the owning launcher. The library stays open
+  * for the process lifetime, as in Apple's public Homebrew formula. */
+ #if defined(__APPLE__) && defined(__x86_64__)
++ULONG_PTR caskrun_d3dmetal_text_begin, caskrun_d3dmetal_text_end;
+ static void *d3dmetal_support_library;
+ static void (*d3dmetal_register_region)(void *, void *);
+ 
+@@ -1466,6 +1468,9 @@
+     const char *path = getenv( "CASKRUN_D3DMETAL_SHARED_LIBRARY" );
+     _Bool (*supports_regions)(void);
+     void (*register_region)(void *, void *);
++    Dl_info library_info;
++    const uint8_t *text;
++    unsigned long text_size = 0;
+ 
+     if (!path || !path[0]) return;
+     if (path[0] != '/')
+@@ -1483,6 +1488,17 @@
+     register_region = dlsym( d3dmetal_support_library, "register_non_native_code_region" );
+     if (supports_regions && register_region && supports_regions())
+     {
++        /* Public dyld image metadata, not private framework state. Only this
++         * explicitly selected library may call Wine's native imports as MSABI. */
++        if (!dladdr( supports_regions, &library_info ) || !library_info.dli_fbase ||
++            !(text = getsegmentdata( library_info.dli_fbase, "__TEXT", &text_size )) ||
++            !text_size || (ULONG_PTR)text > ~(ULONG_PTR)0 - text_size)
++        {
++            WARN( "Apple support library has no valid executable image range\n" );
++            return;
++        }
++        caskrun_d3dmetal_text_begin = (ULONG_PTR)text;
++        caskrun_d3dmetal_text_end = (ULONG_PTR)text + text_size;
+         d3dmetal_register_region = register_region;
+         TRACE( "Apple non-native region support enabled\n" );
+     }

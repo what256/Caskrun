@@ -75,10 +75,14 @@ _8 October 2026. These additions do not change the real publisher-client outcome
   Visible image quality, fullscreen, real games and other Macs remain manual
   tests. See [exact DXMT evidence](DXMT_OPTIONS.md).
 
-Automatic remains WineD3D. High Resolution stays optional and off by default;
-DXMT frame targets and spatial scaling are optional and default off. These
-controls add neither DLSS, temporal reconstruction, frame generation, D3D12,
-DXVK, D3DMetal nor MSync. No performance advantage over CrossOver is claimed.
+In version 0.2.0, Automatic can select reviewed DXMT or DXVK paths when the
+available import evidence is sufficient; otherwise it keeps WineD3D. Manual
+DXMT also exposes the experimental x64 D3D12 path. MSync and High Resolution
+remain optional and off by default. DXMT frame targets and spatial scaling are
+optional; spatial scaling applies to Direct3D 10/11. These controls do not add
+DLSS, temporal reconstruction or frame generation. D3DMetal remains unavailable.
+See [current graphics status](GRAPHICS_BACKEND_STATUS.md) for the validation
+scope and limits. No performance advantage over CrossOver is claimed.
 
 ## Isolated local tests
 

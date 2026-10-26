@@ -192,7 +192,21 @@ limit. This is a transient or context-dependent observation, not proof of a
 persistent microphone failure. No audio bypass, permission change or saved
 audio setting is included in these patches.
 
-## DXMT development candidate — separate from the included runtime
+## Current graphics integration
+
+Version 0.2.0 / V16 includes the reviewed DXMT client-surface bridge and the
+additional `dxmt-e94c312f-d3d12-client-surface.patch`. The experimental x64
+D3D12 path is available through manual DXMT; see
+[its integration and limits](../docs/D3D12_EXPERIMENT.md). The development
+history below records earlier candidate stages rather than current packaging.
+
+The original `d3dmetal-wine-11.0-*.patch` adapters are separate, unaccepted
+Wine host experiments under LGPL-2.1-or-later. Their source order, public
+interface provenance and actual results are recorded in
+[the D3DMetal integration notes](d3dmetal-integration-notes.md). They are not
+enabled in V16 and contain no Apple evaluation binaries.
+
+## Historical DXMT development candidate
 
 Four patches now build an isolated, signed runtime candidate with both Windows
 architectures. Hardware Direct3D device, shader, readback and HWND Present gates
