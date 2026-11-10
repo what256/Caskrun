@@ -254,9 +254,195 @@
       "artworkURL": "https://www.hedgewars.org/images/screenshots/1_0_0-bazooka.png"
     },
     {
+      "id": "wasm-gta-v",
+      "name": "Grand Theft Auto V · community",
+      "detail": "Third-party community browser listing hosted through WASM Arcade. Gameplay and availability are unverified; the site recommends Chrome or Edge and WebGPU.",
+      "url": "https://wasmarcade.com/gta-5",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/covers/gta-v-896.webp",
+      "kind": "unverified"
+    },
+    {
+      "id": "wasm-vice-city",
+      "name": "Grand Theft Auto: Vice City · browser",
+      "detail": "Community browser port on WASM Arcade. Independent of Rockstar Games; gameplay has not been tested.",
+      "url": "https://wasmarcade.com/vice-city",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/covers/vice-city-896.webp"
+    },
+    {
+      "id": "wasm-gta-iii",
+      "name": "Grand Theft Auto III · browser",
+      "detail": "Community browser port on WASM Arcade. Independent of Rockstar Games; gameplay has not been tested.",
+      "url": "https://wasmarcade.com/gta3",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/covers/gta3-896.webp"
+    },
+    {
+      "id": "wasm-simpsons",
+      "name": "The Simpsons: Hit & Run · browser",
+      "detail": "Community browser port on WASM Arcade. Independent of the original publishers; gameplay has not been tested.",
+      "url": "https://wasmarcade.com/simpsons",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/covers/hit-and-run-896.webp"
+    },
+    {
+      "id": "wasm-minecraft",
+      "name": "Minecraft · browser",
+      "detail": "Community browser version on WASM Arcade. Independent of Mojang and Microsoft; gameplay has not been tested.",
+      "url": "https://wasmarcade.com/minecraft",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/covers/minecraft-896.webp"
+    },
+    {
+      "id": "wasm-metal-slug",
+      "name": "Metal Slug · arcade",
+      "detail": "Arcade game listed by WASM Arcade. Opens the provider’s game page; gameplay has not been tested.",
+      "url": "https://wasmarcade.com/retro-games/metal-slug",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/emulation/boxart-v2/mslug-450.webp"
+    },
+    {
+      "id": "wasm-kof-2002",
+      "name": "The King of Fighters 2002 · arcade",
+      "detail": "Neo Geo arcade game listed by WASM Arcade. Opens the provider’s game page; gameplay has not been tested.",
+      "url": "https://wasmarcade.com/retro-games/the-king-of-fighters-2002",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/emulation/boxart-v2/kof2002-450.webp"
+    },
+    {
+      "id": "wasm-sf2",
+      "name": "Street Fighter II: Hyper Fighting · arcade",
+      "detail": "Capcom arcade game listed by WASM Arcade. Opens the provider’s game page; gameplay has not been tested.",
+      "url": "https://wasmarcade.com/retro-games/street-fighter-ii-hyper-fighting",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/emulation/boxart-v2/sf2hf-450.webp"
+    },
+    {
+      "id": "wasm-pacman",
+      "name": "Pac-Man · arcade",
+      "detail": "Arcade game listed by WASM Arcade. Opens the provider’s game page; gameplay has not been tested.",
+      "url": "https://wasmarcade.com/retro-games/pac-man-arcade-1980",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/emulation/boxart-v2/pacman-450.webp"
+    },
+    {
+      "id": "wasm-dragon-ball-z",
+      "name": "Dragon Ball Z · arcade",
+      "detail": "The 1993 Dragon Ball Z arcade game listed by WASM Arcade. Gameplay has not been tested.",
+      "url": "https://wasmarcade.com/retro-games/dragon-ball-z",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/emulation/boxart-v2/dbz-450.webp"
+    },
+    {
+      "id": "wasm-umk3",
+      "name": "Ultimate Mortal Kombat 3 · arcade",
+      "detail": "Arcade game listed by WASM Arcade. Opens the provider’s game page; gameplay has not been tested.",
+      "url": "https://wasmarcade.com/retro-games/ultimate-mortal-kombat-3",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/emulation/boxart-v2/umk3-450.webp"
+    },
+    {
+      "id": "wasm-mk2",
+      "name": "Mortal Kombat II · arcade",
+      "detail": "Arcade game listed by WASM Arcade. Opens the provider’s game page; gameplay has not been tested.",
+      "url": "https://wasmarcade.com/retro-games/mortal-kombat-ii",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/emulation/boxart-v2/mk2-450.webp"
+    },
+    {
+      "id": "wasm-happy-wheels",
+      "name": "Happy Wheels · Flash",
+      "detail": "Flash game listed by WASM Arcade, using a browser Flash emulator. Gameplay has not been tested.",
+      "url": "https://wasmarcade.com/flash-games/happy-wheels",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/flash/thumbs/happy-wheels-450.webp"
+    },
+    {
+      "id": "wasm-neo-geo",
+      "name": "WASM Arcade · Neo Geo",
+      "detail": "Browse the provider’s Neo Geo collection, including Metal Slug and The King of Fighters.",
+      "url": "https://wasmarcade.com/retro-games/system/neogeo",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/emulation/boxart-v2/mslug-450.webp",
+      "kind": "collection"
+    },
+    {
+      "id": "wasm-capcom",
+      "name": "WASM Arcade · Capcom",
+      "detail": "Browse the provider’s Capcom arcade collection, including Street Fighter and Final Fight.",
+      "url": "https://wasmarcade.com/retro-games/system/capcom",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/emulation/boxart-v2/sf2hf-450.webp",
+      "kind": "collection"
+    },
+    {
+      "id": "wasm-classic-arcade",
+      "name": "WASM Arcade · arcade classics",
+      "detail": "Browse the provider’s arcade collection, including Pac-Man and Dragon Ball Z.",
+      "url": "https://wasmarcade.com/retro-games/system/arcade",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/emulation/boxart-v2/pacman-450.webp",
+      "kind": "collection"
+    },
+    {
+      "id": "wasm-flash",
+      "name": "WASM Arcade · Flash games",
+      "detail": "Browse the provider’s Flash games, which use browser emulation.",
+      "url": "https://wasmarcade.com/flash-games",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/flash/thumbs/happy-wheels-450.webp",
+      "kind": "collection"
+    },
+    {
+      "id": "wasm-all-games",
+      "name": "WASM Arcade · all games",
+      "detail": "Browse WASM Arcade’s independent collection of browser games and arcade classics. The site handles play, advertising and saves.",
+      "url": "https://wasmarcade.com/",
+      "sourceURL": "https://wasmarcade.com/about",
+      "symbol": "gamecontroller",
+      "requiresOwnFiles": false,
+      "artworkURL": "https://wasmarcade.com/og/site-v2.png",
+      "kind": "collection"
+    },
+    {
       "id": "wasm-arcade",
-      "name": "WASM Arcade · game collection",
-      "detail": "Browse a community archive of browser ports, including GTA, Minecraft and other games. Requirements vary by title.",
+      "name": "WASM Arcade · PC games",
+      "detail": "Browse the provider’s collection of PC browser games. The site handles play, advertising and saves.",
       "url": "https://wasmarcade.com/pc-games",
       "sourceURL": "https://wasmarcade.com/about",
       "symbol": "gamecontroller",

@@ -1,9 +1,9 @@
 # Browser game links
 
-Reviewed 9 October 2026. The catalogue contains 26 links: individual games,
-community recreations, one collection and three links whose availability could
-not be confirmed. GTA 5 is omitted because the supplied shortened link resolves
-to an incomplete Wayback timestamp with no original game URL.
+Reviewed 10 November 2026. The catalogue contains 44 links to individual games,
+community recreations and collections, including selected WASM Arcade game
+pages and its five category pages. Its GTA V listing points to a third-party
+player and remains unverified; it is not a verified GTA V release.
 
 **Play in browser** opens the public HTTPS game page in the default browser.
 Collections use **Browse games**; unverified entries use **Visit website**.
@@ -44,6 +44,7 @@ Own-file requirements below reflect the linked project, not a Caskrun test.
 | Diablo browser port | [Upstream](https://github.com/d07RiV/diabloweb) | Shareware offered; full game requires the user's own DIABDAT.MPQ. |
 | Hedgewars community link | [Supplied site](https://webwars.link/) | HTTPS hostname mismatch during review; availability unverified. |
 | WASM Arcade | [About](https://wasmarcade.com/about) | Community collection; file requirements vary by game. |
+| WASM Arcade game pages | [PC games](https://wasmarcade.com/pc-games), [Neo Geo](https://wasmarcade.com/retro-games/system/neogeo), [Capcom](https://wasmarcade.com/retro-games/system/capcom), [arcade classics](https://wasmarcade.com/retro-games/system/arcade), [Flash games](https://wasmarcade.com/flash-games) | Individual links are a selection; the category pages provide access to the wider catalogue. Caskrun has not tested gameplay. The site is independent of game publishers and may change its listings. |
 | Hextris | [Original project](https://github.com/Hextris/hextris) | Its linked website had an expired HTTPS certificate; availability unverified. |
 | 2048 | [Creator's about page](https://play2048.co/about) | Original creator's website. |
 
@@ -54,7 +55,7 @@ accept agreements or test gameplay. Certificate validation was not bypassed.
 
 ## Scene previews
 
-All 26 entries have explicit remote scene/cover URLs in `browser-games.json`.
+All 44 entries have explicit remote scene/cover URLs in `browser-games.json`.
 Most are pictures published by their game site. The Hit & Run preview is from
 WASM Arcade's game-cover catalogue. Original game covers are used where a
 community port has no suitable scene picture; a cover does not establish the
@@ -62,6 +63,11 @@ port's identity, official endorsement or playable compatibility. No blanket
 asset-reuse licence was established; images are not copied into this repository
 or the app bundle. Loading/error states are neutral and no longer substitute
 coloured title cards. No favicon scraping or invented publisher logos are used.
+
+The WASM Arcade entries use explicit cover URLs shown by the provider; category
+cards use a representative cover. The site says it displays advertising and
+may open a sponsor tab when a player starts. Opening a category or game page
+leaves Caskrun and uses the browser's own storage and the provider's terms.
 
 Additional picture provenance:
 
