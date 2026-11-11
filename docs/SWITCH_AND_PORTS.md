@@ -1,14 +1,19 @@
 # Switch and native-port research
 
-Reviewed 11 November 2026. These are independently developed projects, not
-integrations or compatibility guarantees in Caskrun. Their availability,
+**Implementation update:** Caskrun now supports explicitly selecting an
+external Suyu app and adding individual game-file references to Collection.
+That launch path has fixture coverage, but no retail game has been tested in
+Caskrun. Nothing below implies an engine or game is bundled.
+
+Reviewed 11 November 2026. These independently developed projects do not
+provide compatibility guarantees in Caskrun. Their availability,
 system requirements, licenses and supported games can change.
 
 - [Suyu](https://github.com/suyu-emu/suyu-main) publishes an Apple Silicon
   macOS build for Nintendo Switch. Its maintainers report bounded opening checks
   for selected games on an M5. They do not claim complete compatibility, and
-  Caskrun has not run or integrated this engine. It does not ship games, keys
-  or firmware.
+  Caskrun has not validated gameplay with this engine. It does not ship games,
+  keys or firmware.
 - [nxnative](https://github.com/seedds/nxnative) builds individual Switch and
   Switch 2 games into native Apple Silicon applications from user-provided game
   files. Its developers list the Switch 2 Ocarina of Time remake among tested
