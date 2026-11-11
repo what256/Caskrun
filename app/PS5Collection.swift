@@ -489,11 +489,13 @@ final class PS5CollectionModel: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var runningGameIDs = Set<String>()
     private let storageDirectory: URL
+    private let enabled: Bool
     private var storageValid = false
     private var quitting = false
     private var sessions: [String: PS5OwnedSession] = [:]
 
-    init(storageDirectory: URL? = nil) {
+    init(storageDirectory: URL? = nil, enabled: Bool = true) {
+        self.enabled = enabled
         if let storageDirectory { self.storageDirectory = storageDirectory.standardizedFileURL }
         else if let override = ProcessInfo.processInfo.environment["CASKRUN_HOME"], !override.isEmpty {
             self.storageDirectory = URL(fileURLWithPath: override, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)).standardizedFileURL
@@ -505,7 +507,7 @@ final class PS5CollectionModel: ObservableObject {
     }
 
     func refresh() {
-        guard !busy else { return }
+        guard enabled, !busy else { return }
         let path = storageDirectory.appendingPathComponent("ps5-collection.json")
         var attributes = stat()
         if lstat(path.path, &attributes) != 0, errno == ENOENT {

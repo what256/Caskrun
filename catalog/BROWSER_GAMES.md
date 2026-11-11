@@ -1,8 +1,8 @@
 # Browser game links
 
-Reviewed 10 November 2026. The catalogue contains 44 links to individual games,
-community recreations and collections, including selected WASM Arcade game
-pages and its five category pages. Its GTA V listing points to a third-party
+Reviewed 11 November 2026. The catalogue contains 549 links, including 518
+individual WASM Arcade game pages, additional community links and collections.
+Its GTA V listing points to a third-party
 player and remains unverified; it is not a verified GTA V release.
 
 **Play in browser** opens the public HTTPS game page in the default browser.
@@ -44,7 +44,7 @@ Own-file requirements below reflect the linked project, not a Caskrun test.
 | Diablo browser port | [Upstream](https://github.com/d07RiV/diabloweb) | Shareware offered; full game requires the user's own DIABDAT.MPQ. |
 | Hedgewars community link | [Supplied site](https://webwars.link/) | HTTPS hostname mismatch during review; availability unverified. |
 | WASM Arcade | [About](https://wasmarcade.com/about) | Community collection; file requirements vary by game. |
-| WASM Arcade game pages | [PC games](https://wasmarcade.com/pc-games), [Neo Geo](https://wasmarcade.com/retro-games/system/neogeo), [Capcom](https://wasmarcade.com/retro-games/system/capcom), [arcade classics](https://wasmarcade.com/retro-games/system/arcade), [Flash games](https://wasmarcade.com/flash-games) | Individual links are a selection; the category pages provide access to the wider catalogue. Caskrun has not tested gameplay. The site is independent of game publishers and may change its listings. |
+| WASM Arcade game pages | [PC games](https://wasmarcade.com/pc-games), [Neo Geo](https://wasmarcade.com/retro-games/system/neogeo), [Capcom](https://wasmarcade.com/retro-games/system/capcom), [arcade classics](https://wasmarcade.com/retro-games/system/arcade), [Flash games](https://wasmarcade.com/flash-games) | The 518 individual links are a snapshot of five public category listings: 5 PC, 90 Neo Geo, 62 Capcom, 75 arcade and 286 Flash games. Caskrun has not tested gameplay. The site is independent of game publishers and may change its listings. |
 | Hextris | [Original project](https://github.com/Hextris/hextris) | Its linked website had an expired HTTPS certificate; availability unverified. |
 | 2048 | [Creator's about page](https://play2048.co/about) | Original creator's website. |
 
@@ -55,7 +55,7 @@ accept agreements or test gameplay. Certificate validation was not bypassed.
 
 ## Scene previews
 
-All 44 entries have explicit remote scene/cover URLs in `browser-games.json`.
+All 549 entries have explicit remote scene/cover URLs in `browser-games.json`.
 Most are pictures published by their game site. The Hit & Run preview is from
 WASM Arcade's game-cover catalogue. Original game covers are used where a
 community port has no suitable scene picture; a cover does not establish the

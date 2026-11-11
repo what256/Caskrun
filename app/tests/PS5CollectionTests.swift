@@ -53,6 +53,11 @@ struct PS5CollectionTests {
         try expect(lstat(documentURL.path, &attributes) == 0 && attributes.st_mode & 0o777 == 0o600, "local metadata is private")
         let restored = PS5CollectionModel(storageDirectory: dataDirectory)
         try expect(restored.games == [game] && restored.engine == nil && restored.error == nil, "metadata round trip")
+        let beforeDisabled = try Data(contentsOf: documentURL)
+        let disabled = PS5CollectionModel(storageDirectory: dataDirectory, enabled: false)
+        disabled.refresh()
+        try expect(disabled.games.isEmpty && disabled.error == nil, "suspended PS5 integration does not load saved games")
+        try expect(try Data(contentsOf: documentURL) == beforeDisabled, "suspension preserves saved PS5 metadata")
         do {
             _ = try await model.importGame(name: "Duplicate", path: gameFolder.appendingPathComponent("."))
             throw PS5CollectionError.invalid("Test failed: duplicate was imported")

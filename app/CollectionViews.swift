@@ -3,6 +3,9 @@ import SwiftUI
 
 enum CollectionPlatform: String, CaseIterable, Identifiable {
     case all, windows, ps5, browser
+    // Keep the legacy case available for existing metadata and tests without
+    // presenting the suspended PS5 integration in the interface.
+    static let visibleCases: [CollectionPlatform] = [.all, .windows, .browser]
     var id: String { rawValue }
     var title: String {
         switch self { case .all: "All"; case .windows: "Windows"; case .ps5: "PS5"; case .browser: "Browser" }
@@ -223,7 +226,7 @@ struct CollectionGrid: View {
     private var platformFilter: some View {
         Menu {
             Section("Platform") {
-                ForEach(CollectionPlatform.allCases) { choice in
+                ForEach(CollectionPlatform.visibleCases) { choice in
                     Button { platform = choice } label: {
                         Label("\(choice.title)  \(counts[choice, default: 0])",
                               systemImage: platform == choice ? "checkmark" : choice.symbol)

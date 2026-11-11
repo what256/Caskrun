@@ -25,6 +25,7 @@ struct CollectionTests {
             CollectionFilter.entries(entries, platform: platform, kind: kind, query: query).map(\.id)
         }
         expect(CollectionPlatform.allCases.map(\.title) == ["All", "Windows", "PS5", "Browser"], "compact platform choices")
+        expect(CollectionPlatform.visibleCases.map(\.title) == ["All", "Windows", "Browser"], "suspended PS5 is absent from the platform menu")
         expect(filter() == entries.map(\.id), "all items preserves input order")
         expect(filter(.windows) == ["steam:one", "app:one", "app:two"], "Windows includes games and apps")
         expect(filter(.ps5) == ["ps5:one"], "imported PS5 games have their own source")

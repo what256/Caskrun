@@ -14,11 +14,11 @@ Caskrun is an independent, open-source launcher for **Apple Silicon Macs**, in a
 - **Install stores or your own apps.** Discover includes Steam, Epic, GOG Galaxy, Battle.net, Ubisoft Connect, EA, itch.io and Rockstar. You can also run a local EXE/MSI or import an existing bottle. Installer, sign-in and gameplay results are tracked separately.
 - **Keep control of a bottle.** Rename, duplicate, export, restore and recover deleted bottles. Inspect installed programs, open the C: drive, save launch arguments and use Wine's configuration tools. Running bottles offer Quit Apps and an explicit Force Quit when needed.
 - **Choose graphics when needed.** Automatic uses conservative import evidence. The existing bottle inspector provides WineD3D, DXMT, DXVK, High Resolution and supported MSync controls; ordinary installation needs no Wine picker.
-- **Play in your browser.** Discover has 26 reviewed game/collection links with pictures, per-game browser selection and local bookmarks. Some community ports require your own original game files. No commercial game content is bundled.
+- **Play in your browser.** Discover includes 518 individually listed WASM Arcade games, additional community links, pictures, per-game browser selection and local bookmarks. Some community ports require your own original game files. No commercial game content is bundled.
 - **Use familiar Mac controls.** Native Dock names and artwork, menu-bar access, window reopen and text-editing controls. Closing Caskrun's window keeps its apps running; full Quit stops its owned Windows sessions. Browser tabs remain under your browser's control.
 - **Keep data local.** Bottles, saves, browser preferences, artwork caches and raw logs stay on your Mac. Shareable diagnostics use a bounded allowlist. Git publication checks reject private paths, credentials, user data and build products.
 
-The optional PS5 adapter accepts a user-provided local KytyPS5 engine and your own game files. Its app integration has fixture validation only. A separate AnyPS5/Wine experiment ran public PS5 DOOM homebrew; it is not retail-game support. See [PS5 scope](docs/EMULATION_RESEARCH.md) and [AnyPS5 results](docs/ANYPS5_WINE.md).
+The experimental PS5 interface is currently hidden. Existing PS5 collection data is preserved. Research into Switch emulation and native game ports is ongoing; no Switch engine is bundled or validated in Caskrun yet.
 
 ## Graphics in the current development engine
 

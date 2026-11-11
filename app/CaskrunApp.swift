@@ -785,7 +785,7 @@ private final class CaskrunStatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(item("About Caskrun", action: #selector(about)))
         let quitItem = item(model?.isQuitting == true ? "Closing apps…" : "Quit Caskrun", action: #selector(quit))
         quitItem.isEnabled = model?.isQuitting != true
-        quitItem.toolTip = "Close Caskrun and its Windows apps and PS5 sessions"
+        quitItem.toolTip = "Close Caskrun and its Windows apps"
         menu.addItem(quitItem)
     }
 
@@ -2974,7 +2974,8 @@ struct CaskrunApp: App {
 
     init() {
         let model = CaskrunModel()
-        let ps5 = PS5CollectionModel()
+        // Keep existing PS5 metadata untouched while the experimental feature is unavailable.
+        let ps5 = PS5CollectionModel(enabled: false)
         _model = StateObject(wrappedValue: model)
         _ps5 = StateObject(wrappedValue: ps5)
         _appUpdates = StateObject(wrappedValue: CaskrunAppUpdates(prepareForQuit: {
@@ -3010,6 +3011,7 @@ struct CaskrunApp: App {
     @State private var librarySearch = ""
     @State private var catalogSearch = ""
     @State private var discoverScope: DiscoverScope = .stores
+    @State private var browserCollectionGroup: BrowserCollectionGroup?
     @State private var browserGameRequest: AddBrowserGameRequest?
     @State private var steamInstallRequest: SteamGameInstallRequest?
     @State private var selectedCatalogEntry: CatalogEntry?
@@ -3288,7 +3290,7 @@ struct CaskrunApp: App {
             model.refresh()
             if !didChooseInitialPage {
                 page = !model.bottles.isEmpty ||
-                    !model.catalogAttempts.isEmpty || !model.browserGames.isEmpty || !ps5.games.isEmpty ? .collection : .discover
+                    !model.catalogAttempts.isEmpty || !model.browserGames.isEmpty ? .collection : .discover
                 didChooseInitialPage = true
             }
             if let url = Bundle.main.url(forResource: "caskrun-icon", withExtension: "png"),
@@ -3568,8 +3570,6 @@ struct CaskrunApp: App {
                 .frame(width: 1, height: 18).padding(.horizontal, 5)
             Menu {
                 Button("Discover apps") { navigate(to: .discover) }
-                Button("Import PS5 game…", action: beginPS5Import)
-                    .disabled(ps5.busy)
                 Button("Add browser game…") { browserGameRequest = AddBrowserGameRequest() }
                 Button("Install Steam game…") { steamInstallRequest = SteamGameInstallRequest(appID: nil, name: nil) }
                     .disabled(model.status.wine_path == nil || model.isLaunching || model.isManagingBottle)
@@ -4106,11 +4106,22 @@ struct CaskrunApp: App {
                         Text("Find a game. Save a favourite. Play in your browser.").font(.subheadline).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Menu {
+                        Button("All games") { browserCollectionGroup = nil }
+                        Divider()
+                        ForEach(BrowserCollectionGroup.allCases) { group in
+                            Button("WASM Arcade · \(group.title)") { browserCollectionGroup = group }
+                        }
+                    } label: {
+                        Label(browserCollectionGroup?.title ?? "All games", systemImage: "line.3.horizontal.decrease")
+                    }
+                    .menuStyle(.borderlessButton)
                     Button("Add a game link…") { browserGameRequest = AddBrowserGameRequest() }.buttonStyle(.bordered)
                 }
                 if let error = BrowserGameCatalog.loaded.error { Text(error).font(.caption).foregroundStyle(.secondary) }
                 let entries = BrowserGameCatalog.loaded.entries.filter {
-                    catalogSearch.isEmpty || $0.name.localizedStandardContains(catalogSearch) || $0.detail.localizedStandardContains(catalogSearch)
+                    (browserCollectionGroup == nil || $0.collectionGroup == browserCollectionGroup)
+                        && (catalogSearch.isEmpty || $0.name.localizedStandardContains(catalogSearch) || $0.detail.localizedStandardContains(catalogSearch))
                 }
                 if entries.isEmpty { ContentUnavailableView.search(text: catalogSearch) }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 240, maximum: 360), spacing: 16)], spacing: 16) {

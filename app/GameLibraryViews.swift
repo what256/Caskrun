@@ -19,6 +19,20 @@ enum BrowserGameCatalogKind: String, Decodable, Sendable {
     case game, collection, unverified
 }
 
+enum BrowserCollectionGroup: String, CaseIterable, Decodable, Identifiable, Sendable {
+    case pc, neogeo, capcom, arcade, flash
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .pc: "PC games"
+        case .neogeo: "Neo Geo"
+        case .capcom: "Capcom"
+        case .arcade: "Arcade classics"
+        case .flash: "Flash games"
+        }
+    }
+}
+
 struct BrowserGameCatalogEntry: Decodable, Identifiable, Sendable {
     let id: String
     let name: String
@@ -31,9 +45,10 @@ struct BrowserGameCatalogEntry: Decodable, Identifiable, Sendable {
     let artworkRedirectURLs: [URL]
     let artworkFallbackURLs: [URL]
     let kind: BrowserGameCatalogKind
+    let collectionGroup: BrowserCollectionGroup?
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, detail, url, sourceURL, symbol, requiresOwnFiles, artworkURL, artworkRedirectURLs, artworkFallbackURLs, kind
+        case id, name, detail, url, sourceURL, symbol, requiresOwnFiles, artworkURL, artworkRedirectURLs, artworkFallbackURLs, kind, collectionGroup
     }
 
     init(from decoder: Decoder) throws {
@@ -51,6 +66,7 @@ struct BrowserGameCatalogEntry: Decodable, Identifiable, Sendable {
         artworkFallbackURLs = fields.contains(.artworkFallbackURLs)
             ? try fields.decode([URL].self, forKey: .artworkFallbackURLs) : []
         kind = fields.contains(.kind) ? try fields.decode(BrowserGameCatalogKind.self, forKey: .kind) : .game
+        collectionGroup = try fields.decodeIfPresent(BrowserCollectionGroup.self, forKey: .collectionGroup)
         guard BrowserGameCoverPolicy.validArtworkMetadata(url: artworkURL, redirects: artworkRedirectURLs, fallbacks: artworkFallbackURLs) else {
             throw DecodingError.dataCorruptedError(forKey: .artworkURL, in: fields,
                                                    debugDescription: "Invalid browser game artwork URLs")
@@ -70,9 +86,9 @@ enum BrowserGameCatalog {
         }
         do {
             let bytes = try Data(contentsOf: url)
-            guard bytes.count <= 128 * 1024 else { throw CocoaError(.fileReadTooLarge) }
+            guard bytes.count <= 512 * 1024 else { throw CocoaError(.fileReadTooLarge) }
             let document = try JSONDecoder().decode(Document.self, from: bytes)
-            guard document.schemaVersion == 1, document.entries.count <= 64,
+            guard document.schemaVersion == 1, document.entries.count <= 600,
                   Set(document.entries.map(\.id)).count == document.entries.count,
                   document.entries.allSatisfy({ entry in
                       !entry.id.isEmpty && entry.id.utf8.count <= 64 && !entry.name.isEmpty && entry.name.utf8.count <= 160

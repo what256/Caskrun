@@ -9,7 +9,7 @@ use std::os::fd::FromRawFd;
 const FILE_NAME: &str = "browser-games.json";
 const LOCK_NAME: &str = ".browser-games.lock";
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_GAMES: usize = 512;
+const MAX_GAMES: usize = 1024;
 const MAX_URL_BYTES: usize = 2048;
 const O_NONBLOCK: i32 = 0x4;
 const O_NOFOLLOW: i32 = 0x100;
@@ -208,7 +208,7 @@ fn sensitive_parameter(parameter: &str) -> bool {
 
 fn validate_document(document: &Document) -> Result<(), String> {
     if document.version != 1 || document.games.len() > MAX_GAMES {
-        return Err("Browser games use an unsupported format or exceed the 512-game limit".into());
+        return Err("Browser games use an unsupported format or exceed the 1024-game limit".into());
     }
     let mut ids = std::collections::BTreeSet::new();
     let mut urls = std::collections::BTreeSet::new();
@@ -434,7 +434,7 @@ pub(super) fn add(home: &Path, name: &str, url: &str) -> Result<BrowserGame, Str
         return Ok(existing.clone());
     }
     if document.games.len() >= MAX_GAMES {
-        return Err("You can save up to 512 browser games".into());
+        return Err("You can save up to 1024 browser games".into());
     }
     let game = BrowserGame {
         id: Uuid::new_v4().to_string(),
@@ -494,6 +494,23 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn collection_can_hold_all_518_catalogue_games() {
+        let make_game = |index| BrowserGame {
+            id: Uuid::new_v4().to_string(),
+            name: format!("Game {index}"),
+            url: format!("https://games.example.org/{index}"),
+            created_at: 0,
+        };
+        let mut document = Document {
+            version: 1,
+            games: (0..518).map(make_game).collect(),
+        };
+        assert!(validate_document(&document).is_ok());
+        document.games = (0..=MAX_GAMES).map(make_game).collect();
+        assert!(validate_document(&document).is_err());
     }
 
     #[test]

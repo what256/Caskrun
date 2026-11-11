@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlsplit
 
 CATALOG = Path(__file__).with_name("browser-games.json")
 FIELDS = {"id", "name", "detail", "url", "sourceURL", "symbol", "requiresOwnFiles"}
-OPTIONAL_FIELDS = {"artworkURL", "artworkRedirectURLs", "artworkFallbackURLs", "kind"}
+OPTIONAL_FIELDS = {"artworkURL", "artworkRedirectURLs", "artworkFallbackURLs", "kind", "collectionGroup"}
 
 
 def checked_url(value):
@@ -43,8 +43,8 @@ def validate(data):
     if not isinstance(data, dict) or set(data) != {"schemaVersion", "entries"} or type(data["schemaVersion"]) is not int or data["schemaVersion"] != 1:
         raise ValueError("Unsupported browser catalog schema")
     entries = data["entries"]
-    if not isinstance(entries, list) or not 1 <= len(entries) <= 64:
-        raise ValueError("Browser catalog must contain 1–64 entries")
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 600:
+        raise ValueError("Browser catalog must contain 1–600 entries")
     ids, urls = set(), set()
     for item in entries:
         if not isinstance(item, dict) or not FIELDS.issubset(item) or set(item) - FIELDS - OPTIONAL_FIELDS:
@@ -64,6 +64,10 @@ def validate(data):
         kind = item.get("kind", "game")
         if not isinstance(kind, str) or kind not in {"game", "collection", "unverified"}:
             raise ValueError("Unknown browser entry kind")
+        if "collectionGroup" in item:
+            group = item["collectionGroup"]
+            if not isinstance(group, str) or group not in {"pc", "neogeo", "capcom", "arcade", "flash"}:
+                raise ValueError("Unknown browser collection group")
         artwork = item.get("artworkURL")
         redirects = item.get("artworkRedirectURLs", [])
         fallbacks = item.get("artworkFallbackURLs", [])
@@ -94,7 +98,7 @@ def main():
     if len(sys.argv) > 2:
         raise ValueError("usage: validate_browser_games.py [catalog.json]")
     path = Path(sys.argv[1]) if len(sys.argv) == 2 else CATALOG
-    if path.stat().st_size > 128 * 1024:
+    if path.stat().st_size > 512 * 1024:
         raise ValueError("Browser catalog exceeds the size limit")
     count = validate(json.loads(path.read_text(encoding="utf-8")))
     print(f"Valid browser game catalog: {count} checked links; gameplay unverified")
