@@ -4,6 +4,11 @@ import ImageIO
 
 @main
 struct BrowserGameCoverTests {
+    private struct CatalogDocument: Decodable {
+        let schemaVersion: Int
+        let entries: [BrowserGameCatalogEntry]
+    }
+
     static func main() async throws {
         var checks = 0
         func expect(_ value: Bool, _ message: String) {
@@ -20,6 +25,13 @@ struct BrowserGameCoverTests {
             return try JSONDecoder().decode(BrowserGameCatalogEntry.self, from: JSONSerialization.data(withJSONObject: document))
         }
         let plain = try entry()
+        let catalogURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("catalog/browser-games.json")
+        let catalog = try JSONDecoder().decode(CatalogDocument.self, from: Data(contentsOf: catalogURL))
+        let wasmarcade = catalog.entries.filter { $0.collectionGroup != nil }
+        expect(catalog.schemaVersion == 1 && wasmarcade.count == 518,
+               "the complete browser catalog decodes with all 518 individual WASM Arcade games")
+        expect(wasmarcade.allSatisfy { $0.artworkURL != nil }, "each WASM Arcade game has picture metadata")
         expect(plain.artworkURL == nil && plain.artworkRedirectURLs.isEmpty && plain.artworkFallbackURLs.isEmpty, "old catalog entries retain default metadata")
         expect(plain.kind == .game, "old catalogue entries remain individual games")
         expect(plain.collectionGroup == nil, "older entries need no collection group")
