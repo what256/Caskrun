@@ -18,7 +18,12 @@ Caskrun is an independent, open-source launcher for **Apple Silicon Macs**, in a
 - **Use familiar Mac controls.** Native Dock names and artwork, menu-bar access, window reopen and text-editing controls. Closing Caskrun's window keeps its apps running; full Quit stops its owned Windows sessions. Browser tabs remain under your browser's control.
 - **Keep data local.** Bottles, saves, browser preferences, artwork caches and raw logs stay on your Mac. Shareable diagnostics use a bounded allowlist. Git publication checks reject private paths, credentials, user data and build products.
 
-The experimental PS5 interface is currently hidden. Existing PS5 collection data is preserved. Research into Switch emulation and native game ports is ongoing; no Switch engine is bundled or validated in Caskrun yet.
+**Console games are experimental.** Collection can reference your own PS5
+game files and a separately installed SharpEmu or KytyPS5 engine, or Switch
+game files and a separately installed Apple Silicon Suyu app. Caskrun does not
+include games, keys, firmware or these engines. Import and process fixtures do
+not establish game compatibility, performance, controller, audio or save
+support. See [console engine research](docs/CONSOLE_ENGINES.md).
 
 ## Graphics in the current development engine
 

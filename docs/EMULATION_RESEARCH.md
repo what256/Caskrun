@@ -1,5 +1,10 @@
 # Retro gaming and console ports
 
+**11 November update:** Caskrun's experimental PS5 adapter also accepts an
+independently installed SharpEmu for Mac package. Switch collection links can
+use a separately installed Suyu app. Neither route has been validated with a
+retail game in Caskrun. See [current engine research](CONSOLE_ENGINES.md).
+
 Research snapshot: **9 October 2026**. Caskrun has an optional external KytyPS5 adapter and local imports; actual console emulation remains the selected engine’s responsibility, and game conversion is not integrated into the app. No extension, emulator, game or BIOS was installed or executed for this initial research.
 
 **Follow-up:** a separate pinned AnyPS5/Wine experiment ran public PS5 DOOM homebrew on Apple Silicon, verifying rendering, keyboard/mouse input, save/load, close and relaunch. Audible output, physical controllers, retail games and Caskrun integration remain unvalidated. See [the measured AnyPS5 results](ANYPS5_WINE.md). Upstream facts and counters below retain their dated review scope.

@@ -15,6 +15,12 @@ struct PS5CollectionGame: Codable, Identifiable, Sendable, Equatable {
 struct PS5EngineConfiguration: Codable, Sendable, Equatable {
     let path: String
     let version: String
+
+    // Older collection documents only stored a Kyty executable path. Deriving
+    // the kind from the validated executable name keeps those documents valid.
+    var name: String {
+        URL(fileURLWithPath: path).lastPathComponent == "SharpEmu" ? "SharpEmu" : "KytyPS5"
+    }
 }
 
 enum PS5CollectionError: LocalizedError {
@@ -163,7 +169,7 @@ enum PS5CollectionStorage {
         }
         if let engine = document.engine {
             guard engine.path.hasPrefix("/"), try checkedPath(URL(fileURLWithPath: engine.path)).path == engine.path,
-                  URL(fileURLWithPath: engine.path).lastPathComponent == "kyty_emulator",
+                  ["kyty_emulator", "SharpEmu"].contains(URL(fileURLWithPath: engine.path).lastPathComponent),
                   !engine.version.isEmpty, engine.version.utf8.count <= 128,
                   !engine.version.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
                 throw PS5CollectionError.invalid("The recorded PS5 engine is invalid.")
@@ -293,7 +299,7 @@ enum PS5CollectionStorage {
             return Set(try slice(0, attributes.st_size).map { [$0] } ?? [])
         }
         guard magic == [0xca, 0xfe, 0xba, 0xbe] else {
-            throw PS5CollectionError.invalid("Choose a macOS kyty_emulator binary, not a Windows or Linux build.")
+            throw PS5CollectionError.invalid("Choose a macOS PS5 engine, not a Windows or Linux build.")
         }
         let count = uint32(header, 4, little: false)
         guard count > 0, count <= 32, Int64(8 + count * 20) <= attributes.st_size else {
@@ -317,23 +323,42 @@ enum PS5CollectionStorage {
             defer { Darwin.close(directoryFD) }
             path = try canonicalPath(directoryFD)
             let candidates = [path.appendingPathComponent("kyty_emulator"),
-                              path.appendingPathComponent("Contents/MacOS/kyty_emulator")]
+                              path.appendingPathComponent("Contents/MacOS/kyty_emulator"),
+                              path.appendingPathComponent("SharpEmu"),
+                              path.appendingPathComponent("Contents/MacOS/SharpEmu")]
             guard let executable = candidates.first(where: { candidate in
                 var entry = stat()
                 return lstat(candidate.path, &entry) == 0 && (entry.st_mode & S_IFMT) == S_IFREG
             }) else {
-                throw PS5CollectionError.invalid("Choose a complete KytyPS5 Mac package containing kyty_emulator.")
+                throw PS5CollectionError.invalid("Choose a complete KytyPS5 or SharpEmu Mac package.")
             }
             path = executable
         }
-        guard path.lastPathComponent == "kyty_emulator", access(path.path, X_OK) == 0 else {
-            throw PS5CollectionError.invalid("Choose the executable named kyty_emulator from a KytyPS5 Mac release.")
+        guard ["kyty_emulator", "SharpEmu"].contains(path.lastPathComponent), access(path.path, X_OK) == 0 else {
+            throw PS5CollectionError.invalid("Choose a KytyPS5 or SharpEmu Mac executable.")
         }
         let architectures = try architectures(path, requiredFileType: 2)
         guard !architectures.isEmpty else { throw PS5CollectionError.invalid("The PS5 engine must support arm64 or x86-64 macOS.") }
         if !architectures.contains("arm64"),
            access("/Library/Apple/usr/libexec/oah/libRosettaRuntime", R_OK) != 0 {
             throw PS5CollectionError.invalid("This x86-64 PS5 engine requires Rosetta 2. Install Rosetta before attaching it.")
+        }
+        // The SharpEmu macOS edition has its own Metal renderer; it does not
+        // require Kyty's MoltenVK dependency.
+        if path.lastPathComponent == "SharpEmu" {
+            let directory = path.deletingLastPathComponent()
+            let required = ["SharpEmu.dll", "SharpEmu.runtimeconfig.json", "SharpEmu.deps.json",
+                            "libhostfxr.dylib", "libhostpolicy.dylib", "libcoreclr.dylib"]
+            for name in required {
+                let fd: Int32
+                do { fd = try fileDescriptor(directory.appendingPathComponent(name)) }
+                catch { throw PS5CollectionError.invalid("Choose a complete SharpEmu Mac package, including its .NET runtime files.") }
+                var file = stat()
+                let valid = fstat(fd, &file) == 0 && file.st_size > 0
+                Darwin.close(fd)
+                guard valid else { throw PS5CollectionError.invalid("The selected SharpEmu package is incomplete.") }
+            }
+            return PS5EngineConfiguration(path: path.path, version: "Not recorded")
         }
         let parent = path.deletingLastPathComponent()
         let selectedArchitecture = architectures.contains("arm64") ? "arm64" : "x86_64"
@@ -416,11 +441,13 @@ private final class PS5OwnedSession: @unchecked Sendable {
     private var closed = false
     private var stopRequested = false
     private let readFD: Int32
+    private let expectsIsolatedGroup: Bool
     private static let maximumLogBytes = 4 * 1024 * 1024
 
-    init(process: Process, logURL: URL) throws {
+    init(process: Process, logURL: URL, expectsIsolatedGroup: Bool = false) throws {
         self.process = process
         self.logURL = logURL
+        self.expectsIsolatedGroup = expectsIsolatedGroup
         readFD = pipe.fileHandleForReading.fileDescriptor
         let fd = Darwin.open(logURL.path, O_WRONLY | O_CREAT | O_CLOEXEC | PS5CollectionStorage.noFollowAny | O_NONBLOCK, mode_t(0o600))
         guard fd >= 0 else { throw PS5CollectionError.invalid("The PS5 session log could not be created.") }
@@ -459,6 +486,12 @@ private final class PS5OwnedSession: @unchecked Sendable {
         lock.lock()
         stopRequested = true
         lock.unlock()
+        guard process.isRunning else { return }
+        let pid = process.processIdentifier
+        // SharpEmu creates its own group when passed SHARPEMU_OWNER_PID. Only
+        // signal that group if the still-owned leader demonstrably created it.
+        if expectsIsolatedGroup, pid > 1, getpgid(pid) == pid, pid != getpgrp(),
+           Darwin.kill(-pid, SIGTERM) == 0 { return }
         if process.isRunning { process.terminate() }
     }
 
@@ -577,16 +610,31 @@ final class PS5CollectionModel: ObservableObject {
             _ = focus(game)
             return
         }
-        guard let engine else { throw PS5CollectionError.invalid("Choose your KytyPS5 Mac engine before opening this game.") }
+        guard let engine else { throw PS5CollectionError.invalid("Choose your PS5 engine before opening this game.") }
         _ = try PS5CollectionStorage.checkedEngine(URL(fileURLWithPath: engine.path))
         _ = try PS5CollectionStorage.importPath(URL(fileURLWithPath: game.path), includeArtwork: false)
         let logDirectory = storageDirectory.appendingPathComponent("ps5-sessions", isDirectory: true)
         try PS5CollectionStorage.ensureDirectory(logDirectory)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: engine.path)
-        process.arguments = ["--game", game.path]
+        if engine.name == "SharpEmu" {
+            var environment = ProcessInfo.processInfo.environment
+            environment["SHARPEMU_OWNER_PID"] = String(getpid())
+            process.environment = environment
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: game.path, isDirectory: &isDirectory) else {
+                throw PS5CollectionError.invalid("The game files are no longer available.")
+            }
+            let input = isDirectory.boolValue
+                ? URL(fileURLWithPath: game.path).appendingPathComponent("eboot.bin").path
+                : game.path
+            process.arguments = [input]
+        } else {
+            process.arguments = ["--game", game.path]
+        }
         process.currentDirectoryURL = URL(fileURLWithPath: engine.path).deletingLastPathComponent()
-        let session = try PS5OwnedSession(process: process, logURL: logDirectory.appendingPathComponent("\(game.id).log"))
+        let session = try PS5OwnedSession(process: process, logURL: logDirectory.appendingPathComponent("\(game.id).log"),
+                                          expectsIsolatedGroup: engine.name == "SharpEmu")
         process.terminationHandler = { [weak self, weak session] _ in
             session?.close()
             Task { @MainActor in
@@ -614,7 +662,7 @@ final class PS5CollectionModel: ObservableObject {
     func stop(_ game: PS5CollectionGame) async throws {
         guard let session = sessions[game.id] else { return }
         session.requestStop()
-        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        let deadline = ProcessInfo.processInfo.systemUptime + 6
         while session.process.isRunning, ProcessInfo.processInfo.systemUptime < deadline {
             try await Task.sleep(nanoseconds: 40_000_000)
         }
@@ -634,7 +682,7 @@ final class PS5CollectionModel: ObservableObject {
         do {
             let owned = sessions
             for session in owned.values where session.process.isRunning { session.requestStop() }
-            let deadline = ProcessInfo.processInfo.systemUptime + 3
+            let deadline = ProcessInfo.processInfo.systemUptime + 6
             while owned.values.contains(where: { $0.process.isRunning }), ProcessInfo.processInfo.systemUptime < deadline {
                 try await Task.sleep(nanoseconds: 40_000_000)
             }
@@ -653,7 +701,16 @@ final class PS5CollectionModel: ObservableObject {
         }
     }
 
+    // If another part of app termination fails, let the user continue using
+    // this collection after the already-stopped PS5 sessions.
+    func resumeAfterQuitFailure() {
+        quitting = false
+    }
+
     func focus(_ game: PS5CollectionGame) -> Bool {
+        // SharpEmu's separate GPU helper can own its window; activating the
+        // CLI process would report success without necessarily showing it.
+        guard engine?.name != "SharpEmu" else { return false }
         guard let session = sessions[game.id], session.process.isRunning,
               let app = NSRunningApplication(processIdentifier: session.process.processIdentifier) else { return false }
         return app.activate(options: [.activateAllWindows])

@@ -2,16 +2,15 @@ import AppKit
 import SwiftUI
 
 enum CollectionPlatform: String, CaseIterable, Identifiable {
-    case all, windows, ps5, browser
-    // Keep the legacy case available for existing metadata and tests without
-    // presenting the suspended PS5 integration in the interface.
-    static let visibleCases: [CollectionPlatform] = [.all, .windows, .browser]
+    case all, windows, ps5, switchGame, browser
+    // PS5 support is experimental and requires a separately supplied engine.
+    static let visibleCases: [CollectionPlatform] = [.all, .windows, .ps5, .switchGame, .browser]
     var id: String { rawValue }
     var title: String {
-        switch self { case .all: "All"; case .windows: "Windows"; case .ps5: "PS5"; case .browser: "Browser" }
+        switch self { case .all: "All"; case .windows: "Windows"; case .ps5: "PS5"; case .switchGame: "Switch"; case .browser: "Browser" }
     }
     var symbol: String {
-        switch self { case .all: "square.grid.2x2"; case .windows: "desktopcomputer"; case .ps5: "gamecontroller"; case .browser: "safari" }
+        switch self { case .all: "square.grid.2x2"; case .windows: "desktopcomputer"; case .ps5: "gamecontroller"; case .switchGame: "gamecontroller"; case .browser: "safari" }
     }
 }
 
@@ -271,7 +270,7 @@ struct CollectionGrid: View {
     private var isEmptyTypeFilter: Bool {
         guard kind != nil else { return false }
         return entries.contains { platform == .all || $0.platform == platform }
-            || (kind == .app && (platform == .ps5 || platform == .browser))
+            || (kind == .app && (platform == .ps5 || platform == .switchGame || platform == .browser))
     }
 
     private var emptyTitle: String {
@@ -279,6 +278,7 @@ struct CollectionGrid: View {
         if isEmptyTypeFilter { return kind == .app ? "No apps in this view" : "No games in this view" }
         if openFolder != nil { return "Nothing here yet" }
         if platform == .ps5 { return "No PS5 games yet" }
+        if platform == .switchGame { return "No Switch games yet" }
         if platform == .browser { return "No browser games yet" }
         return kind == .app ? "No apps yet" : "Your collection starts here"
     }
@@ -289,6 +289,7 @@ struct CollectionGrid: View {
         if isEmptyTypeFilter { return "Change the item filter to see the rest of your collection." }
         if openFolder != nil { return "Install apps with +, or open this bottle’s store to add games." }
         if platform == .ps5 { return "Import a game you own with the + menu." }
+        if platform == .switchGame { return "Add a game you own with the + menu." }
         if platform == .browser { return "Save a game from Discover, or add your own link with +." }
         if kind == .app { return "Add an app from Discover or the + menu." }
         return "Add games and apps from Discover or the + menu."

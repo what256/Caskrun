@@ -612,6 +612,7 @@ private struct CaskrunStatusBridge: View {
     @Binding var openBottleID: String?
     @ObservedObject var model: CaskrunModel
     @ObservedObject var ps5: PS5CollectionModel
+    @ObservedObject var switchGames: SwitchCollectionModel
     @ObservedObject var appUpdates: CaskrunAppUpdates
     @Binding var selectedCollectionID: String?
     @Binding var inspectingBottleOnly: Bool
@@ -658,14 +659,22 @@ private struct CaskrunStatusBridge: View {
                 }
             }
             delegate.shutdownOwnedApps = {
-                guard await model.shutdownForQuit() else { return false }
+                switchGames.prepareForQuit()
+                guard await model.shutdownForQuit() else { switchGames.resumeAfterQuitFailure(); return false }
                 guard await ps5.shutdownForQuit() else {
                     model.resumeAfterQuitFailure(ps5.error ?? "A PS5 session could not be stopped.")
+                    switchGames.resumeAfterQuitFailure()
+                    return false
+                }
+                guard await switchGames.shutdownForQuit() else {
+                    model.resumeAfterQuitFailure(switchGames.error ?? "The Switch session could not be stopped.")
+                    switchGames.resumeAfterQuitFailure()
+                    ps5.resumeAfterQuitFailure()
                     return false
                 }
                 return true
             }
-            delegate.resumeAfterTerminationFailure = { model.resumeAfterUpdateFailure() }
+            delegate.resumeAfterTerminationFailure = { model.resumeAfterUpdateFailure(); ps5.resumeAfterQuitFailure(); switchGames.resumeAfterQuitFailure() }
             delegate.requiresInstallationFileOwnerVerification = {
                 appUpdates.requiresInstallationFileOwnerVerification
             }
@@ -2970,22 +2979,35 @@ struct CaskrunApp: App {
     @StateObject private var model: CaskrunModel
     @StateObject private var catalogArtwork = CatalogArtworkStore()
     @StateObject private var ps5: PS5CollectionModel
+    @StateObject private var switchGames: SwitchCollectionModel
     @StateObject private var appUpdates: CaskrunAppUpdates
 
     init() {
         let model = CaskrunModel()
-        // Keep existing PS5 metadata untouched while the experimental feature is unavailable.
-        let ps5 = PS5CollectionModel(enabled: false)
+        // PS5 support remains experimental; compatibility depends on the selected engine.
+        let ps5 = PS5CollectionModel()
+        let switchGames = SwitchCollectionModel()
+        _switchGames = StateObject(wrappedValue: switchGames)
         _model = StateObject(wrappedValue: model)
         _ps5 = StateObject(wrappedValue: ps5)
         _appUpdates = StateObject(wrappedValue: CaskrunAppUpdates(prepareForQuit: {
-            guard await model.shutdownForQuit() else { return false }
+            switchGames.prepareForQuit()
+            guard await model.shutdownForQuit() else { switchGames.resumeAfterQuitFailure(); return false }
             guard await ps5.shutdownForQuit() else {
                 model.resumeAfterQuitFailure(ps5.error ?? "A PS5 session could not be stopped.")
+                switchGames.resumeAfterQuitFailure()
+                return false
+            }
+            guard await switchGames.shutdownForQuit() else {
+                model.resumeAfterQuitFailure(switchGames.error ?? "The Switch session could not be stopped.")
+                switchGames.resumeAfterQuitFailure()
+                ps5.resumeAfterQuitFailure()
                 return false
             }
             return true
         }, recoverAfterInstallationFailure: {
+            ps5.resumeAfterQuitFailure()
+            switchGames.resumeAfterQuitFailure()
             model.resumeAfterUpdateFailure()
         }, reportMessage: { model.message = $0 }))
     }
@@ -2993,6 +3015,7 @@ struct CaskrunApp: App {
     @State private var collectionPlatform: CollectionPlatform = .all
     @State private var collectionKind: CollectionItemKind?
     @State private var showingPS5Import = false
+    @State private var showingSwitchImport = false
     @State private var ps5Artwork: [String: NSImage] = [:]
     @State private var requestedPS5Artwork: Set<String> = []
     @State private var ps5ArtworkOrder: [String] = []
@@ -3284,7 +3307,7 @@ struct CaskrunApp: App {
                                         didChooseInitialPage: $didChooseInitialPage,
                                         showingBottleInspector: $showingBottleInspector,
                                         openBottleID: $openBottleID,
-                                        model: model, ps5: ps5, appUpdates: appUpdates,
+                                        model: model, ps5: ps5, switchGames: switchGames, appUpdates: appUpdates,
                                         selectedCollectionID: $collectionSelectedID, inspectingBottleOnly: $inspectingBottleOnly, delegate: appDelegate))
         .onAppear {
             model.refresh()
@@ -3355,6 +3378,7 @@ struct CaskrunApp: App {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if page == .collection {
                 ps5.refresh()
+                switchGames.refresh()
                 Task { await model.refreshGameLibrary() }
             }
         }
@@ -3486,6 +3510,9 @@ struct CaskrunApp: App {
             .sheet(item: $notesBottle) { bottle in
                 BottleNotesView(model: model, bottle: bottle)
             }
+            .sheet(isPresented: $showingSwitchImport) {
+                ImportSwitchGameSheet(model: switchGames) { game in selectSwitchGame(game) }
+            }
             .sheet(isPresented: $showingPS5Import) {
                 ImportPS5GameSheet(model: ps5) { game in
                     selectPS5Game(game)
@@ -3571,6 +3598,8 @@ struct CaskrunApp: App {
             Menu {
                 Button("Discover apps") { navigate(to: .discover) }
                 Button("Add browser game…") { browserGameRequest = AddBrowserGameRequest() }
+                Button("Add Switch game…") { beginSwitchImport() }
+                Button("Import PS5 game…") { beginPS5Import() }
                 Button("Install Steam game…") { steamInstallRequest = SteamGameInstallRequest(appID: nil, name: nil) }
                     .disabled(model.status.wine_path == nil || model.isLaunching || model.isManagingBottle)
                 Button("Install from file…") { model.chooseInstaller(in: page == .collection ? openBottleID : nil) }
@@ -3667,6 +3696,10 @@ struct CaskrunApp: App {
                                 }
                             }.font(.caption)
                         }
+                        if let error = switchGames.error {
+                            Label(error, systemImage: "exclamationmark.circle")
+                                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
                         if let error = ps5.error {
                             Label(error, systemImage: "exclamationmark.circle")
                                 .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
@@ -3690,8 +3723,13 @@ struct CaskrunApp: App {
                                        navigate(to: .discover)
                                    }, onImportPS5: beginPS5Import)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                if let game = selectedPS5Game {
-                    PS5GameInspector(model: ps5, game: game, onClose: closeCollectionInspector)
+                if let game = selectedSwitchGame {
+                    SwitchGameInspector(model: switchGames, game: game, onClose: closeCollectionInspector, isQuitting: model.isQuitting)
+                        .frame(height: max(0, viewport.size.height - 36))
+                        .padding(.top, 20).padding(.trailing, 16).padding(.bottom, 16)
+                        .transition(.identity)
+                } else if let game = selectedPS5Game {
+                    PS5GameInspector(model: ps5, game: game, onClose: closeCollectionInspector, isQuitting: model.isQuitting)
                         .frame(height: max(0, viewport.size.height - 36))
                         .padding(.top, 20).padding(.trailing, 16).padding(.bottom, 16)
                         .transition(.identity)
@@ -3714,12 +3752,16 @@ struct CaskrunApp: App {
         switch collectionPlatform {
         case .all, .windows: gameLibraryWarnings
         case .browser: model.browserGamesError.map { [$0] } ?? []
-        case .ps5: []
+        case .ps5, .switchGame: []
         }
     }
 
     private var selectedCollectionItem: CollectionItem? {
         collectionItems.first { $0.id == collectionSelectedID }
+    }
+
+    private var selectedSwitchGame: SwitchCollectionGame? {
+        switchGames.games.first { "switch:\($0.id)" == collectionSelectedID }
     }
 
     private var selectedPS5Game: PS5CollectionGame? {
@@ -3740,13 +3782,19 @@ struct CaskrunApp: App {
                            openActionTitle: entry.source == .epic || entry.source == .gog ? "Open store" : nil,
                            bottleID: collectionBottleID(for: entry))
         }
+        items += switchGames.games.map { game in
+            CollectionItem(id: "switch:\(game.id)", name: game.name, platform: .switchGame, kind: .game,
+                           subtitle: "Switch · Suyu", canOpen: !model.isQuitting && !switchGames.launching && switchGames.enginePath != nil,
+                           openActionTitle: "Open game")
+        }
         items += ps5.games.map { game in
             CollectionItem(id: "ps5:\(game.id)", name: game.name, platform: .ps5, kind: .game,
                            subtitle: "PS5 · Experimental", icon: ps5Artwork[game.id],
                            artworkRevision: game.path + String(game.createdAt),
-                           canOpen: !model.isQuitting && !ps5.busy && ps5.engine != nil,
+                           canOpen: !model.isQuitting && !ps5.busy && ps5.engine != nil &&
+                               !(ps5.runningGameIDs.contains(game.id) && ps5.engine?.name == "SharpEmu"),
                            status: ps5.runningGameIDs.contains(game.id) ? "Running" : "",
-                           openActionTitle: ps5.runningGameIDs.contains(game.id) ? "Show window" : "Open game")
+                           openActionTitle: ps5.runningGameIDs.contains(game.id) && ps5.engine?.name != "SharpEmu" ? "Show window" : "Open game")
         }
         return items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
@@ -3789,6 +3837,23 @@ struct CaskrunApp: App {
         model.runLauncher(launcher, in: bottle)
     }
 
+    private func beginSwitchImport() {
+        closeCollectionInspector()
+        page = .collection
+        collectionPlatform = .switchGame
+        collectionKind = nil
+        showingSwitchImport = true
+    }
+
+    private func selectSwitchGame(_ game: SwitchCollectionGame) {
+        guard switchGames.games.contains(where: { $0.id == game.id }) else { return }
+        inspectingBottleOnly = false
+        openBottleID = nil
+        showingBottleInspector = false
+        selectedSteamGameID = nil
+        collectionSelectedID = "switch:\(game.id)"
+    }
+
     private func beginPS5Import() {
         closeCollectionInspector()
         page = .collection
@@ -3810,6 +3875,9 @@ struct CaskrunApp: App {
 
     private func selectCollectionItem(_ item: CollectionItem) {
         guard !model.isQuitting else { return }
+        if let game = switchGames.games.first(where: { "switch:\($0.id)" == item.id }) {
+            selectSwitchGame(game); return
+        }
         if let game = ps5.games.first(where: { "ps5:\($0.id)" == item.id }) {
             selectPS5Game(game); return
         }
@@ -3847,6 +3915,13 @@ struct CaskrunApp: App {
     private func openCollectionItem(_ item: CollectionItem) {
         guard !model.isQuitting,
               let current = collectionItems.first(where: { $0.id == item.id }), current.canOpen else { return }
+        if let game = switchGames.games.first(where: { "switch:\($0.id)" == item.id }) {
+            Task {
+                do { try await switchGames.launch(game) }
+                catch { model.message = error.localizedDescription }
+            }
+            return
+        }
         if let game = ps5.games.first(where: { "ps5:\($0.id)" == item.id }) {
             do {
                 if ps5.runningGameIDs.contains(game.id) {

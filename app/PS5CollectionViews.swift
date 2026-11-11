@@ -19,7 +19,7 @@ enum PS5CollectionPicker {
     static func engine() async -> URL? {
         let panel = NSOpenPanel()
         panel.title = "Choose PS5 engine"
-        panel.message = "Choose your complete KytyPS5 Mac folder or app, including its MoltenVK library."
+        panel.message = "Choose your SharpEmu app or a complete KytyPS5 Mac folder."
         panel.prompt = "Choose Package"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -100,7 +100,7 @@ struct ImportPS5GameSheet: View {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("PS5 engine").font(.system(size: 13, weight: .medium))
-                    Text(model.engine == nil ? "Choose KytyPS5 now or after importing." : "KytyPS5 is selected.")
+                    Text(model.engine.map { "\($0.name) is selected." } ?? "Choose SharpEmu or KytyPS5 now or after importing.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -109,7 +109,12 @@ struct ImportPS5GameSheet: View {
                 }
                 .disabled(busy || !model.runningGameIDs.isEmpty)
             }
-            Text("Experimental: importing does not verify game compatibility. Controller, graphics and save support depend on KytyPS5 and the game.")
+            HStack(spacing: 6) {
+                Link("Get SharpEmu for Mac", destination: URL(string: "https://github.com/sharpemu/sharpemu-mac/releases")!)
+                Text("· Emulator and games are not included.")
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            Text("Experimental: importing does not verify game compatibility. Controller, graphics and save support depend on the engine and game.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 
             if let error {
@@ -196,6 +201,7 @@ struct PS5GameInspector: View {
     @ObservedObject var model: PS5CollectionModel
     let game: PS5CollectionGame
     let onClose: () -> Void
+    var isQuitting = false
     @State private var selectingEngine = false
     @State private var stopping = false
     @State private var confirmRemove = false
@@ -203,7 +209,8 @@ struct PS5GameInspector: View {
     @State private var showEngineDetails = false
 
     private var running: Bool { model.runningGameIDs.contains(game.id) }
-    private var busy: Bool { model.busy || selectingEngine || stopping }
+    private var busy: Bool { model.busy || selectingEngine || stopping || isQuitting }
+    private var canShowRunningWindow: Bool { model.engine?.name != "SharpEmu" }
     private var gameURL: URL { URL(fileURLWithPath: game.path) }
     private var gameExists: Bool { FileManager.default.fileExists(atPath: game.path) }
 
@@ -237,13 +244,13 @@ struct PS5GameInspector: View {
 
                     VStack(alignment: .leading, spacing: 10) {
                         Button { openGame() } label: {
-                            Label(running ? "Show Window" : "Open " + game.name,
+                            Label(running ? (canShowRunningWindow ? "Show Window" : "Running") : "Open " + game.name,
                                   systemImage: running ? "macwindow" : "play.fill")
                                 .font(.system(size: 13, weight: .semibold))
                                 .frame(maxWidth: .infinity).frame(height: 30)
                         }
                         .buttonStyle(.borderedProminent).tint(.accentColor)
-                        .disabled(busy || (!running && (model.engine == nil || !gameExists)))
+                        .disabled(busy || (running && !canShowRunningWindow) || (!running && (model.engine == nil || !gameExists)))
                         if running {
                             Button { Task { await stopGame() } } label: {
                                 Label(stopping ? "Stopping…" : "Stop Game", systemImage: "stop.fill")
@@ -256,7 +263,7 @@ struct PS5GameInspector: View {
                                   systemImage: "folder.badge.questionmark")
                                 .font(.caption).foregroundStyle(.secondary)
                         } else {
-                            Text(running ? "Running with KytyPS5." : "Compatibility has not been verified in Caskrun.")
+                            Text(running ? "Running with \(model.engine?.name ?? "PS5 engine")." : "Compatibility has not been verified in Caskrun.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -266,7 +273,7 @@ struct PS5GameInspector: View {
                         HStack {
                             Text("Engine").font(.system(size: 13, weight: .semibold))
                             Spacer()
-                            Text(model.engine == nil ? "Not selected" : "KytyPS5")
+                            Text(model.engine?.name ?? "Not selected")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         action(model.engine == nil ? "Choose Engine…" : "Change Engine…", symbol: "cpu") {
@@ -302,7 +309,7 @@ struct PS5GameInspector: View {
                                 NSWorkspace.shared.activateFileViewerSelecting([logsURL])
                             }
                         }
-                        Text("Controller, graphics and save support are managed by KytyPS5. Available features vary by game.")
+                        Text("Controller, graphics and save support are managed by the selected engine. Available features vary by game.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
 

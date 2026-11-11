@@ -217,6 +217,51 @@ struct PS5CollectionTests {
         try expect(model.engine?.path == bundledEngine.path, "explicit app package resolves engine and Frameworks dependency")
         try await model.configureEngine(path: fixtureDirectory)
         try expect(PS5CollectionModel(storageDirectory: dataDirectory).engine == model.engine, "engine metadata round trip")
+        try expect(model.engine?.name == "KytyPS5", "legacy engine path retains its Kyty identity")
+        let sharpBundle = root.appendingPathComponent("SharpEmu.app", isDirectory: true)
+        let sharpExecutableDirectory = sharpBundle.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        try FileManager.default.createDirectory(at: sharpExecutableDirectory, withIntermediateDirectories: true)
+        let sharpEngine = sharpExecutableDirectory.appendingPathComponent("SharpEmu")
+        let sharpSource = fixtureDirectory.appendingPathComponent("sharp.c")
+        try Data("""
+        #include <signal.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        #include <sys/wait.h>
+        #include <unistd.h>
+        static volatile sig_atomic_t active = 1;
+        static void stop(int sig) { active = 0; }
+        int main(int argc, char **argv) {
+          const char *owner = getenv("SHARPEMU_OWNER_PID");
+          if (!owner || atoi(owner) != getppid() || setpgid(0, 0) != 0) return 41;
+          pid_t parent = getpid();
+          pid_t child = fork();
+          if (child < 0) return 42;
+          if (child == 0) { while (getppid() == parent) usleep(20000); return 46; }
+          signal(SIGTERM, stop);
+          printf("%d\\n%s\\n\\n", argc, argc > 1 ? argv[1] : "");
+          char bytes[4096] = {0};
+          for (int i = 0; i < 1050; i++) fwrite(bytes, 1, sizeof(bytes), stdout);
+          fflush(stdout);
+          while (active) usleep(20000);
+          usleep(3200000);
+          int status = 0;
+          if (waitpid(child, &status, WNOHANG) != child || !WIFSIGNALED(status) || WTERMSIG(status) != SIGTERM) return 43;
+          char marker[4096];
+          if (snprintf(marker, sizeof(marker), "%s.fixture-ok", argv[1]) >= sizeof(marker)) return 44;
+          FILE *out = fopen(marker, "w");
+          if (!out) return 45;
+          fclose(out);
+          return 0;
+        }
+        """.utf8).write(to: sharpSource)
+        try compile(["-arch", "arm64", sharpSource.path, "-o", sharpEngine.path])
+        try refuses("incomplete SharpEmu app rejected", { _ = try PS5CollectionStorage.checkedEngine(sharpBundle) })
+        for name in ["SharpEmu.dll", "SharpEmu.runtimeconfig.json", "SharpEmu.deps.json",
+                     "libhostfxr.dylib", "libhostpolicy.dylib", "libcoreclr.dylib"] {
+            try Data([1]).write(to: sharpExecutableDirectory.appendingPathComponent(name))
+        }
         let external = Process()
         external.executableURL = enginePath
         external.standardOutput = FileHandle.nullDevice
@@ -262,14 +307,50 @@ struct PS5CollectionTests {
             try await model.stop(game)
             try expect(model.runningGameIDs.isEmpty && external.isRunning, "stop preserves independent process")
             try expect(model.error == nil, "requested termination is not reported as an engine crash")
+            try await model.configureEngine(path: sharpBundle)
+            try expect(model.engine?.path == sharpEngine.path && model.engine?.name == "SharpEmu", "SharpEmu app recognized without requiring MoltenVK")
+            try expect(PS5CollectionModel(storageDirectory: dataDirectory).engine == model.engine, "SharpEmu engine metadata round trip")
+            try model.launch(game)
+            let sharpDeadline = ProcessInfo.processInfo.systemUptime + 3
+            var sharpLog = Data()
+            while ProcessInfo.processInfo.systemUptime < sharpDeadline {
+                if let log = model.logsURL(for: game), let data = try? Data(contentsOf: log) { sharpLog = data }
+                if sharpLog.count == 4 * 1024 * 1024 { break }
+                try await Task.sleep(nanoseconds: 40_000_000)
+            }
+            let sharpHeader = Data("2\n\(game.path)/eboot.bin\n\n".utf8)
+            try expect(sharpLog.starts(with: sharpHeader), "SharpEmu receives the folder's eboot as its sole argument")
+            let stopStart = ProcessInfo.processInfo.systemUptime
+            try await model.stop(game)
+            try expect(ProcessInfo.processInfo.systemUptime - stopStart >= 3,
+                       "owned SharpEmu helper receives group termination and delayed shutdown is allowed")
+            try expect(FileManager.default.fileExists(atPath: gameFolder.appendingPathComponent("eboot.bin.fixture-ok").path),
+                       "owned SharpEmu helper exited on group SIGTERM")
+            try model.launch(archiveGame)
+            let archiveDeadline = ProcessInfo.processInfo.systemUptime + 3
+            var archiveLog = Data()
+            while ProcessInfo.processInfo.systemUptime < archiveDeadline {
+                if let log = model.logsURL(for: archiveGame), let data = try? Data(contentsOf: log) { archiveLog = data }
+                if archiveLog.count == 4 * 1024 * 1024 { break }
+                try await Task.sleep(nanoseconds: 40_000_000)
+            }
+            try expect(archiveLog.starts(with: Data("2\n\(archive.path)\n\n".utf8)), "SharpEmu receives an archive unchanged")
+            try await model.stop(archiveGame)
+            try expect(FileManager.default.fileExists(atPath: archive.path + ".fixture-ok"), "archive helper also exits with its owner")
+            try await model.configureEngine(path: fixtureDirectory)
             try model.launch(game)
             let shutdown = await model.shutdownForQuit()
             try expect(shutdown && model.runningGameIDs.isEmpty && external.isRunning, "quit stops only model-owned session")
             try refuses("successful shutdown prevents new launch", { try model.launch(game) })
+            model.resumeAfterQuitFailure()
+            try model.launch(game)
+            try expect(model.runningGameIDs == [game.id], "cancelled application quit restores PS5 launch availability")
+            let secondShutdown = await model.shutdownForQuit()
+            try expect(secondShutdown && model.runningGameIDs.isEmpty, "resumed PS5 session can be stopped on the next quit")
             try restored.removeGame(game)
             try expect(restored.games.isEmpty && FileManager.default.fileExists(atPath: gameFolder.appendingPathComponent("eboot.bin").path), "remove only changes collection metadata")
             let externalStopped = await stopExternalFixture()
-            ownedProcessesStopped = shutdown && externalStopped
+            ownedProcessesStopped = shutdown && secondShutdown && externalStopped
             try expect(ownedProcessesStopped, "all explicitly owned fixture processes stopped before cleanup")
         } catch {
             let modelStopped = await model.shutdownForQuit()
